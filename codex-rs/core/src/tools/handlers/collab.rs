@@ -728,14 +728,14 @@ fn collab_agent_error(agent_id: ThreadId, err: CodexErr) -> FunctionCallError {
     }
 }
 
-fn thread_spawn_source(parent_thread_id: ThreadId, depth: i32) -> SessionSource {
+pub(super) fn thread_spawn_source(parent_thread_id: ThreadId, depth: i32) -> SessionSource {
     SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,
         depth,
     })
 }
 
-fn parse_collab_input(
+pub(super) fn parse_collab_input(
     message: Option<String>,
     items: Option<Vec<UserInput>>,
 ) -> Result<Vec<UserInput>, FunctionCallError> {
@@ -768,7 +768,7 @@ fn parse_collab_input(
     }
 }
 
-fn input_preview(items: &[UserInput]) -> String {
+pub(super) fn input_preview(items: &[UserInput]) -> String {
     let parts: Vec<String> = items
         .iter()
         .map(|item| match item {
@@ -786,7 +786,7 @@ fn input_preview(items: &[UserInput]) -> String {
     parts.join("\n")
 }
 
-fn build_agent_spawn_config(
+pub(super) fn build_agent_spawn_config(
     base_instructions: &BaseInstructions,
     turn: &TurnContext,
     child_depth: i32,

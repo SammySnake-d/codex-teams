@@ -221,6 +221,7 @@ use crate::tasks::RegularTask;
 use crate::tasks::ReviewTask;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
+use crate::team::TeamRegistry;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::js_repl::JsReplHandle;
@@ -1279,6 +1280,7 @@ impl Session {
             skills_manager,
             file_watcher,
             agent_control,
+            team_registry: Arc::new(TeamRegistry::default()),
             network_proxy,
             network_approval: Arc::clone(&network_approval),
             state_db: state_db_ctx.clone(),
@@ -7046,6 +7048,7 @@ mod tests {
             skills_manager,
             file_watcher,
             agent_control,
+            team_registry: Arc::new(TeamRegistry::default()),
             network_proxy: None,
             network_approval: Arc::clone(&network_approval),
             state_db: None,
@@ -7194,6 +7197,7 @@ mod tests {
             skills_manager,
             file_watcher,
             agent_control,
+            team_registry: Arc::new(TeamRegistry::default()),
             network_proxy: None,
             network_approval: Arc::clone(&network_approval),
             state_db: None,

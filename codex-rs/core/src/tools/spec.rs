@@ -8,6 +8,7 @@ use crate::features::Features;
 use crate::mcp_connection_manager::ToolInfo;
 use crate::tools::handlers::PLAN_TOOL;
 use crate::tools::handlers::SEARCH_TOOL_BM25_DEFAULT_LIMIT;
+use crate::tools::handlers::TeamHandler;
 use crate::tools::handlers::apply_patch::create_apply_patch_freeform_tool;
 use crate::tools::handlers::apply_patch::create_apply_patch_json_tool;
 use crate::tools::handlers::collab::DEFAULT_WAIT_TIMEOUT_MS;
@@ -558,6 +559,169 @@ fn create_spawn_agent_tool() -> ToolSpec {
         parameters: JsonSchema::Object {
             properties,
             required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_create_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "name".to_string(),
+        JsonSchema::String {
+            description: Some("Human-readable team name.".to_string()),
+        },
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "create_team".to_string(),
+        description: "Create a live Codex team registry entry before spawning teammates. Use this when the user asks for an agent team or parallel teammates."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["name".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_list_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: "list_teams".to_string(),
+        description: "List live-session-only Codex teams and their current member/task summaries."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties: BTreeMap::new(),
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_status_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "team_id".to_string(),
+        JsonSchema::String {
+            description: Some("Team id from create_team or list_teams.".to_string()),
+        },
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_status".to_string(),
+        description: "Return one team's members, messages, tasks, and event feed.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_spawn_member_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_id".to_string(),
+            JsonSchema::String {
+                description: Some("Team id from create_team.".to_string()),
+            },
+        ),
+        (
+            "name".to_string(),
+            JsonSchema::String {
+                description: Some("Human-readable teammate name.".to_string()),
+            },
+        ),
+        (
+            "profile".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional generic capability/profile note. Do not encode workflow policy here."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "message".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Initial plain-text task for the teammate. Use either message or items."
+                        .to_string(),
+                ),
+            },
+        ),
+        ("items".to_string(), create_collab_input_items_schema()),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_spawn_member".to_string(),
+        description:
+            "Spawn one teammate in an existing team using the existing Codex agent lifecycle."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string(), "name".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_send_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_id".to_string(),
+            JsonSchema::String {
+                description: Some("Team id from create_team.".to_string()),
+            },
+        ),
+        (
+            "member_id".to_string(),
+            JsonSchema::String {
+                description: Some("Member id from team_spawn_member or team_status.".to_string()),
+            },
+        ),
+        (
+            "message".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Plain-text message to route from the team lead to the teammate. Use either message or items."
+                        .to_string(),
+                ),
+            },
+        ),
+        ("items".to_string(), create_collab_input_items_schema()),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_send".to_string(),
+        description: "Send a lead-to-member team message through the existing agent input path."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string(), "member_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_stop_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "team_id".to_string(),
+        JsonSchema::String {
+            description: Some("Team id from create_team or list_teams.".to_string()),
+        },
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_stop".to_string(),
+        description: "Stop a live Codex team and shut down its active teammate agents.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string()]),
             additional_properties: Some(false.into()),
         },
     })
@@ -1578,16 +1742,29 @@ pub(crate) fn build_specs(
 
     if config.collab_tools {
         let collab_handler = Arc::new(CollabHandler);
+        let team_handler = Arc::new(TeamHandler);
         builder.push_spec(create_spawn_agent_tool());
         builder.push_spec(create_send_input_tool());
         builder.push_spec(create_resume_agent_tool());
         builder.push_spec(create_wait_tool());
         builder.push_spec(create_close_agent_tool());
+        builder.push_spec(create_team_create_tool());
+        builder.push_spec(create_team_list_tool());
+        builder.push_spec(create_team_status_tool());
+        builder.push_spec(create_team_spawn_member_tool());
+        builder.push_spec(create_team_send_tool());
+        builder.push_spec(create_team_stop_tool());
         builder.register_handler("spawn_agent", collab_handler.clone());
         builder.register_handler("send_input", collab_handler.clone());
         builder.register_handler("resume_agent", collab_handler.clone());
         builder.register_handler("wait", collab_handler.clone());
         builder.register_handler("close_agent", collab_handler);
+        builder.register_handler("create_team", team_handler.clone());
+        builder.register_handler("list_teams", team_handler.clone());
+        builder.register_handler("team_status", team_handler.clone());
+        builder.register_handler("team_spawn_member", team_handler.clone());
+        builder.register_handler("team_send", team_handler.clone());
+        builder.register_handler("team_stop", team_handler);
     }
 
     if let Some(mcp_tools) = mcp_tools {
@@ -1732,6 +1909,13 @@ mod tests {
                 "expected tool {expected} to be present; had: {names:?}"
             );
         }
+    }
+
+    fn configured_tool_map(tools: &[ConfiguredToolSpec]) -> BTreeMap<String, ToolSpec> {
+        tools
+            .iter()
+            .map(|tool| (tool_name(&tool.spec).to_string(), tool.spec.clone()))
+            .collect()
     }
 
     fn shell_tool_name(config: &ToolsConfig) -> Option<&'static str> {
@@ -1886,8 +2070,64 @@ mod tests {
                 "resume_agent",
                 "wait",
                 "close_agent",
+                "create_team",
+                "list_teams",
+                "team_status",
+                "team_spawn_member",
+                "team_send",
+                "team_stop",
             ],
         );
+    }
+
+    #[test]
+    fn team_tools_have_exact_specs_and_handlers_when_collab_is_enabled() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::Collab);
+        features.enable(Feature::CollaborationModes);
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Cached),
+        });
+        let (tools, registry) = build_specs(&tools_config, None, None, &[]).build();
+        let actual = configured_tool_map(&tools);
+
+        let expected = BTreeMap::from([
+            ("create_team".to_string(), create_team_create_tool()),
+            ("list_teams".to_string(), create_team_list_tool()),
+            ("team_status".to_string(), create_team_status_tool()),
+            (
+                "team_spawn_member".to_string(),
+                create_team_spawn_member_tool(),
+            ),
+            ("team_send".to_string(), create_team_send_tool()),
+            ("team_stop".to_string(), create_team_stop_tool()),
+        ]);
+
+        for (name, expected_spec) in expected {
+            let mut actual_spec = actual
+                .get(&name)
+                .unwrap_or_else(|| panic!("expected team tool {name}"))
+                .clone();
+            let mut expected_spec = expected_spec;
+            strip_descriptions_tool(&mut actual_spec);
+            strip_descriptions_tool(&mut expected_spec);
+            assert_eq!(actual_spec, expected_spec, "team tool spec drift: {name}");
+
+            let handler = registry
+                .handler(&name)
+                .unwrap_or_else(|| panic!("expected handler for team tool {name}"));
+            assert!(
+                handler.matches_kind(&crate::tools::context::ToolPayload::Function {
+                    arguments: "{}".to_string(),
+                }),
+                "team tool handler should accept function payloads: {name}"
+            );
+        }
     }
 
     #[test]

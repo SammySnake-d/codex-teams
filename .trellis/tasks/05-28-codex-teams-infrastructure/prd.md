@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build a Codex Teams foundation for the Rust TUI that lets a user create and operate a group of independent Codex agent sessions from natural language and from a `/teams` control surface.
+Build a Codex Teams foundation for the Rust TUI that lets a user create and operate a group of independent Codex agent sessions from natural language and a manual `/teams` help surface.
 
 The goal is infrastructure first: team lifecycle, member sessions, messaging, shared task state, observable events, role/capability boundaries, and TUI control. Reviewer/self-correction/Darwin workflows are future policies on top of this substrate, not the substrate itself.
 
@@ -47,7 +47,7 @@ The first vertical slice should support:
 - route a lead-to-member message
 - list team/member status
 - stop the team
-- expose a minimal `/teams` manual control surface over the same core substrate
+- expose minimal `/teams` manual guidance; model-callable tools are the action path
 
 ## Natural-Language Acceptance
 
@@ -57,7 +57,16 @@ A user prompt like this must be enough to drive the model toward Teams tools onc
 Create an agent team with 3 teammates to investigate this task in parallel.
 ```
 
-Slash command parity is also needed, but `/teams` is not the primary proof. Natural language requires model-exposed tools and usage hints.
+Slash command parity is intentionally narrow in this slice: `/teams` may guide the user, but it must not become the primary proof or embed workflow policy. Natural language requires model-exposed tools and usage hints.
+
+## First-Slice Design Decisions
+
+- Team state is live-session-only. Persistent resume is out of scope, and team snapshots must make the live-only boundary explicit.
+- Stopped teams remain visible in `list_teams` and `team_status` so users can inspect final members, messages, tasks, and events after cleanup.
+- `team_status` refreshes member agent statuses from `AgentControl` before returning the snapshot.
+- Task state is a substrate/readback boundary in this slice. `TeamTask` exists on the core model, but task create/claim/complete tools are future work.
+- Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, and `team_stop`.
+- `/teams` is a manual TUI guidance surface only for this slice; it does not perform list/status/send/stop actions directly.
 
 ## Out Of Scope For First Slice
 
@@ -65,6 +74,7 @@ Slash command parity is also needed, but `/teams` is not the primary proof. Natu
 - nested teams
 - teammate spawning teammates
 - persistent resume across process restarts
+- task-board mutation tools
 - reviewer-specific blockers
 - Darwin incident processing
 - automatic code-review policy
@@ -72,22 +82,31 @@ Slash command parity is also needed, but `/teams` is not the primary proof. Natu
 
 ## Acceptance Criteria
 
-- [ ] Core has explicit Team, Member, Message, Task, and TeamEvent substrate types or equivalent clearly named boundaries.
-- [ ] Natural-language model path can create and inspect a team through tool exposure, not only slash commands.
-- [ ] TUI has a minimal `/teams` control surface for list/status/send/stop or a documented first subset.
-- [ ] First slice reuses existing AgentControl and mailbox primitives instead of duplicating agent lifecycle.
-- [ ] Team core does not hardcode reviewer, PASS/BLOCKERS, or Darwin policy.
-- [ ] Tests cover the first substrate path.
-- [ ] TUI-visible changes include snapshot coverage when rendering changes.
+- [x] Core has explicit Team, Member, Message, Task, and TeamEvent substrate types or equivalent clearly named boundaries.
+- [x] Natural-language model path can create and inspect a team through tool exposure, not only slash commands.
+- [x] TUI has a documented first subset: `/teams` renders manual guidance only.
+- [x] First slice reuses existing AgentControl/input primitives instead of duplicating agent lifecycle.
+- [x] Team core does not hardcode reviewer, PASS/BLOCKERS, or Darwin policy.
+- [x] Tests cover the first substrate path.
+- [x] TUI-visible changes include snapshot coverage when rendering changes.
 
 ## Technical Notes
 
-- Core multi-agent exposure is in `codex-rs/core/src/tools/spec_plan.rs`.
+- Core multi-agent exposure is in `codex-rs/core/src/tools/spec.rs`.
 - V2 message delivery distinguishes queue-only versus triggered turns.
 - Session mailbox state exists in `codex-rs/core/src/session/input_queue.rs`.
 - Agent lifecycle primitives exist in `codex-rs/core/src/agent/control.rs`.
 - TUI slash command definitions live in `codex-rs/tui/src/slash_command.rs`.
 - Trellis context for this task is in `implement.jsonl` and `check.jsonl`.
+
+## Validation Evidence
+
+- `cd codex-rs && just fmt`
+- `cargo test -p codex-core team --locked`
+- `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked`
+- `cargo test -p codex-tui teams --locked`
+- `find codex-rs -name '*.snap.new' -o -name '*.pending-snap'`
+- `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs codex-rs/tui/src/chatwidget.rs codex-rs/tui/src/slash_command.rs`
 
 ## Definition Of Done For This Planning Slice
 

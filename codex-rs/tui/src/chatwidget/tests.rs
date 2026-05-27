@@ -3784,6 +3784,41 @@ async fn experimental_mode_plan_applies_on_startup() {
     assert_eq!(chat.current_model(), resolved_model);
 }
 
+#[test]
+fn teams_slash_command_is_listed_with_description() {
+    let commands = crate::slash_command::built_in_slash_commands();
+
+    let teams = commands
+        .iter()
+        .find(|(name, _)| *name == "teams")
+        .expect("expected /teams in slash command list");
+
+    assert_eq!(teams.1, SlashCommand::Teams);
+    assert_eq!(teams.1.description(), "show how to manage Codex Teams");
+}
+
+#[tokio::test]
+async fn slash_teams_renders_manual_guidance() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Teams);
+
+    match op_rx.try_recv() {
+        Err(TryRecvError::Empty) => {}
+        other => panic!("expected no Codex op to be sent, got {other:?}"),
+    }
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected one Teams guidance message");
+    let rendered = lines_to_single_string(&cells[0]);
+    assert_snapshot!(
+                &rendered,
+                @r"
+• Ask Codex to help you create, inspect, message, or stop a team. Teams can coordinate multiple Codex agent sessions.
+"
+            );
+}
+
 #[tokio::test]
 async fn set_model_updates_active_collaboration_mask() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1")).await;

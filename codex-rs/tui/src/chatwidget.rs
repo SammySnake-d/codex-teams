@@ -3318,6 +3318,12 @@ impl ChatWidget {
             SlashCommand::Agent => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
+            SlashCommand::Teams => {
+                self.add_info_message(
+                    "Ask Codex to help you create, inspect, message, or stop a team.".to_string(),
+                    Some("Teams can coordinate multiple Codex agent sessions.".to_string()),
+                );
+            }
             SlashCommand::Approvals => {
                 self.open_permissions_popup();
             }

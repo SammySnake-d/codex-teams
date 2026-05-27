@@ -1,0 +1,600 @@
+use crate::agent::AgentControl;
+use crate::agent::AgentStatus;
+use crate::config::Config;
+use crate::error::CodexErr;
+use crate::error::Result as CodexResult;
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::user_input::UserInput;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+use tokio::sync::RwLock;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TeamStatus {
+    Active,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TeamMemberStatus {
+    Active,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TeamMessageDeliveryStatus {
+    Submitted,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TeamTaskStatus {
+    Open,
+    Claimed,
+    Completed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct Team {
+    pub(crate) id: ThreadId,
+    pub(crate) name: String,
+    pub(crate) lead_thread_id: ThreadId,
+    pub(crate) status: TeamStatus,
+    pub(crate) members: Vec<TeamMember>,
+    pub(crate) tasks: Vec<TeamTask>,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+    pub(crate) live_session_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct TeamMember {
+    pub(crate) id: ThreadId,
+    pub(crate) name: String,
+    pub(crate) agent_thread_id: ThreadId,
+    pub(crate) profile: Option<String>,
+    pub(crate) status: TeamMemberStatus,
+    pub(crate) agent_status: AgentStatus,
+    pub(crate) created_at: i64,
+    pub(crate) last_activity_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct TeamMessage {
+    pub(crate) id: ThreadId,
+    pub(crate) team_id: ThreadId,
+    pub(crate) sender: TeamMessageEndpoint,
+    pub(crate) target_member_id: ThreadId,
+    pub(crate) content: String,
+    pub(crate) submitted_id: Option<String>,
+    pub(crate) delivery_status: TeamMessageDeliveryStatus,
+    pub(crate) created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TeamMessageEndpoint {
+    Lead(ThreadId),
+    Member(ThreadId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct TeamTask {
+    pub(crate) id: ThreadId,
+    pub(crate) team_id: ThreadId,
+    pub(crate) title: String,
+    pub(crate) assignee_member_id: Option<ThreadId>,
+    pub(crate) status: TeamTaskStatus,
+    pub(crate) note: Option<String>,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum TeamEvent {
+    TeamCreated {
+        team_id: ThreadId,
+        name: String,
+        at: i64,
+    },
+    MemberSpawned {
+        team_id: ThreadId,
+        member_id: ThreadId,
+        agent_thread_id: ThreadId,
+        name: String,
+        at: i64,
+    },
+    MessageSubmitted {
+        team_id: ThreadId,
+        message_id: ThreadId,
+        target_member_id: ThreadId,
+        at: i64,
+    },
+    TeamStopped {
+        team_id: ThreadId,
+        at: i64,
+    },
+    Failure {
+        team_id: Option<ThreadId>,
+        message: String,
+        at: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct TeamSnapshot {
+    pub(crate) team: Team,
+    pub(crate) messages: Vec<TeamMessage>,
+    pub(crate) events: Vec<TeamEvent>,
+}
+
+pub(crate) struct SpawnTeamMemberRequest {
+    pub(crate) team_id: ThreadId,
+    pub(crate) name: String,
+    pub(crate) profile: Option<String>,
+    pub(crate) initial_items: Vec<UserInput>,
+    pub(crate) config: Config,
+    pub(crate) session_source: Option<SessionSource>,
+}
+
+#[derive(Default)]
+pub(crate) struct TeamRegistry {
+    state: RwLock<TeamRegistryState>,
+}
+
+#[derive(Default)]
+struct TeamRegistryState {
+    teams: HashMap<ThreadId, Team>,
+    messages: Vec<TeamMessage>,
+    events: Vec<TeamEvent>,
+}
+
+impl TeamRegistry {
+    pub(crate) async fn create_team(&self, name: String, lead_thread_id: ThreadId) -> Team {
+        let at = unix_timestamp();
+        let team = Team {
+            id: ThreadId::new(),
+            name,
+            lead_thread_id,
+            status: TeamStatus::Active,
+            members: Vec::new(),
+            tasks: Vec::new(),
+            created_at: at,
+            updated_at: at,
+            live_session_only: true,
+        };
+
+        let mut state = self.state.write().await;
+        state.events.push(TeamEvent::TeamCreated {
+            team_id: team.id,
+            name: team.name.clone(),
+            at,
+        });
+        state.teams.insert(team.id, team.clone());
+        team
+    }
+
+    pub(crate) async fn list_teams(&self) -> Vec<Team> {
+        let state = self.state.read().await;
+        let mut teams = state.teams.values().cloned().collect::<Vec<_>>();
+        teams.sort_by_key(|team| team.created_at);
+        teams
+    }
+
+    pub(crate) async fn team_status(
+        &self,
+        team_id: ThreadId,
+        agent_control: &AgentControl,
+    ) -> CodexResult<TeamSnapshot> {
+        self.refresh_agent_statuses(team_id, agent_control).await?;
+        self.snapshot(team_id).await
+    }
+
+    pub(crate) async fn spawn_member(
+        &self,
+        request: SpawnTeamMemberRequest,
+        agent_control: &AgentControl,
+    ) -> CodexResult<TeamMember> {
+        let SpawnTeamMemberRequest {
+            team_id,
+            name,
+            profile,
+            initial_items,
+            config,
+            session_source,
+        } = request;
+        self.ensure_team_active(team_id).await?;
+        let agent_thread_id = agent_control
+            .spawn_agent(config, initial_items, session_source)
+            .await?;
+        let at = unix_timestamp();
+        let agent_status = agent_control.get_status(agent_thread_id).await;
+        let member = TeamMember {
+            id: ThreadId::new(),
+            name,
+            agent_thread_id,
+            profile,
+            status: TeamMemberStatus::Active,
+            agent_status,
+            created_at: at,
+            last_activity_at: at,
+        };
+
+        let mut state = self.state.write().await;
+        let team = state
+            .teams
+            .get_mut(&team_id)
+            .ok_or(CodexErr::ThreadNotFound(team_id))?;
+        team.members.push(member.clone());
+        team.updated_at = at;
+        state.events.push(TeamEvent::MemberSpawned {
+            team_id,
+            member_id: member.id,
+            agent_thread_id,
+            name: member.name.clone(),
+            at,
+        });
+        Ok(member)
+    }
+
+    pub(crate) async fn send_to_member(
+        &self,
+        team_id: ThreadId,
+        member_id: ThreadId,
+        content: String,
+        items: Vec<UserInput>,
+        agent_control: &AgentControl,
+    ) -> CodexResult<TeamMessage> {
+        self.ensure_team_active(team_id).await?;
+        let (lead_thread_id, agent_thread_id) = {
+            let state = self.state.read().await;
+            let team = state
+                .teams
+                .get(&team_id)
+                .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            let member = team
+                .members
+                .iter()
+                .find(|member| member.id == member_id)
+                .ok_or(CodexErr::ThreadNotFound(member_id))?;
+            (team.lead_thread_id, member.agent_thread_id)
+        };
+        let submission_id = agent_control.send_input(agent_thread_id, items).await?;
+        let at = unix_timestamp();
+        let message = TeamMessage {
+            id: ThreadId::new(),
+            team_id,
+            sender: TeamMessageEndpoint::Lead(lead_thread_id),
+            target_member_id: member_id,
+            content,
+            submitted_id: Some(submission_id),
+            delivery_status: TeamMessageDeliveryStatus::Submitted,
+            created_at: at,
+        };
+
+        let agent_status = agent_control.get_status(agent_thread_id).await;
+        let mut state = self.state.write().await;
+        state.messages.push(message.clone());
+        if let Some(team) = state.teams.get_mut(&team_id) {
+            if let Some(member) = team
+                .members
+                .iter_mut()
+                .find(|member| member.id == member_id)
+            {
+                member.last_activity_at = at;
+                member.agent_status = agent_status;
+            }
+            team.updated_at = at;
+        }
+        state.events.push(TeamEvent::MessageSubmitted {
+            team_id,
+            message_id: message.id,
+            target_member_id: member_id,
+            at,
+        });
+        Ok(message)
+    }
+
+    pub(crate) async fn stop_team(
+        &self,
+        team_id: ThreadId,
+        agent_control: &AgentControl,
+    ) -> CodexResult<TeamSnapshot> {
+        let agent_thread_ids = {
+            let state = self.state.read().await;
+            let team = state
+                .teams
+                .get(&team_id)
+                .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            team.members
+                .iter()
+                .filter(|member| member.status == TeamMemberStatus::Active)
+                .map(|member| member.agent_thread_id)
+                .collect::<Vec<_>>()
+        };
+
+        for agent_thread_id in agent_thread_ids {
+            let _ = agent_control.shutdown_agent(agent_thread_id).await;
+        }
+
+        let at = unix_timestamp();
+        let statuses = {
+            let state = self.state.read().await;
+            let team = state
+                .teams
+                .get(&team_id)
+                .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            team.members
+                .iter()
+                .map(|member| {
+                    let member_id = member.id;
+                    let agent_thread_id = member.agent_thread_id;
+                    async move { (member_id, agent_control.get_status(agent_thread_id).await) }
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut resolved_statuses = Vec::with_capacity(statuses.len());
+        for status in statuses {
+            resolved_statuses.push(status.await);
+        }
+
+        {
+            let mut state = self.state.write().await;
+            let team = state
+                .teams
+                .get_mut(&team_id)
+                .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            team.status = TeamStatus::Stopped;
+            team.updated_at = at;
+            for member in &mut team.members {
+                member.status = TeamMemberStatus::Stopped;
+                if let Some((_, status)) = resolved_statuses
+                    .iter()
+                    .find(|(member_id, _)| *member_id == member.id)
+                {
+                    member.agent_status = status.clone();
+                }
+                member.last_activity_at = at;
+            }
+            state.events.push(TeamEvent::TeamStopped { team_id, at });
+        }
+
+        self.snapshot(team_id).await
+    }
+
+    async fn ensure_team_active(&self, team_id: ThreadId) -> CodexResult<()> {
+        let state = self.state.read().await;
+        let team = state
+            .teams
+            .get(&team_id)
+            .ok_or(CodexErr::ThreadNotFound(team_id))?;
+        if team.status == TeamStatus::Stopped {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "team {team_id} is stopped"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn refresh_agent_statuses(
+        &self,
+        team_id: ThreadId,
+        agent_control: &AgentControl,
+    ) -> CodexResult<()> {
+        let members = {
+            let state = self.state.read().await;
+            let team = state
+                .teams
+                .get(&team_id)
+                .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            team.members
+                .iter()
+                .map(|member| (member.id, member.agent_thread_id))
+                .collect::<Vec<_>>()
+        };
+
+        let mut statuses = Vec::with_capacity(members.len());
+        for (member_id, agent_thread_id) in members {
+            statuses.push((member_id, agent_control.get_status(agent_thread_id).await));
+        }
+
+        let mut state = self.state.write().await;
+        if let Some(team) = state.teams.get_mut(&team_id) {
+            for (member_id, status) in statuses {
+                if let Some(member) = team
+                    .members
+                    .iter_mut()
+                    .find(|member| member.id == member_id)
+                {
+                    member.agent_status = status;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn snapshot(&self, team_id: ThreadId) -> CodexResult<TeamSnapshot> {
+        let state = self.state.read().await;
+        let team = state
+            .teams
+            .get(&team_id)
+            .cloned()
+            .ok_or(CodexErr::ThreadNotFound(team_id))?;
+        let messages = state
+            .messages
+            .iter()
+            .filter(|message| message.team_id == team_id)
+            .cloned()
+            .collect();
+        let events = state
+            .events
+            .iter()
+            .filter(|event| event.team_id() == Some(team_id))
+            .cloned()
+            .collect();
+        Ok(TeamSnapshot {
+            team,
+            messages,
+            events,
+        })
+    }
+}
+
+impl TeamEvent {
+    fn team_id(&self) -> Option<ThreadId> {
+        match self {
+            TeamEvent::TeamCreated { team_id, .. }
+            | TeamEvent::MemberSpawned { team_id, .. }
+            | TeamEvent::MessageSubmitted { team_id, .. }
+            | TeamEvent::TeamStopped { team_id, .. } => Some(*team_id),
+            TeamEvent::Failure { team_id, .. } => *team_id,
+        }
+    }
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CodexAuth;
+    use crate::ThreadManager;
+    use crate::built_in_model_providers;
+    use crate::codex::make_session_and_context;
+    use crate::protocol::Op;
+    use pretty_assertions::assert_eq;
+
+    fn text_input(text: &str) -> Vec<UserInput> {
+        vec![UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }]
+    }
+
+    fn thread_manager() -> ThreadManager {
+        ThreadManager::with_models_provider_for_tests(
+            CodexAuth::from_api_key("dummy"),
+            built_in_model_providers()["openai"].clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn create_team_lists_live_session_only_substrate() {
+        let registry = TeamRegistry::default();
+        let lead_thread_id = ThreadId::new();
+
+        let team = registry
+            .create_team("infra".to_string(), lead_thread_id)
+            .await;
+
+        assert_eq!(team.name, "infra");
+        assert_eq!(team.lead_thread_id, lead_thread_id);
+        assert_eq!(team.status, TeamStatus::Active);
+        assert_eq!(team.members, Vec::new());
+        assert_eq!(team.tasks, Vec::new());
+        assert_eq!(team.live_session_only, true);
+        assert_eq!(registry.list_teams().await, vec![team]);
+    }
+
+    #[tokio::test]
+    async fn spawn_send_status_and_stop_use_agent_control() {
+        let registry = TeamRegistry::default();
+        let manager = thread_manager();
+        let agent_control = manager.agent_control();
+        let (_session, turn) = make_session_and_context().await;
+        let team = registry
+            .create_team("slice".to_string(), ThreadId::new())
+            .await;
+
+        let member = registry
+            .spawn_member(
+                SpawnTeamMemberRequest {
+                    team_id: team.id,
+                    name: "teammate".to_string(),
+                    profile: Some("general".to_string()),
+                    initial_items: text_input("initial task"),
+                    config: turn.config.as_ref().clone(),
+                    session_source: None,
+                },
+                &agent_control,
+            )
+            .await
+            .expect("spawn member");
+
+        let expected_initial = (
+            member.agent_thread_id,
+            Op::UserInput {
+                items: text_input("initial task"),
+                final_output_json_schema: None,
+            },
+        );
+        assert!(
+            manager.captured_ops().contains(&expected_initial),
+            "spawn should submit initial input"
+        );
+
+        let message = registry
+            .send_to_member(
+                team.id,
+                member.id,
+                "follow up".to_string(),
+                text_input("follow up"),
+                &agent_control,
+            )
+            .await
+            .expect("send message");
+        assert_eq!(
+            message.delivery_status,
+            TeamMessageDeliveryStatus::Submitted
+        );
+
+        let expected_followup = (
+            member.agent_thread_id,
+            Op::UserInput {
+                items: text_input("follow up"),
+                final_output_json_schema: None,
+            },
+        );
+        assert!(
+            manager.captured_ops().contains(&expected_followup),
+            "send should submit follow-up input"
+        );
+
+        let status = registry
+            .team_status(team.id, &agent_control)
+            .await
+            .expect("team status");
+        assert_eq!(status.team.members.len(), 1);
+        assert_eq!(status.messages, vec![message]);
+
+        let stopped = registry
+            .stop_team(team.id, &agent_control)
+            .await
+            .expect("stop team");
+        assert_eq!(stopped.team.status, TeamStatus::Stopped);
+        assert_eq!(stopped.team.members[0].status, TeamMemberStatus::Stopped);
+        assert_eq!(stopped.team.members[0].agent_status, AgentStatus::NotFound);
+        assert!(
+            manager
+                .captured_ops()
+                .iter()
+                .any(|(id, op)| *id == member.agent_thread_id && matches!(op, Op::Shutdown)),
+            "stop should submit shutdown"
+        );
+    }
+}
