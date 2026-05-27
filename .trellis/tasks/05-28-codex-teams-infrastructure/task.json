@@ -1,0 +1,33 @@
+{
+  "id": "codex-teams-infrastructure",
+  "name": "codex-teams-infrastructure",
+  "title": "Implement Codex Teams infrastructure",
+  "description": "Build the Codex Teams substrate before feature policy: team registry, member lifecycle, message bus, task board, event feed, natural-language tool entry, and TUI control surface.",
+  "status": "in_progress",
+  "dev_type": "feature",
+  "scope": "codex-rs Teams infrastructure",
+  "package": "codex-rs",
+  "priority": "P1",
+  "creator": "snakesammy",
+  "assignee": "snakesammy",
+  "createdAt": "2026-05-28",
+  "completedAt": null,
+  "branch": "feat/codex-teams-infra",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    ".trellis/spec/codex-rs/backend/",
+    ".trellis/tasks/05-28-codex-teams-infrastructure/prd.md",
+    ".trellis/tasks/05-28-codex-teams-infrastructure/research/anthropic-agent-teams.md"
+  ],
+  "notes": "Planning baseline only. Do not start Rust implementation until Teams substrate slice is selected.",
+  "meta": {
+    "natural_language_entry_required": true,
+    "substrate_before_policy": true
+  }
+}

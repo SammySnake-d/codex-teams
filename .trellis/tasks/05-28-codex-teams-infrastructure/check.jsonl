@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/codex-rs/backend/index.md", "reason": "Check Rust/TUI validation expectations and snapshot/test requirements"}
+{"file": ".trellis/spec/codex-rs/backend/teams-architecture.md", "reason": "Check substrate/policy separation and MVP boundary"}
+{"file": ".trellis/tasks/05-28-codex-teams-infrastructure/research/anthropic-agent-teams.md", "reason": "Check implementation against Teams capability definition"}
