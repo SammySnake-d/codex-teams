@@ -89,7 +89,7 @@ max_journal_lines: 2000
 # codex:
 #   dispatch_mode: inline  # or "sub-agent" to dispatch trellis-* sub-agents
 
-# Auto-detected monorepo packages
+# Auto-detected monorepo packages, corrected for Codex Rust work.
 packages:
   codex-rs:
     path: codex-rs

@@ -1,8 +1,7 @@
 {
   "__version": 2,
   "hashes": {
-    "AGENTS.md": "8ca309d780df18b1c2535d5864862d78248524e93f0c10aa606457b6756c7477",
-    ".trellis/config.yaml": "004b9560a8aedc48988fd39e118127ecc337ce2c761f6ba9f2b8bc454baa0e71",
+    ".trellis/config.yaml": "5c9207418cecc390e9d86d589b4183b831f76697d92fb42fefd5221cd8772e51",
     ".trellis/scripts/__init__.py": "1242be5b972094c2e141aecbe81a4efd478f6534e3d5e28306374e6a18fcf46c",
     ".trellis/scripts/add_session.py": "6e406a0a9f32d4a50b1b5ca8115cbd06c359011f0e166c41dc5fab34698a4006",
     ".trellis/scripts/common/__init__.py": "3d5e9347141f0296319a5beb29d69ae714c5a474b9078caeb3edd7c5f6562e22",
@@ -20,7 +19,7 @@
     ".trellis/scripts/common/session_context.py": "c91cf213025e5e4ad2f56bb6f570ef43d35430fc8a863be311d3e5f8f32ef652",
     ".trellis/scripts/common/task_context.py": "1c16a7fa82d363010d0d0ebdc038296ae1552bf6e90214787d707f49567bc159",
     ".trellis/scripts/common/task_queue.py": "0be61f713462b1fe4574927c82fc4704e678afe72dcb9813543aedf2f9e9e0c5",
-    ".trellis/scripts/common/task_store.py": "ce2960393b3582df4fe01c3a1a2c1c425c7a5fd5e2503d1d8b99bec3f3c47d98",
+    ".trellis/scripts/common/task_store.py": "cca4851c948df4a7d8dac38c465dce0d6b15a171001adab8dfef011ad66e02e5",
     ".trellis/scripts/common/task_utils.py": "f5ef4af87ba3e11d8b19630c0c96d009de1811fc9be56c2027a9c96e21ed103e",
     ".trellis/scripts/common/tasks.py": "4436a8b0b53c270a35989e26d9dbd92669408c6562d88c02083a404562da85fe",
     ".trellis/scripts/common/trellis_config.py": "0839dcf90ebbd77712c276930a89335b3313927051650c91d220fb51ca2a6a3c",
@@ -31,15 +30,14 @@
     ".trellis/scripts/hooks/linear_sync.py": "e09cc4ce4699aada908808718698f33f705a3edf55c4dcf8f777ad892f80ca79",
     ".trellis/scripts/init_developer.py": "f9e6c0d882406e81c8cd6b1c5abb204b0befc0069ff89cf650cd536a80f8c60e",
     ".trellis/scripts/task.py": "40abdd46f5c2b6837610429a38eef50f1fc783fb1852dc4f52a891205e42ab04",
-    ".trellis/workflow.md": "f7f888cf61afe4b4903c90046c701a6c115ed80d39c50da8fd2ac437922175b6",
+    ".trellis/workflow.md": "f4b8a6f89017f62071986d6d36cc32c4c7f01fe6f023f0fd9311eddc57d8c94f",
     ".codex/agents/trellis-check.toml": "e6781803094ef836869b68fb00b28f0785e9f97091affb5e5bd7b13ab406d6c6",
     ".codex/agents/trellis-implement.toml": "b84884c8fe46ecc032ddb287d7aac4ac9553a7c49ab7b6a40ae44a08f6725b58",
     ".codex/agents/trellis-research.toml": "5492f7f6ab8bdea975b0e853bf171b050f7ddf6c2079ac770ed912c48d815eae",
     ".codex/config.toml": "bb5a62ce51a4357b825e2a77c9a0d3332b108bb469d3b06b275604ccbccd4320",
-    ".codex/hooks/inject-workflow-state.py": "0f5f983be0fbf6241f55f5d4a1838064322178a2b3efb227027c20d26f2354d2",
-    ".codex/hooks/session-start.py": "dc90aac812aac4f0243709be337369b91e2561465f0943c04d982a1b60b58ba1",
-    ".codex/hooks.json": "0c80314cba548a01a9b4a7141fbcb4ab9228ace8397df98ee3a365d0491a77d0",
-    ".codex/skills/test-tui/SKILL.md": "e81787c2d976a1eb0c6108eb8ff56376e3e2ae4aae77771fd9259c211fc7f230",
+    ".codex/hooks/inject-workflow-state.py": "fe4cca4db7ca8c252f614efca16fa588009a4238542a2c9aa85167409f6f9a4c",
+    ".codex/hooks/session-start.py": "bc3bd73ad89fc872c14efc8a548f4d7ff0b0afd4bb667e9db49fe468dcafd326",
+    ".codex/hooks.json": "522ba3c488c100027783e52ecff84c0bd799852dd77ad3f1936e86db105f01d6",
     ".agents/skills/trellis-before-dev/SKILL.md": "208ad3fd5131fa0da603d4bc354a29826967397f5aeef483fa0564113df13e9e",
     ".agents/skills/trellis-brainstorm/SKILL.md": "babf6e6e4d0a59d6b7284ff09364d224a3dc299a98911f3a32d0bbcf2c0c21f2",
     ".agents/skills/trellis-break-loop/SKILL.md": "35afb53fef42cd494e566f1ef170dbf442ec2be7e19931f28a14079b4dda753f",
@@ -70,6 +68,11 @@
     ".agents/skills/trellis-meta/references/platform-files/skills-and-commands.md": "85435eb8bb6921283575bca51268fc534c22fd3ca33782e841ee5c76140ae48f",
     ".agents/skills/trellis-start/SKILL.md": "a88faaac9fe1b9fa7441473a72ff88ead0022504eeb38492ecef85db75a559e7",
     ".agents/skills/trellis-update-spec/SKILL.md": "003ce08a3404aeb50998029392c4d4e57b626edf526d3ebd585032bb92dcbb96",
-    ".github/prompts/issue-labeler.txt": "0794db5875721df0588f6cab72a621b63440823039786649ff4977e5ded7dfc9"
+    ".agents/skills/trellis-spec-bootstarp/references/mcp-setup.md": "df542fc8f279edd38046d26a7c8151804b708f57b24d4aa2733cea587a88c65e",
+    ".agents/skills/trellis-spec-bootstarp/references/repository-analysis.md": "0dae98d774f6e34559b9f3442888ac43e3a8af110c37cbefc49ce256986858b6",
+    ".agents/skills/trellis-spec-bootstarp/references/spec-task-planning.md": "ef493d028c3b0807a8a534bb71fb92a68129f273db763ad27ceb464a522e799d",
+    ".agents/skills/trellis-spec-bootstarp/references/spec-writing.md": "e9800fe9ed4a4cd87062ea1829cf2caa8d170ec15e141678a6a30e74c497f47d",
+    ".agents/skills/trellis-spec-bootstarp/SKILL.md": "81f400092b21392161e7d9dfa9111c9be36c81bc8641d252ed28e08373449ac0",
+    "AGENTS.md": "d799bd2d86052bd7f5396ae2dde48e037193e585e02299838c5db096afefb36f"
   }
 }
