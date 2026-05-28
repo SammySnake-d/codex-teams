@@ -9,7 +9,7 @@ The substrate owns:
 - `Team`: id, name, lead thread, member registry, status, created/updated timestamps.
 - `Member`: name, thread id, agent path, role/capability profile, status, permissions, last activity.
 - `Message`: sender, target, delivery mode, content, timestamp, delivery status.
-- `Task`: title, assignee, status, dependencies, result or blocker note.
+- `Task`: title, assignee, status, dependencies, and a generic note.
 - `TeamEvent`: append-only observable events for lifecycle, messages, task updates, and failures.
 
 Policy layers own:
@@ -36,11 +36,78 @@ First implementation should prove:
 
 1. Create a team.
 2. Spawn one teammate as an independent agent session.
-3. Send a lead-to-member message.
+3. Send lead-to-member and member-to-member messages.
 4. List team status and member status.
-5. Stop the team cleanly.
+5. Create, update, and list generic task-board items.
+6. List the team event feed.
+7. Stop the team cleanly.
 
 Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
+
+## Scenario: Model-Callable Teams Substrate
+
+### 1. Scope / Trigger
+
+- Trigger: Teams adds model-callable core tools that create and mutate collaboration state across agent lifecycle, message routing, task-board state, and event readback.
+- Scope: `codex-core` owns the live-session-only registry and function tools. The TUI `/teams` surface remains manual guidance over the same substrate.
+
+### 2. Signatures
+
+- `create_team(name)` -> creates a live-session-only `Team`.
+- `list_teams()` -> returns visible teams, including stopped teams.
+- `team_status(team_id)` -> returns `TeamSnapshot { team, messages, events }` after refreshing member agent statuses.
+- `team_spawn_member(team_id, name, profile?, capabilities?, permissions?, message?/items?)` -> spawns one independent Codex agent session through `AgentControl`.
+- `team_send(team_id, member_id, sender_member_id?, delivery_mode?, message?/items?)` -> submits input to an existing member agent.
+- `team_task_create(team_id, title, assignee_member_id?, dependencies?, note?)` -> creates one generic shared task-board item.
+- `team_task_update(team_id, task_id, title?, assignee_member_id?, dependencies?, status?, note?)` -> updates one generic shared task-board item.
+- `team_task_list(team_id)` -> lists a team's shared task-board items.
+- `team_event_list(team_id)` -> lists a team's append-only lifecycle, message, task, and failure events.
+- `team_stop(team_id)` -> shuts down active teammate agents and marks the team stopped.
+
+### 3. Contracts
+
+- `Team.live_session_only` must be `true` until persistent resume is explicitly implemented.
+- Stopped teams remain readable through list/status/task/event readback, but mutating paths must reject them.
+- Member `capabilities` and `permissions` are generic labels. Teams core stores and returns them but does not enforce policy from them.
+- `team_send.delivery_mode` defaults to `queue`; `interrupt` must call `AgentControl::interrupt_agent` before submitting input.
+- `team_send.sender_member_id` is optional. Omit it for a lead-originated message; provide a member id only when that member belongs to the same team.
+- Task dependencies are task ids from the same team. A task must not depend on itself.
+- Task `note` is generic metadata for the shared task board. It must not become a policy-specific result, blocker, review verdict, or workflow template field in Teams core.
+- `TeamEvent::Failure` records team-tool operation errors so failed tool calls remain observable in the event feed.
+
+### 4. Validation & Error Matrix
+
+- Invalid team id -> `ThreadNotFound` mapped to a model-readable team-resource-not-found error.
+- Mutating a stopped team -> `UnsupportedOperation`.
+- Empty team/member/task/message labels -> model-readable validation error before registry mutation.
+- Unknown member assignee or sender -> `ThreadNotFound`.
+- Unknown task dependency -> `ThreadNotFound`.
+- Self-dependency on task update -> `UnsupportedOperation`.
+- Unsupported task status or delivery mode -> model-readable validation error listing supported values.
+- Spawn depth overflow -> model-readable depth-limit error; do not bypass existing multi-agent depth controls.
+
+### 5. Good/Base/Bad Cases
+
+- Good: create a team, spawn members with generic labels, send messages, create/update/list tasks, list events, inspect status, and stop the team.
+- Base: create a team with no members or tasks; status still returns an explicit live-session-only snapshot.
+- Bad: encode reviewer, PASS/BLOCKERS, Darwin, split-pane, or role-marketplace behavior in core team types or tools.
+
+### 6. Tests Required
+
+- Core registry tests must cover create/list, spawn/send/status/stop, task create/update/list, and task/event visibility.
+- Tool-handler tests must cover the natural-language tool path: spec args parse into registry operations and return JSON outputs.
+- Tool-spec tests must prove the collab feature exposes the exact Teams tool set and handler registrations.
+- TUI tests must keep `/teams` snapshot coverage limited to manual guidance until a later UI action surface is intentionally added.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Add a `reviewer` team mode that creates hardcoded blocker statuses and display panes in Teams core.
+
+#### Correct
+
+Keep Teams core as live collaboration state plus generic tools. Attach reviewer workflows, external panes, and domain templates later as adapters or policy layers over `Team`, `Member`, `Message`, `Task`, and `TeamEvent`.
 
 ## Display Boundary
 

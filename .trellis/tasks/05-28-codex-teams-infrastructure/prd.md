@@ -44,8 +44,10 @@ The first vertical slice should support:
 
 - create a team from model-callable core tools
 - spawn one teammate from the team
-- route a lead-to-member message
+- route lead-to-member and member-to-member messages
 - list team/member status
+- create, update, and list generic shared task-board items
+- list the append-only team event feed
 - stop the team
 - expose minimal `/teams` manual guidance; model-callable tools are the action path
 
@@ -64,8 +66,11 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 - Team state is live-session-only. Persistent resume is out of scope, and team snapshots must make the live-only boundary explicit.
 - Stopped teams remain visible in `list_teams` and `team_status` so users can inspect final members, messages, tasks, and events after cleanup.
 - `team_status` refreshes member agent statuses from `AgentControl` before returning the snapshot.
-- Task state is a substrate/readback boundary in this slice. `TeamTask` exists on the core model, but task create/claim/complete tools are future work.
-- Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, and `team_stop`.
+- Task state is now a generic substrate mutation boundary: `team_task_create`, `team_task_update`, and `team_task_list` can manage shared task-board items without encoding workflow policy.
+- `team_event_list` exposes lifecycle, message, task, and failure events as the standalone event-feed readback path.
+- Member `capabilities` and `permissions` are generic labels attached to team members; Teams core stores and returns them but does not enforce policy from them.
+- `team_send` records either the lead or a member as sender and supports `queue` or `interrupt` delivery through existing `AgentControl` input primitives.
+- Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, `team_task_create`, `team_task_update`, `team_task_list`, `team_event_list`, and `team_stop`.
 - `/teams` is a manual TUI guidance surface only for this slice; it does not perform list/status/send/stop actions directly.
 
 ## Out Of Scope For First Slice
@@ -74,7 +79,7 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 - nested teams
 - teammate spawning teammates
 - persistent resume across process restarts
-- task-board mutation tools
+- policy-specific task workflows
 - reviewer-specific blockers
 - Darwin incident processing
 - automatic code-review policy
@@ -84,6 +89,7 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 
 - [x] Core has explicit Team, Member, Message, Task, and TeamEvent substrate types or equivalent clearly named boundaries.
 - [x] Natural-language model path can create and inspect a team through tool exposure, not only slash commands.
+- [x] Natural-language model path can create/update/list generic team tasks and read the event feed through model-callable tools.
 - [x] TUI has a documented first subset: `/teams` renders manual guidance only.
 - [x] First slice reuses existing AgentControl/input primitives instead of duplicating agent lifecycle.
 - [x] Team core does not hardcode reviewer, PASS/BLOCKERS, or Darwin policy.
@@ -101,12 +107,18 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 
 ## Validation Evidence
 
-- `cd codex-rs && just fmt`
-- `cargo test -p codex-core team --locked`
-- `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked`
-- `cargo test -p codex-tui teams --locked`
-- `find codex-rs -name '*.snap.new' -o -name '*.pending-snap'`
-- `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs codex-rs/tui/src/chatwidget.rs codex-rs/tui/src/slash_command.rs`
+Final local proof from 2026-05-29:
+
+- `cd codex-rs && just fmt` passed.
+- `cargo test -p codex-core team --locked` passed: 6 passed.
+- `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked` passed: 1 passed.
+- `cargo test -p codex-tui teams --locked` passed: 2 passed.
+- `just fix -p codex-core` passed after refactoring `TeamRegistry::send_to_member` to `SendTeamMessageRequest`.
+- `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
+- `git diff --check` passed.
+- `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs codex-rs/tui/src/chatwidget.rs codex-rs/tui/src/slash_command.rs` returned no matches.
+- `find codex-rs -name '*.snap.new' -o -name '*.pending-snap'` returned no pending snapshot files.
+- `cargo install cargo-insta` installed `cargo-insta 1.47.2`; `cargo insta pending-snapshots -p codex-tui` is unsupported in this installed CLI version (`unexpected argument '-p'`), and the supported `--manifest-path tui/Cargo.toml` form was terminated after hanging in `cargo metadata`.
 
 ## Definition Of Done For This Planning Slice
 

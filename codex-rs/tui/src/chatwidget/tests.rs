@@ -3812,11 +3812,11 @@ async fn slash_teams_renders_manual_guidance() {
     assert_eq!(cells.len(), 1, "expected one Teams guidance message");
     let rendered = lines_to_single_string(&cells[0]);
     assert_snapshot!(
-                &rendered,
-                @r"
+                                &rendered,
+                                @r"
 • Ask Codex to help you create, inspect, message, or stop a team. Teams can coordinate multiple Codex agent sessions.
 "
-            );
+                            );
 }
 
 #[tokio::test]

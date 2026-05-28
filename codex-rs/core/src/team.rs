@@ -36,6 +36,13 @@ pub(crate) enum TeamMessageDeliveryStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub(crate) enum TeamMessageDeliveryMode {
+    Queue,
+    Interrupt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum TeamTaskStatus {
     Open,
     Claimed,
@@ -62,6 +69,8 @@ pub(crate) struct TeamMember {
     pub(crate) name: String,
     pub(crate) agent_thread_id: ThreadId,
     pub(crate) profile: Option<String>,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) permissions: Vec<String>,
     pub(crate) status: TeamMemberStatus,
     pub(crate) agent_status: AgentStatus,
     pub(crate) created_at: i64,
@@ -76,6 +85,7 @@ pub(crate) struct TeamMessage {
     pub(crate) target_member_id: ThreadId,
     pub(crate) content: String,
     pub(crate) submitted_id: Option<String>,
+    pub(crate) delivery_mode: TeamMessageDeliveryMode,
     pub(crate) delivery_status: TeamMessageDeliveryStatus,
     pub(crate) created_at: i64,
 }
@@ -93,6 +103,7 @@ pub(crate) struct TeamTask {
     pub(crate) team_id: ThreadId,
     pub(crate) title: String,
     pub(crate) assignee_member_id: Option<ThreadId>,
+    pub(crate) dependencies: Vec<ThreadId>,
     pub(crate) status: TeamTaskStatus,
     pub(crate) note: Option<String>,
     pub(crate) created_at: i64,
@@ -120,6 +131,16 @@ pub(crate) enum TeamEvent {
         target_member_id: ThreadId,
         at: i64,
     },
+    TaskCreated {
+        team_id: ThreadId,
+        task_id: ThreadId,
+        at: i64,
+    },
+    TaskUpdated {
+        team_id: ThreadId,
+        task_id: ThreadId,
+        at: i64,
+    },
     TeamStopped {
         team_id: ThreadId,
         at: i64,
@@ -142,9 +163,37 @@ pub(crate) struct SpawnTeamMemberRequest {
     pub(crate) team_id: ThreadId,
     pub(crate) name: String,
     pub(crate) profile: Option<String>,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) permissions: Vec<String>,
     pub(crate) initial_items: Vec<UserInput>,
     pub(crate) config: Config,
     pub(crate) session_source: Option<SessionSource>,
+}
+
+pub(crate) struct SendTeamMessageRequest {
+    pub(crate) team_id: ThreadId,
+    pub(crate) sender_member_id: Option<ThreadId>,
+    pub(crate) member_id: ThreadId,
+    pub(crate) content: String,
+    pub(crate) delivery_mode: TeamMessageDeliveryMode,
+    pub(crate) items: Vec<UserInput>,
+}
+
+pub(crate) struct CreateTeamTaskRequest {
+    pub(crate) team_id: ThreadId,
+    pub(crate) title: String,
+    pub(crate) assignee_member_id: Option<ThreadId>,
+    pub(crate) dependencies: Vec<ThreadId>,
+    pub(crate) note: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct UpdateTeamTaskRequest {
+    pub(crate) title: Option<String>,
+    pub(crate) assignee_member_id: Option<ThreadId>,
+    pub(crate) dependencies: Option<Vec<ThreadId>>,
+    pub(crate) status: Option<TeamTaskStatus>,
+    pub(crate) note: Option<String>,
 }
 
 #[derive(Default)]
@@ -209,6 +258,8 @@ impl TeamRegistry {
             team_id,
             name,
             profile,
+            capabilities,
+            permissions,
             initial_items,
             config,
             session_source,
@@ -224,6 +275,8 @@ impl TeamRegistry {
             name,
             agent_thread_id,
             profile,
+            capabilities,
+            permissions,
             status: TeamMemberStatus::Active,
             agent_status,
             created_at: at,
@@ -249,35 +302,56 @@ impl TeamRegistry {
 
     pub(crate) async fn send_to_member(
         &self,
-        team_id: ThreadId,
-        member_id: ThreadId,
-        content: String,
-        items: Vec<UserInput>,
+        request: SendTeamMessageRequest,
         agent_control: &AgentControl,
     ) -> CodexResult<TeamMessage> {
+        let SendTeamMessageRequest {
+            team_id,
+            sender_member_id,
+            member_id,
+            content,
+            delivery_mode,
+            items,
+        } = request;
         self.ensure_team_active(team_id).await?;
-        let (lead_thread_id, agent_thread_id) = {
+        let (sender, agent_thread_id) = {
             let state = self.state.read().await;
             let team = state
                 .teams
                 .get(&team_id)
                 .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            let sender = if let Some(sender_member_id) = sender_member_id {
+                if !team
+                    .members
+                    .iter()
+                    .any(|member| member.id == sender_member_id)
+                {
+                    return Err(CodexErr::ThreadNotFound(sender_member_id));
+                }
+                TeamMessageEndpoint::Member(sender_member_id)
+            } else {
+                TeamMessageEndpoint::Lead(team.lead_thread_id)
+            };
             let member = team
                 .members
                 .iter()
                 .find(|member| member.id == member_id)
                 .ok_or(CodexErr::ThreadNotFound(member_id))?;
-            (team.lead_thread_id, member.agent_thread_id)
+            (sender, member.agent_thread_id)
         };
+        if delivery_mode == TeamMessageDeliveryMode::Interrupt {
+            agent_control.interrupt_agent(agent_thread_id).await?;
+        }
         let submission_id = agent_control.send_input(agent_thread_id, items).await?;
         let at = unix_timestamp();
         let message = TeamMessage {
             id: ThreadId::new(),
             team_id,
-            sender: TeamMessageEndpoint::Lead(lead_thread_id),
+            sender,
             target_member_id: member_id,
             content,
             submitted_id: Some(submission_id),
+            delivery_mode,
             delivery_status: TeamMessageDeliveryStatus::Submitted,
             created_at: at,
         };
@@ -303,6 +377,138 @@ impl TeamRegistry {
             at,
         });
         Ok(message)
+    }
+
+    pub(crate) async fn record_failure(&self, team_id: Option<ThreadId>, message: String) {
+        let at = unix_timestamp();
+        let mut state = self.state.write().await;
+        if let Some(team_id) = team_id
+            && let Some(team) = state.teams.get_mut(&team_id)
+        {
+            team.updated_at = at;
+        }
+        state.events.push(TeamEvent::Failure {
+            team_id,
+            message,
+            at,
+        });
+    }
+
+    pub(crate) async fn list_tasks(&self, team_id: ThreadId) -> CodexResult<Vec<TeamTask>> {
+        let state = self.state.read().await;
+        let team = state
+            .teams
+            .get(&team_id)
+            .ok_or(CodexErr::ThreadNotFound(team_id))?;
+        Ok(team.tasks.clone())
+    }
+
+    pub(crate) async fn list_events(&self, team_id: ThreadId) -> CodexResult<Vec<TeamEvent>> {
+        let state = self.state.read().await;
+        if !state.teams.contains_key(&team_id) {
+            return Err(CodexErr::ThreadNotFound(team_id));
+        }
+        Ok(state
+            .events
+            .iter()
+            .filter(|event| event.team_id() == Some(team_id))
+            .cloned()
+            .collect())
+    }
+
+    pub(crate) async fn create_task(
+        &self,
+        request: CreateTeamTaskRequest,
+    ) -> CodexResult<TeamTask> {
+        let CreateTeamTaskRequest {
+            team_id,
+            title,
+            assignee_member_id,
+            dependencies,
+            note,
+        } = request;
+        self.ensure_team_active(team_id).await?;
+        let at = unix_timestamp();
+        let task = TeamTask {
+            id: ThreadId::new(),
+            team_id,
+            title,
+            assignee_member_id,
+            dependencies,
+            status: TeamTaskStatus::Open,
+            note,
+            created_at: at,
+            updated_at: at,
+        };
+
+        let mut state = self.state.write().await;
+        let team = state
+            .teams
+            .get_mut(&team_id)
+            .ok_or(CodexErr::ThreadNotFound(team_id))?;
+        validate_member(team, task.assignee_member_id)?;
+        validate_dependencies(team, &task.dependencies)?;
+        team.tasks.push(task.clone());
+        team.updated_at = at;
+        state.events.push(TeamEvent::TaskCreated {
+            team_id,
+            task_id: task.id,
+            at,
+        });
+        Ok(task)
+    }
+
+    pub(crate) async fn update_task(
+        &self,
+        team_id: ThreadId,
+        task_id: ThreadId,
+        request: UpdateTeamTaskRequest,
+    ) -> CodexResult<TeamTask> {
+        self.ensure_team_active(team_id).await?;
+        let at = unix_timestamp();
+        let mut state = self.state.write().await;
+        let team = state
+            .teams
+            .get_mut(&team_id)
+            .ok_or(CodexErr::ThreadNotFound(team_id))?;
+        validate_member(team, request.assignee_member_id)?;
+        if let Some(dependencies) = &request.dependencies {
+            if dependencies.contains(&task_id) {
+                return Err(CodexErr::UnsupportedOperation(format!(
+                    "task {task_id} can't depend on itself"
+                )));
+            }
+            validate_dependencies(team, dependencies)?;
+        }
+        let task = team
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == task_id)
+            .ok_or(CodexErr::ThreadNotFound(task_id))?;
+        if let Some(title) = request.title {
+            task.title = title;
+        }
+        if let Some(assignee_member_id) = request.assignee_member_id {
+            task.assignee_member_id = Some(assignee_member_id);
+        }
+        if let Some(dependencies) = request.dependencies {
+            task.dependencies = dependencies;
+        }
+        if let Some(status) = request.status {
+            task.status = status;
+        }
+        if let Some(note) = request.note {
+            task.note = Some(note);
+        }
+        task.updated_at = at;
+        let task = task.clone();
+        team.updated_at = at;
+        state.events.push(TeamEvent::TaskUpdated {
+            team_id,
+            task_id,
+            at,
+        });
+        Ok(task)
     }
 
     pub(crate) async fn stop_team(
@@ -456,10 +662,30 @@ impl TeamEvent {
             TeamEvent::TeamCreated { team_id, .. }
             | TeamEvent::MemberSpawned { team_id, .. }
             | TeamEvent::MessageSubmitted { team_id, .. }
+            | TeamEvent::TaskCreated { team_id, .. }
+            | TeamEvent::TaskUpdated { team_id, .. }
             | TeamEvent::TeamStopped { team_id, .. } => Some(*team_id),
             TeamEvent::Failure { team_id, .. } => *team_id,
         }
     }
+}
+
+fn validate_member(team: &Team, member_id: Option<ThreadId>) -> CodexResult<()> {
+    if let Some(member_id) = member_id
+        && !team.members.iter().any(|member| member.id == member_id)
+    {
+        return Err(CodexErr::ThreadNotFound(member_id));
+    }
+    Ok(())
+}
+
+fn validate_dependencies(team: &Team, dependencies: &[ThreadId]) -> CodexResult<()> {
+    for dependency in dependencies {
+        if !team.tasks.iter().any(|task| task.id == *dependency) {
+            return Err(CodexErr::ThreadNotFound(*dependency));
+        }
+    }
+    Ok(())
 }
 
 fn unix_timestamp() -> i64 {
@@ -527,6 +753,8 @@ mod tests {
                     team_id: team.id,
                     name: "teammate".to_string(),
                     profile: Some("general".to_string()),
+                    capabilities: Vec::new(),
+                    permissions: Vec::new(),
                     initial_items: text_input("initial task"),
                     config: turn.config.as_ref().clone(),
                     session_source: None,
@@ -550,10 +778,14 @@ mod tests {
 
         let message = registry
             .send_to_member(
-                team.id,
-                member.id,
-                "follow up".to_string(),
-                text_input("follow up"),
+                SendTeamMessageRequest {
+                    team_id: team.id,
+                    sender_member_id: None,
+                    member_id: member.id,
+                    content: "follow up".to_string(),
+                    delivery_mode: TeamMessageDeliveryMode::Queue,
+                    items: text_input("follow up"),
+                },
                 &agent_control,
             )
             .await
@@ -595,6 +827,94 @@ mod tests {
                 .iter()
                 .any(|(id, op)| *id == member.agent_thread_id && matches!(op, Op::Shutdown)),
             "stop should submit shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_board_create_update_list_and_events_are_generic() {
+        let registry = TeamRegistry::default();
+        let manager = thread_manager();
+        let agent_control = manager.agent_control();
+        let (_session, turn) = make_session_and_context().await;
+        let team = registry
+            .create_team("tasks".to_string(), ThreadId::new())
+            .await;
+        let member = registry
+            .spawn_member(
+                SpawnTeamMemberRequest {
+                    team_id: team.id,
+                    name: "teammate".to_string(),
+                    profile: Some("general".to_string()),
+                    capabilities: Vec::new(),
+                    permissions: Vec::new(),
+                    initial_items: text_input("initial task"),
+                    config: turn.config.as_ref().clone(),
+                    session_source: None,
+                },
+                &agent_control,
+            )
+            .await
+            .expect("spawn member");
+        let first = registry
+            .create_task(CreateTeamTaskRequest {
+                team_id: team.id,
+                title: "map the code".to_string(),
+                assignee_member_id: None,
+                dependencies: Vec::new(),
+                note: Some("start here".to_string()),
+            })
+            .await
+            .expect("create first task");
+        let second = registry
+            .create_task(CreateTeamTaskRequest {
+                team_id: team.id,
+                title: "wire the tool".to_string(),
+                assignee_member_id: None,
+                dependencies: vec![first.id],
+                note: None,
+            })
+            .await
+            .expect("create second task");
+
+        let updated = registry
+            .update_task(
+                team.id,
+                second.id,
+                UpdateTeamTaskRequest {
+                    title: Some("wire and test the tool".to_string()),
+                    assignee_member_id: Some(member.id),
+                    dependencies: Some(vec![first.id]),
+                    status: Some(TeamTaskStatus::Completed),
+                    note: Some("ready".to_string()),
+                },
+            )
+            .await
+            .expect("update task");
+        let expected_tasks = vec![first.clone(), updated.clone()];
+
+        assert_eq!(
+            registry.list_tasks(team.id).await.expect("list tasks"),
+            expected_tasks
+        );
+
+        let snapshot = registry
+            .team_status(team.id, &agent_control)
+            .await
+            .expect("team status");
+        assert_eq!(snapshot.team.tasks, expected_tasks);
+
+        let events = registry.list_events(team.id).await.expect("list events");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TeamEvent::TaskCreated { task_id, .. } if *task_id == first.id)),
+            "task creation should be observable"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TeamEvent::TaskUpdated { task_id, .. } if *task_id == updated.id)),
+            "task updates should be observable"
         );
     }
 }

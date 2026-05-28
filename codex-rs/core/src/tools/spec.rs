@@ -643,6 +643,24 @@ fn create_team_spawn_member_tool() -> ToolSpec {
             },
         ),
         (
+            "capabilities".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::String { description: None }),
+                description: Some(
+                    "Optional generic capability labels attached to this member.".to_string(),
+                ),
+            },
+        ),
+        (
+            "permissions".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::String { description: None }),
+                description: Some(
+                    "Optional generic permission labels attached to this member.".to_string(),
+                ),
+            },
+        ),
+        (
             "message".to_string(),
             JsonSchema::String {
                 description: Some(
@@ -683,10 +701,24 @@ fn create_team_send_tool() -> ToolSpec {
             },
         ),
         (
+            "sender_member_id".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional member id to record as sender. Omit for the team lead.".to_string(),
+                ),
+            },
+        ),
+        (
+            "delivery_mode".to_string(),
+            JsonSchema::String {
+                description: Some("Optional delivery mode: queue or interrupt.".to_string()),
+            },
+        ),
+        (
             "message".to_string(),
             JsonSchema::String {
                 description: Some(
-                    "Plain-text message to route from the team lead to the teammate. Use either message or items."
+                    "Plain-text message to route to the target team member. Omit sender_member_id for lead-originated messages; set sender_member_id for member-originated messages. Use either message or items."
                         .to_string(),
                 ),
             },
@@ -696,12 +728,169 @@ fn create_team_send_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "team_send".to_string(),
-        description: "Send a lead-to-member team message through the existing agent input path."
+        description: "Send a team message to a member through the existing agent input path."
             .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
             properties,
             required: Some(vec!["team_id".to_string(), "member_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_task_create_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_id".to_string(),
+            JsonSchema::String {
+                description: Some("Team id from create_team or list_teams.".to_string()),
+            },
+        ),
+        (
+            "title".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Generic task title for the team's shared task board.".to_string(),
+                ),
+            },
+        ),
+        (
+            "assignee_member_id".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional member id from team_spawn_member or team_status.".to_string(),
+                ),
+            },
+        ),
+        (
+            "dependencies".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::String { description: None }),
+                description: Some("Optional task ids this task depends on.".to_string()),
+            },
+        ),
+        (
+            "note".to_string(),
+            JsonSchema::String {
+                description: Some("Optional generic task note.".to_string()),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_task_create".to_string(),
+        description: "Create a generic shared task-board item for a Codex team.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string(), "title".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_task_update_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_id".to_string(),
+            JsonSchema::String {
+                description: Some("Team id from create_team or list_teams.".to_string()),
+            },
+        ),
+        (
+            "task_id".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Task id from team_task_create, team_task_list, or team_status.".to_string(),
+                ),
+            },
+        ),
+        (
+            "title".to_string(),
+            JsonSchema::String {
+                description: Some("Optional replacement task title.".to_string()),
+            },
+        ),
+        (
+            "assignee_member_id".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional member id from team_spawn_member or team_status.".to_string(),
+                ),
+            },
+        ),
+        (
+            "dependencies".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::String { description: None }),
+                description: Some("Optional replacement list of dependency task ids.".to_string()),
+            },
+        ),
+        (
+            "status".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional status: open, claimed, completed, or blocked.".to_string(),
+                ),
+            },
+        ),
+        (
+            "note".to_string(),
+            JsonSchema::String {
+                description: Some("Optional replacement generic task note.".to_string()),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_task_update".to_string(),
+        description: "Update a generic shared task-board item without encoding workflow policy."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string(), "task_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_task_list_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "team_id".to_string(),
+        JsonSchema::String {
+            description: Some("Team id from create_team or list_teams.".to_string()),
+        },
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_task_list".to_string(),
+        description: "List one team's shared task-board items.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_event_list_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "team_id".to_string(),
+        JsonSchema::String {
+            description: Some("Team id from create_team or list_teams.".to_string()),
+        },
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_event_list".to_string(),
+        description: "List one team's append-only lifecycle, message, and task events.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string()]),
             additional_properties: Some(false.into()),
         },
     })
@@ -1753,6 +1942,10 @@ pub(crate) fn build_specs(
         builder.push_spec(create_team_status_tool());
         builder.push_spec(create_team_spawn_member_tool());
         builder.push_spec(create_team_send_tool());
+        builder.push_spec(create_team_task_create_tool());
+        builder.push_spec(create_team_task_update_tool());
+        builder.push_spec(create_team_task_list_tool());
+        builder.push_spec(create_team_event_list_tool());
         builder.push_spec(create_team_stop_tool());
         builder.register_handler("spawn_agent", collab_handler.clone());
         builder.register_handler("send_input", collab_handler.clone());
@@ -1764,6 +1957,10 @@ pub(crate) fn build_specs(
         builder.register_handler("team_status", team_handler.clone());
         builder.register_handler("team_spawn_member", team_handler.clone());
         builder.register_handler("team_send", team_handler.clone());
+        builder.register_handler("team_task_create", team_handler.clone());
+        builder.register_handler("team_task_update", team_handler.clone());
+        builder.register_handler("team_task_list", team_handler.clone());
+        builder.register_handler("team_event_list", team_handler.clone());
         builder.register_handler("team_stop", team_handler);
     }
 
@@ -2075,6 +2272,10 @@ mod tests {
                 "team_status",
                 "team_spawn_member",
                 "team_send",
+                "team_task_create",
+                "team_task_update",
+                "team_task_list",
+                "team_event_list",
                 "team_stop",
             ],
         );
@@ -2105,6 +2306,16 @@ mod tests {
                 create_team_spawn_member_tool(),
             ),
             ("team_send".to_string(), create_team_send_tool()),
+            (
+                "team_task_create".to_string(),
+                create_team_task_create_tool(),
+            ),
+            (
+                "team_task_update".to_string(),
+                create_team_task_update_tool(),
+            ),
+            ("team_task_list".to_string(), create_team_task_list_tool()),
+            ("team_event_list".to_string(), create_team_event_list_tool()),
             ("team_stop".to_string(), create_team_stop_tool()),
         ]);
 
