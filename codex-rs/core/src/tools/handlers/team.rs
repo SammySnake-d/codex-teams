@@ -1261,6 +1261,11 @@ mod tests {
                 .any(|event| matches!(event, crate::team::TeamEvent::Failure { .. })),
             "team_event_list should expose recorded failures"
         );
+        let failure_count_before_stop = listed_events
+            .events
+            .iter()
+            .filter(|event| matches!(event, crate::team::TeamEvent::Failure { .. }))
+            .count();
 
         TeamHandler
             .handle(invocation(
@@ -1278,6 +1283,56 @@ mod tests {
                 .any(|(id, op)| *id == spawned_b.member.agent_thread_id
                     && matches!(op, Op::Shutdown)),
             "team stop should submit shutdown for remaining active members"
+        );
+
+        let repeated_stop = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_stop",
+                json!({"team_id": created.team.id.to_string()}),
+            ))
+            .await;
+        assert!(
+            repeated_stop.is_err(),
+            "team_stop should reject already stopped teams"
+        );
+
+        let stopped_status = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_status",
+                json!({"team_id": created.team.id.to_string()}),
+            ))
+            .await
+            .expect("stopped team status remains readable");
+        let stopped_status: TestTeamStatusResult =
+            serde_json::from_str(&text_output(stopped_status)).expect("stopped status result");
+        assert_eq!(
+            stopped_status.snapshot.team.status,
+            crate::team::TeamStatus::Stopped
+        );
+
+        let stopped_events = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_event_list",
+                json!({"team_id": created.team.id.to_string()}),
+            ))
+            .await
+            .expect("stopped team events remain readable");
+        let stopped_events: TestTeamEventListResult =
+            serde_json::from_str(&text_output(stopped_events)).expect("stopped events result");
+        assert!(
+            stopped_events
+                .events
+                .iter()
+                .filter(|event| matches!(event, crate::team::TeamEvent::Failure { .. }))
+                .count()
+                > failure_count_before_stop,
+            "rejected repeated team_stop should be recorded as a failure event"
         );
     }
 }

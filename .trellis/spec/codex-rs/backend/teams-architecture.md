@@ -80,6 +80,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 - `team_send.sender_member_id` is optional. Omit it for a lead-originated message; provide a member id only when that member belongs to the same team.
 - `team_member_stop` requires an active team and a known member. It must be idempotent for an already stopped member, must not stop the team, and must not shut down other active members.
 - Stopped members remain visible in snapshots and event readback, but member-targeted sends from/to stopped members and task claims by stopped members must be rejected.
+- `team_stop` requires an active team. Once stopped, the team remains visible through readback paths, but repeated `team_stop` calls must be rejected as stopped-team mutations.
 - Task dependencies are task ids from the same team. A task must not depend on itself.
 - `team_task_claim` requires an active team, known member, open task status, completed dependencies, and either no assignee or the same assignee as the claiming member.
 - Task `note` is generic metadata for the shared task board. It must not become a policy-specific result, blocker, review verdict, or workflow template field in Teams core.

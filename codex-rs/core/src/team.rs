@@ -724,6 +724,7 @@ impl TeamRegistry {
         team_id: ThreadId,
         agent_control: &AgentControl,
     ) -> CodexResult<TeamSnapshot> {
+        self.ensure_team_active(team_id).await?;
         let agent_thread_ids = {
             let state = self.state.read().await;
             let team = state
@@ -1109,6 +1110,40 @@ mod tests {
                 .iter()
                 .any(|(id, op)| *id == member.agent_thread_id && matches!(op, Op::Shutdown)),
             "stop should submit shutdown"
+        );
+        assert!(
+            registry.stop_team(team.id, &agent_control).await.is_err(),
+            "stopping an already stopped team should fail"
+        );
+        assert_eq!(
+            registry
+                .team_status(team.id, &agent_control)
+                .await
+                .expect("stopped team remains readable")
+                .team
+                .status,
+            TeamStatus::Stopped
+        );
+        assert_eq!(
+            registry.list_teams().await[0].status,
+            TeamStatus::Stopped,
+            "stopped team remains visible in list_teams"
+        );
+        assert_eq!(
+            registry
+                .list_tasks(team.id)
+                .await
+                .expect("list stopped team tasks"),
+            Vec::new()
+        );
+        assert!(
+            registry
+                .list_events(team.id)
+                .await
+                .expect("list stopped team events")
+                .iter()
+                .any(|event| matches!(event, TeamEvent::TeamStopped { .. })),
+            "stopped team event feed remains readable"
         );
     }
 

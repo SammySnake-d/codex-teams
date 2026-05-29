@@ -75,6 +75,7 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 - Member `capabilities` and `permissions` are generic labels attached to team members; Teams core stores and returns them but does not enforce policy from them.
 - `team_send` records either the lead or a member as sender, supports member or lead targets, submits member-targeted messages through existing `AgentControl` input primitives, and records lead-targeted messages in the shared team mailbox/event feed. `interrupt` delivery is only valid for member targets.
 - `team_member_stop` stops one teammate agent, marks only that member stopped, records a `MemberStopped` event, keeps the team active/readable, rejects later sends from/to that stopped member, and rejects task claims by that stopped member.
+- `team_stop` is a mutating lifecycle transition. It stops active teammate agents and marks the team stopped once; repeated `team_stop` calls against an already stopped team are rejected while readback paths remain available.
 - Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, `team_task_create`, `team_task_update`, `team_task_claim`, `team_task_list`, `team_event_list`, `team_member_stop`, and `team_stop`.
 - `/teams` is a manual TUI guidance surface only for this slice; it does not perform list/status/send/stop actions directly.
 
@@ -170,6 +171,17 @@ Member stop lifecycle proof from 2026-05-29:
 - `cargo test -p codex-core team --locked` passed: 9 passed.
 - `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked` passed: 1 passed.
 - `cargo test -p codex-core team_tools_have_exact_specs_and_handlers_when_collab_is_enabled --locked` passed: 1 passed.
+- `just fix -p codex-core` passed.
+- `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
+- `git diff --check` passed.
+- `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs` returned no matches.
+
+Stopped team mutation guard proof from 2026-05-29:
+
+- `cd codex-rs && just fmt` passed.
+- `cargo test -p codex-core spawn_send_status_and_stop_use_agent_control --locked` passed: 1 passed.
+- `cargo test -p codex-core team_tool_chain_creates_spawns_sends_statuses_and_stops --locked` passed: 1 passed.
+- `cargo test -p codex-core team --locked` passed: 9 passed.
 - `just fix -p codex-core` passed.
 - `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
 - `git diff --check` passed.
