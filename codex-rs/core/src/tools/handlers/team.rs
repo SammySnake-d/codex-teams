@@ -5,6 +5,7 @@ use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
 use crate::team::CreateTeamTaskRequest;
 use crate::team::SendTeamMessageRequest;
+use crate::team::SendTeamMessageTarget;
 use crate::team::SpawnTeamMemberRequest;
 use crate::team::TeamMessageDeliveryMode;
 use crate::team::TeamTaskStatus;
@@ -98,7 +99,8 @@ struct TeamSpawnMemberArgs {
 struct TeamSendArgs {
     team_id: String,
     sender_member_id: Option<String>,
-    member_id: String,
+    target: Option<String>,
+    member_id: Option<String>,
     delivery_mode: Option<String>,
     message: Option<String>,
     items: Option<Vec<UserInput>>,
@@ -283,13 +285,35 @@ async fn team_send(
     let args: TeamSendArgs = parse_arguments(&arguments)?;
     let team_id = id_from_str("team", &args.team_id)?;
     let sender_member_id = optional_id_from_str("sender member", args.sender_member_id)?;
-    let member_id = id_from_str("member", &args.member_id)?;
     let delivery_mode = match args.delivery_mode.as_deref() {
         Some("interrupt") => TeamMessageDeliveryMode::Interrupt,
         Some("queue") | None => TeamMessageDeliveryMode::Queue,
         Some(other) => {
             return Err(FunctionCallError::RespondToModel(format!(
                 "unsupported team message delivery mode {other}; use queue or interrupt"
+            )));
+        }
+    };
+    let target = match args.target.as_deref() {
+        Some("lead") => {
+            if args.member_id.is_some() {
+                return Err(FunctionCallError::RespondToModel(
+                    "member_id must be omitted when team_send target is lead".to_string(),
+                ));
+            }
+            SendTeamMessageTarget::Lead
+        }
+        Some("member") | None => {
+            let Some(member_id) = args.member_id else {
+                return Err(FunctionCallError::RespondToModel(
+                    "member_id is required when team_send target is member".to_string(),
+                ));
+            };
+            SendTeamMessageTarget::Member(id_from_str("member", &member_id)?)
+        }
+        Some(other) => {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "unsupported team_send target {other}; use lead or member"
             )));
         }
     };
@@ -301,11 +325,11 @@ async fn team_send(
         session
             .services
             .team_registry
-            .send_to_member(
+            .send_message(
                 SendTeamMessageRequest {
                     team_id,
                     sender_member_id,
-                    member_id,
+                    target,
                     content,
                     delivery_mode,
                     items,
@@ -833,7 +857,37 @@ mod tests {
             member_sent.message.sender,
             crate::team::TeamMessageEndpoint::Member(spawned.member.id)
         );
-        assert_eq!(member_sent.message.target_member_id, spawned_b.member.id);
+        assert_eq!(
+            member_sent.message.target,
+            crate::team::TeamMessageEndpoint::Member(spawned_b.member.id)
+        );
+        assert_eq!(
+            member_sent.message.target_member_id,
+            Some(spawned_b.member.id)
+        );
+
+        let lead_sent = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_send",
+                json!({
+                    "team_id": created.team.id.to_string(),
+                    "sender_member_id": spawned.member.id.to_string(),
+                    "target": "lead",
+                    "message": "report to lead"
+                }),
+            ))
+            .await
+            .expect("send member-originated lead message");
+        let lead_sent: TestTeamSendResult =
+            serde_json::from_str(&text_output(lead_sent)).expect("lead send result");
+        assert_eq!(
+            lead_sent.message.target,
+            crate::team::TeamMessageEndpoint::Lead(created.team.lead_thread_id)
+        );
+        assert_eq!(lead_sent.message.target_member_id, None);
+        assert_eq!(lead_sent.message.submitted_id, None);
 
         let bad_delivery_mode = TeamHandler
             .handle(invocation(
@@ -1025,7 +1079,7 @@ mod tests {
         assert_eq!(status.snapshot.team.members[1].name, spawned_b.member.name);
         assert_eq!(
             status.snapshot.messages,
-            vec![sent.message, member_sent.message]
+            vec![sent.message, member_sent.message, lead_sent.message]
         );
         assert_eq!(status.snapshot.team.tasks, vec![updated_task.task]);
         assert!(

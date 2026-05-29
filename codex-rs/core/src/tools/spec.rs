@@ -695,9 +695,20 @@ fn create_team_send_tool() -> ToolSpec {
             },
         ),
         (
+            "target".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional target endpoint: member or lead. Defaults to member.".to_string(),
+                ),
+            },
+        ),
+        (
             "member_id".to_string(),
             JsonSchema::String {
-                description: Some("Member id from team_spawn_member or team_status.".to_string()),
+                description: Some(
+                    "Member id from team_spawn_member or team_status. Required when target is member; omit when target is lead."
+                        .to_string(),
+                ),
             },
         ),
         (
@@ -718,7 +729,7 @@ fn create_team_send_tool() -> ToolSpec {
             "message".to_string(),
             JsonSchema::String {
                 description: Some(
-                    "Plain-text message to route to the target team member. Omit sender_member_id for lead-originated messages; set sender_member_id for member-originated messages. Use either message or items."
+                    "Plain-text message to route to the target endpoint. Omit sender_member_id for lead-originated messages; set sender_member_id for member-originated messages. Use either message or items."
                         .to_string(),
                 ),
             },
@@ -728,12 +739,13 @@ fn create_team_send_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "team_send".to_string(),
-        description: "Send a team message to a member through the existing agent input path."
-            .to_string(),
+        description:
+            "Send a team message to a member agent or record a message to the team lead mailbox."
+                .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
             properties,
-            required: Some(vec!["team_id".to_string(), "member_id".to_string()]),
+            required: Some(vec!["team_id".to_string()]),
             additional_properties: Some(false.into()),
         },
     })

@@ -44,7 +44,7 @@ The first vertical slice should support:
 
 - create a team from model-callable core tools
 - spawn one teammate from the team
-- route lead-to-member and member-to-member messages
+- route lead-to-member, member-to-member, and member-to-lead messages
 - list team/member status
 - create, claim, update, and list generic shared task-board items
 - list the append-only team event feed
@@ -72,7 +72,7 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 - `team_task_claim` adds the smallest task-board state-machine transition: a known team member can claim an open task only when dependencies are completed and any existing assignee matches the claimant.
 - `team_event_list` exposes lifecycle, message, task, and failure events as the standalone event-feed readback path.
 - Member `capabilities` and `permissions` are generic labels attached to team members; Teams core stores and returns them but does not enforce policy from them.
-- `team_send` records either the lead or a member as sender and supports `queue` or `interrupt` delivery through existing `AgentControl` input primitives.
+- `team_send` records either the lead or a member as sender, supports member or lead targets, submits member-targeted messages through existing `AgentControl` input primitives, and records lead-targeted messages in the shared team mailbox/event feed. `interrupt` delivery is only valid for member targets.
 - Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, `team_task_create`, `team_task_update`, `team_task_claim`, `team_task_list`, `team_event_list`, and `team_stop`.
 - `/teams` is a manual TUI guidance surface only for this slice; it does not perform list/status/send/stop actions directly.
 
@@ -147,6 +147,18 @@ Shared team registry proof from 2026-05-29:
 - `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
 - `git diff --check` passed.
 - `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs codex-rs/core/src/agent/control.rs codex-rs/core/src/thread_manager.rs codex-rs/core/src/codex.rs` returned no matches.
+
+Lead mailbox target proof from 2026-05-29:
+
+- `cd codex-rs && just fmt` passed.
+- `cargo test -p codex-core spawn_send_status_and_stop_use_agent_control --locked` passed: 1 passed.
+- `cargo test -p codex-core team_tool_chain_creates_spawns_sends_statuses_and_stops --locked` passed: 1 passed.
+- `cargo test -p codex-core team --locked` passed: 8 passed.
+- `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked` passed: 1 passed.
+- `just fix -p codex-core` passed.
+- `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
+- `git diff --check` passed.
+- `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs` returned no matches.
 
 Task claim state-machine proof from 2026-05-29:
 

@@ -82,7 +82,8 @@ pub(crate) struct TeamMessage {
     pub(crate) id: ThreadId,
     pub(crate) team_id: ThreadId,
     pub(crate) sender: TeamMessageEndpoint,
-    pub(crate) target_member_id: ThreadId,
+    pub(crate) target: TeamMessageEndpoint,
+    pub(crate) target_member_id: Option<ThreadId>,
     pub(crate) content: String,
     pub(crate) submitted_id: Option<String>,
     pub(crate) delivery_mode: TeamMessageDeliveryMode,
@@ -128,7 +129,8 @@ pub(crate) enum TeamEvent {
     MessageSubmitted {
         team_id: ThreadId,
         message_id: ThreadId,
-        target_member_id: ThreadId,
+        target: TeamMessageEndpoint,
+        target_member_id: Option<ThreadId>,
         at: i64,
     },
     TaskCreated {
@@ -173,10 +175,16 @@ pub(crate) struct SpawnTeamMemberRequest {
 pub(crate) struct SendTeamMessageRequest {
     pub(crate) team_id: ThreadId,
     pub(crate) sender_member_id: Option<ThreadId>,
-    pub(crate) member_id: ThreadId,
+    pub(crate) target: SendTeamMessageTarget,
     pub(crate) content: String,
     pub(crate) delivery_mode: TeamMessageDeliveryMode,
     pub(crate) items: Vec<UserInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SendTeamMessageTarget {
+    Lead,
+    Member(ThreadId),
 }
 
 pub(crate) struct CreateTeamTaskRequest {
@@ -343,7 +351,7 @@ impl TeamRegistry {
         Ok(member)
     }
 
-    pub(crate) async fn send_to_member(
+    pub(crate) async fn send_message(
         &self,
         request: SendTeamMessageRequest,
         agent_control: &AgentControl,
@@ -351,13 +359,13 @@ impl TeamRegistry {
         let SendTeamMessageRequest {
             team_id,
             sender_member_id,
-            member_id,
+            target,
             content,
             delivery_mode,
             items,
         } = request;
         self.ensure_team_active(team_id).await?;
-        let (sender, agent_thread_id) = {
+        let (sender, target, target_member_id, agent_thread_id) = {
             let state = self.state.read().await;
             let team = state
                 .teams
@@ -375,48 +383,81 @@ impl TeamRegistry {
             } else {
                 TeamMessageEndpoint::Lead(team.lead_thread_id)
             };
-            let member = team
-                .members
-                .iter()
-                .find(|member| member.id == member_id)
-                .ok_or(CodexErr::ThreadNotFound(member_id))?;
-            (sender, member.agent_thread_id)
+            match target {
+                SendTeamMessageTarget::Lead => (
+                    sender,
+                    TeamMessageEndpoint::Lead(team.lead_thread_id),
+                    None,
+                    None,
+                ),
+                SendTeamMessageTarget::Member(member_id) => {
+                    let member = team
+                        .members
+                        .iter()
+                        .find(|member| member.id == member_id)
+                        .ok_or(CodexErr::ThreadNotFound(member_id))?;
+                    (
+                        sender,
+                        TeamMessageEndpoint::Member(member_id),
+                        Some(member_id),
+                        Some(member.agent_thread_id),
+                    )
+                }
+            }
         };
-        if delivery_mode == TeamMessageDeliveryMode::Interrupt {
-            agent_control.interrupt_agent(agent_thread_id).await?;
-        }
-        let submission_id = agent_control.send_input(agent_thread_id, items).await?;
+        let submission_id = if let Some(agent_thread_id) = agent_thread_id {
+            if delivery_mode == TeamMessageDeliveryMode::Interrupt {
+                agent_control.interrupt_agent(agent_thread_id).await?;
+            }
+            Some(agent_control.send_input(agent_thread_id, items).await?)
+        } else {
+            if delivery_mode == TeamMessageDeliveryMode::Interrupt {
+                return Err(CodexErr::UnsupportedOperation(
+                    "interrupt delivery is only supported for member targets".to_string(),
+                ));
+            }
+            None
+        };
         let at = unix_timestamp();
         let message = TeamMessage {
             id: ThreadId::new(),
             team_id,
             sender,
-            target_member_id: member_id,
+            target,
+            target_member_id,
             content,
-            submitted_id: Some(submission_id),
+            submitted_id: submission_id,
             delivery_mode,
             delivery_status: TeamMessageDeliveryStatus::Submitted,
             created_at: at,
         };
 
-        let agent_status = agent_control.get_status(agent_thread_id).await;
+        let agent_status = if let Some(agent_thread_id) = agent_thread_id {
+            Some(agent_control.get_status(agent_thread_id).await)
+        } else {
+            None
+        };
         let mut state = self.state.write().await;
         state.messages.push(message.clone());
         if let Some(team) = state.teams.get_mut(&team_id) {
-            if let Some(member) = team
-                .members
-                .iter_mut()
-                .find(|member| member.id == member_id)
+            if let Some(target_member_id) = target_member_id
+                && let Some(member) = team
+                    .members
+                    .iter_mut()
+                    .find(|member| member.id == target_member_id)
             {
                 member.last_activity_at = at;
-                member.agent_status = agent_status;
+                if let Some(agent_status) = agent_status {
+                    member.agent_status = agent_status;
+                }
             }
             team.updated_at = at;
         }
         state.events.push(TeamEvent::MessageSubmitted {
             team_id,
             message_id: message.id,
-            target_member_id: member_id,
+            target: message.target.clone(),
+            target_member_id,
             at,
         });
         Ok(message)
@@ -927,11 +968,11 @@ mod tests {
         );
 
         let message = registry
-            .send_to_member(
+            .send_message(
                 SendTeamMessageRequest {
                     team_id: team.id,
                     sender_member_id: None,
-                    member_id: member.id,
+                    target: SendTeamMessageTarget::Member(member.id),
                     content: "follow up".to_string(),
                     delivery_mode: TeamMessageDeliveryMode::Queue,
                     items: text_input("follow up"),
@@ -957,12 +998,33 @@ mod tests {
             "send should submit follow-up input"
         );
 
+        let lead_message = registry
+            .send_message(
+                SendTeamMessageRequest {
+                    team_id: team.id,
+                    sender_member_id: Some(member.id),
+                    target: SendTeamMessageTarget::Lead,
+                    content: "lead update".to_string(),
+                    delivery_mode: TeamMessageDeliveryMode::Queue,
+                    items: text_input("lead update"),
+                },
+                &agent_control,
+            )
+            .await
+            .expect("send lead mailbox message");
+        assert_eq!(
+            lead_message.target,
+            TeamMessageEndpoint::Lead(team.lead_thread_id)
+        );
+        assert_eq!(lead_message.target_member_id, None);
+        assert_eq!(lead_message.submitted_id, None);
+
         let status = registry
             .team_status(team.id, &agent_control)
             .await
             .expect("team status");
         assert_eq!(status.team.members.len(), 1);
-        assert_eq!(status.messages, vec![message]);
+        assert_eq!(status.messages, vec![message, lead_message]);
 
         let stopped = registry
             .stop_team(team.id, &agent_control)
