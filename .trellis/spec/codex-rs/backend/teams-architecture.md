@@ -40,7 +40,8 @@ First implementation should prove:
 4. List team status and member status.
 5. Create, claim, update, and list generic task-board items.
 6. List the team event feed.
-7. Stop the team cleanly.
+7. Stop one teammate while the team remains active.
+8. Stop the team cleanly.
 
 Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 
@@ -64,6 +65,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 - `team_task_claim(team_id, task_id, member_id)` -> claims one open shared task-board item for a team member after dependency and assignee checks.
 - `team_task_list(team_id)` -> lists a team's shared task-board items.
 - `team_event_list(team_id)` -> lists a team's append-only lifecycle, message, task, and failure events.
+- `team_member_stop(team_id, member_id)` -> stops one teammate agent and marks only that member stopped while keeping the team active.
 - `team_stop(team_id)` -> shuts down active teammate agents and marks the team stopped.
 
 ### 3. Contracts
@@ -76,6 +78,8 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 - `team_send.target` defaults to `member`; member targets require `member_id`, while lead targets must omit `member_id` and are recorded in the shared mailbox/event feed without submitting input to an agent thread.
 - `team_send.delivery_mode` defaults to `queue`; `interrupt` must call `AgentControl::interrupt_agent` before submitting input to member targets and must be rejected for lead targets.
 - `team_send.sender_member_id` is optional. Omit it for a lead-originated message; provide a member id only when that member belongs to the same team.
+- `team_member_stop` requires an active team and a known member. It must be idempotent for an already stopped member, must not stop the team, and must not shut down other active members.
+- Stopped members remain visible in snapshots and event readback, but member-targeted sends from/to stopped members and task claims by stopped members must be rejected.
 - Task dependencies are task ids from the same team. A task must not depend on itself.
 - `team_task_claim` requires an active team, known member, open task status, completed dependencies, and either no assignee or the same assignee as the claiming member.
 - Task `note` is generic metadata for the shared task board. It must not become a policy-specific result, blocker, review verdict, or workflow template field in Teams core.
@@ -87,6 +91,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 - Mutating a stopped team -> `UnsupportedOperation`.
 - Empty team/member/task/message labels -> model-readable validation error before registry mutation.
 - Unknown member assignee or sender -> `ThreadNotFound`.
+- Send to/from stopped member or claim by stopped member -> `UnsupportedOperation`.
 - Unknown task dependency -> `ThreadNotFound`.
 - Self-dependency on task update -> `UnsupportedOperation`.
 - Unsupported task status or delivery mode -> model-readable validation error listing supported values.

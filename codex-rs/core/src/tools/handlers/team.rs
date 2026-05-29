@@ -66,6 +66,7 @@ impl ToolHandler for TeamHandler {
             "team_task_claim" => team_task_claim(session, arguments).await,
             "team_task_list" => team_task_list(session, arguments).await,
             "team_event_list" => team_event_list(session, arguments).await,
+            "team_member_stop" => team_member_stop(session, arguments).await,
             "team_stop" => team_stop(session, arguments).await,
             other => Err(FunctionCallError::RespondToModel(format!(
                 "unsupported team tool {other}"
@@ -133,6 +134,12 @@ struct TeamTaskClaimArgs {
     member_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TeamMemberIdArgs {
+    team_id: String,
+    member_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct CreateTeamResult {
     team: crate::team::Team,
@@ -181,6 +188,11 @@ struct TeamTaskListResult {
 #[derive(Debug, Serialize)]
 struct TeamEventListResult {
     events: Vec<crate::team::TeamEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct TeamMemberStopResult {
+    snapshot: crate::team::TeamSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -483,6 +495,30 @@ async fn team_event_list(
     )
 }
 
+async fn team_member_stop(
+    session: Arc<Session>,
+    arguments: String,
+) -> Result<ToolOutput, FunctionCallError> {
+    let args: TeamMemberIdArgs = parse_arguments(&arguments)?;
+    let team_id = id_from_str("team", &args.team_id)?;
+    let member_id = id_from_str("member", &args.member_id)?;
+    let snapshot = team_result(
+        session.as_ref(),
+        Some(team_id),
+        session
+            .services
+            .team_registry
+            .stop_member(team_id, member_id, &session.services.agent_control)
+            .await,
+    )
+    .await?;
+    json_output(
+        &TeamMemberStopResult { snapshot },
+        Some(true),
+        "team_member_stop",
+    )
+}
+
 async fn team_stop(
     session: Arc<Session>,
     arguments: String,
@@ -728,6 +764,11 @@ mod tests {
     }
 
     #[derive(Debug, Deserialize)]
+    struct TestTeamMemberStopResult {
+        snapshot: crate::team::TeamSnapshot,
+    }
+
+    #[derive(Debug, Deserialize)]
     struct TestTeamStatusResult {
         snapshot: crate::team::TeamSnapshot,
     }
@@ -888,6 +929,25 @@ mod tests {
         );
         assert_eq!(lead_sent.message.target_member_id, None);
         assert_eq!(lead_sent.message.submitted_id, None);
+
+        let bad_lead_interrupt = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_send",
+                json!({
+                    "team_id": created.team.id.to_string(),
+                    "sender_member_id": spawned.member.id.to_string(),
+                    "target": "lead",
+                    "delivery_mode": "interrupt",
+                    "message": "urgent lead report"
+                }),
+            ))
+            .await;
+        assert!(
+            bad_lead_interrupt.is_err(),
+            "lead mailbox target should reject interrupt delivery"
+        );
 
         let bad_delivery_mode = TeamHandler
             .handle(invocation(
@@ -1091,6 +1151,85 @@ mod tests {
             "team_status should include task events"
         );
 
+        let member_stopped = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_member_stop",
+                json!({
+                    "team_id": created.team.id.to_string(),
+                    "member_id": spawned.member.id.to_string()
+                }),
+            ))
+            .await
+            .expect("stop one member");
+        let member_stopped: TestTeamMemberStopResult =
+            serde_json::from_str(&text_output(member_stopped)).expect("member stop result");
+        assert_eq!(
+            member_stopped.snapshot.team.status,
+            crate::team::TeamStatus::Active
+        );
+        assert_eq!(
+            member_stopped.snapshot.team.members[0].status,
+            crate::team::TeamMemberStatus::Stopped
+        );
+        assert_eq!(
+            member_stopped.snapshot.team.members[1].status,
+            crate::team::TeamMemberStatus::Active
+        );
+        assert!(
+            member_stopped.snapshot.events.iter().any(|event| matches!(
+                event,
+                crate::team::TeamEvent::MemberStopped { member_id, .. }
+                    if *member_id == spawned.member.id
+            )),
+            "team_member_stop should be observable"
+        );
+        assert!(
+            manager
+                .captured_ops()
+                .iter()
+                .any(|(id, op)| *id == spawned.member.agent_thread_id && matches!(op, Op::Shutdown)),
+            "team_member_stop should submit shutdown"
+        );
+
+        let send_to_stopped_member = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_send",
+                json!({
+                    "team_id": created.team.id.to_string(),
+                    "member_id": spawned.member.id.to_string(),
+                    "message": "after stop"
+                }),
+            ))
+            .await;
+        assert!(
+            send_to_stopped_member.is_err(),
+            "team_send to stopped member should fail"
+        );
+
+        let send_to_active_member = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_send",
+                json!({
+                    "team_id": created.team.id.to_string(),
+                    "member_id": spawned_b.member.id.to_string(),
+                    "message": "still active"
+                }),
+            ))
+            .await
+            .expect("send to active member after stopping one member");
+        let send_to_active_member: TestTeamSendResult =
+            serde_json::from_str(&text_output(send_to_active_member)).expect("active send result");
+        assert_eq!(
+            send_to_active_member.message.target,
+            crate::team::TeamMessageEndpoint::Member(spawned_b.member.id)
+        );
+
         let failed_update = TeamHandler
             .handle(invocation(
                 Arc::clone(&session),
@@ -1136,8 +1275,9 @@ mod tests {
             manager
                 .captured_ops()
                 .iter()
-                .any(|(id, op)| *id == spawned.member.agent_thread_id && matches!(op, Op::Shutdown)),
-            "team stop should submit shutdown"
+                .any(|(id, op)| *id == spawned_b.member.agent_thread_id
+                    && matches!(op, Op::Shutdown)),
+            "team stop should submit shutdown for remaining active members"
         );
     }
 }

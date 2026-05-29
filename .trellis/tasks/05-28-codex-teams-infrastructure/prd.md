@@ -48,6 +48,7 @@ The first vertical slice should support:
 - list team/member status
 - create, claim, update, and list generic shared task-board items
 - list the append-only team event feed
+- stop one teammate while the team remains active
 - stop the team
 - expose minimal `/teams` manual guidance; model-callable tools are the action path
 
@@ -73,7 +74,8 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 - `team_event_list` exposes lifecycle, message, task, and failure events as the standalone event-feed readback path.
 - Member `capabilities` and `permissions` are generic labels attached to team members; Teams core stores and returns them but does not enforce policy from them.
 - `team_send` records either the lead or a member as sender, supports member or lead targets, submits member-targeted messages through existing `AgentControl` input primitives, and records lead-targeted messages in the shared team mailbox/event feed. `interrupt` delivery is only valid for member targets.
-- Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, `team_task_create`, `team_task_update`, `team_task_claim`, `team_task_list`, `team_event_list`, and `team_stop`.
+- `team_member_stop` stops one teammate agent, marks only that member stopped, records a `MemberStopped` event, keeps the team active/readable, rejects later sends from/to that stopped member, and rejects task claims by that stopped member.
+- Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, `team_task_create`, `team_task_update`, `team_task_claim`, `team_task_list`, `team_event_list`, `team_member_stop`, and `team_stop`.
 - `/teams` is a manual TUI guidance surface only for this slice; it does not perform list/status/send/stop actions directly.
 
 ## Out Of Scope For First Slice
@@ -155,6 +157,19 @@ Lead mailbox target proof from 2026-05-29:
 - `cargo test -p codex-core team_tool_chain_creates_spawns_sends_statuses_and_stops --locked` passed: 1 passed.
 - `cargo test -p codex-core team --locked` passed: 8 passed.
 - `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked` passed: 1 passed.
+- `just fix -p codex-core` passed.
+- `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
+- `git diff --check` passed.
+- `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs` returned no matches.
+
+Member stop lifecycle proof from 2026-05-29:
+
+- `cd codex-rs && just fmt` passed.
+- `cargo test -p codex-core stop_member_keeps_team_active_and_blocks_member_mutations --locked` passed: 1 passed.
+- `cargo test -p codex-core team_tool_chain_creates_spawns_sends_statuses_and_stops --locked` passed: 1 passed.
+- `cargo test -p codex-core team --locked` passed: 9 passed.
+- `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked` passed: 1 passed.
+- `cargo test -p codex-core team_tools_have_exact_specs_and_handlers_when_collab_is_enabled --locked` passed: 1 passed.
 - `just fix -p codex-core` passed.
 - `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
 - `git diff --check` passed.

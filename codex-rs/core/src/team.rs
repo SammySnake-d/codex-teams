@@ -126,6 +126,12 @@ pub(crate) enum TeamEvent {
         name: String,
         at: i64,
     },
+    MemberStopped {
+        team_id: ThreadId,
+        member_id: ThreadId,
+        agent_thread_id: ThreadId,
+        at: i64,
+    },
     MessageSubmitted {
         team_id: ThreadId,
         message_id: ThreadId,
@@ -372,13 +378,7 @@ impl TeamRegistry {
                 .get(&team_id)
                 .ok_or(CodexErr::ThreadNotFound(team_id))?;
             let sender = if let Some(sender_member_id) = sender_member_id {
-                if !team
-                    .members
-                    .iter()
-                    .any(|member| member.id == sender_member_id)
-                {
-                    return Err(CodexErr::ThreadNotFound(sender_member_id));
-                }
+                validate_active_member(team, Some(sender_member_id))?;
                 TeamMessageEndpoint::Member(sender_member_id)
             } else {
                 TeamMessageEndpoint::Lead(team.lead_thread_id)
@@ -396,6 +396,11 @@ impl TeamRegistry {
                         .iter()
                         .find(|member| member.id == member_id)
                         .ok_or(CodexErr::ThreadNotFound(member_id))?;
+                    if member.status == TeamMemberStatus::Stopped {
+                        return Err(CodexErr::UnsupportedOperation(format!(
+                            "team member {member_id} is stopped"
+                        )));
+                    }
                     (
                         sender,
                         TeamMessageEndpoint::Member(member_id),
@@ -530,7 +535,7 @@ impl TeamRegistry {
             .teams
             .get_mut(&team_id)
             .ok_or(CodexErr::ThreadNotFound(team_id))?;
-        validate_member(team, task.assignee_member_id)?;
+        validate_active_member(team, task.assignee_member_id)?;
         validate_dependencies(team, &task.dependencies)?;
         team.tasks.push(task.clone());
         team.updated_at = at;
@@ -555,7 +560,7 @@ impl TeamRegistry {
             .teams
             .get_mut(&team_id)
             .ok_or(CodexErr::ThreadNotFound(team_id))?;
-        validate_member(team, request.assignee_member_id)?;
+        validate_active_member(team, request.assignee_member_id)?;
         if let Some(dependencies) = &request.dependencies {
             if dependencies.contains(&task_id) {
                 return Err(CodexErr::UnsupportedOperation(format!(
@@ -608,7 +613,7 @@ impl TeamRegistry {
             .teams
             .get_mut(&team_id)
             .ok_or(CodexErr::ThreadNotFound(team_id))?;
-        validate_member(team, Some(member_id))?;
+        validate_active_member(team, Some(member_id))?;
         let task_index = team
             .tasks
             .iter()
@@ -655,6 +660,63 @@ impl TeamRegistry {
             at,
         });
         Ok(task)
+    }
+
+    pub(crate) async fn stop_member(
+        &self,
+        team_id: ThreadId,
+        member_id: ThreadId,
+        agent_control: &AgentControl,
+    ) -> CodexResult<TeamSnapshot> {
+        self.ensure_team_active(team_id).await?;
+        let (agent_thread_id, already_stopped) = {
+            let state = self.state.read().await;
+            let team = state
+                .teams
+                .get(&team_id)
+                .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            let member = team
+                .members
+                .iter()
+                .find(|member| member.id == member_id)
+                .ok_or(CodexErr::ThreadNotFound(member_id))?;
+            (
+                member.agent_thread_id,
+                member.status == TeamMemberStatus::Stopped,
+            )
+        };
+
+        if already_stopped {
+            return self.snapshot(team_id).await;
+        }
+
+        let _ = agent_control.shutdown_agent(agent_thread_id).await;
+        let agent_status = agent_control.get_status(agent_thread_id).await;
+        let at = unix_timestamp();
+        {
+            let mut state = self.state.write().await;
+            let team = state
+                .teams
+                .get_mut(&team_id)
+                .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            let member = team
+                .members
+                .iter_mut()
+                .find(|member| member.id == member_id)
+                .ok_or(CodexErr::ThreadNotFound(member_id))?;
+            member.status = TeamMemberStatus::Stopped;
+            member.agent_status = agent_status;
+            member.last_activity_at = at;
+            team.updated_at = at;
+            state.events.push(TeamEvent::MemberStopped {
+                team_id,
+                member_id,
+                agent_thread_id,
+                at,
+            });
+        }
+
+        self.snapshot(team_id).await
     }
 
     pub(crate) async fn stop_team(
@@ -807,6 +869,7 @@ impl TeamEvent {
         match self {
             TeamEvent::TeamCreated { team_id, .. }
             | TeamEvent::MemberSpawned { team_id, .. }
+            | TeamEvent::MemberStopped { team_id, .. }
             | TeamEvent::MessageSubmitted { team_id, .. }
             | TeamEvent::TaskCreated { team_id, .. }
             | TeamEvent::TaskUpdated { team_id, .. }
@@ -816,11 +879,18 @@ impl TeamEvent {
     }
 }
 
-fn validate_member(team: &Team, member_id: Option<ThreadId>) -> CodexResult<()> {
-    if let Some(member_id) = member_id
-        && !team.members.iter().any(|member| member.id == member_id)
-    {
-        return Err(CodexErr::ThreadNotFound(member_id));
+fn validate_active_member(team: &Team, member_id: Option<ThreadId>) -> CodexResult<()> {
+    if let Some(member_id) = member_id {
+        let member = team
+            .members
+            .iter()
+            .find(|member| member.id == member_id)
+            .ok_or(CodexErr::ThreadNotFound(member_id))?;
+        if member.status == TeamMemberStatus::Stopped {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "team member {member_id} is stopped"
+            )));
+        }
     }
     Ok(())
 }
@@ -1039,6 +1109,160 @@ mod tests {
                 .iter()
                 .any(|(id, op)| *id == member.agent_thread_id && matches!(op, Op::Shutdown)),
             "stop should submit shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_member_keeps_team_active_and_blocks_member_mutations() {
+        let registry = TeamRegistry::default();
+        let manager = thread_manager();
+        let agent_control = manager.agent_control();
+        let (_session, turn) = make_session_and_context().await;
+        let team = registry
+            .create_team("member lifecycle".to_string(), ThreadId::new())
+            .await;
+        let member_a = registry
+            .spawn_member(
+                SpawnTeamMemberRequest {
+                    team_id: team.id,
+                    name: "member-a".to_string(),
+                    profile: None,
+                    capabilities: Vec::new(),
+                    permissions: Vec::new(),
+                    initial_items: text_input("initial task"),
+                    config: turn.config.as_ref().clone(),
+                    session_source: None,
+                },
+                &agent_control,
+            )
+            .await
+            .expect("spawn member a");
+        let member_b = registry
+            .spawn_member(
+                SpawnTeamMemberRequest {
+                    team_id: team.id,
+                    name: "member-b".to_string(),
+                    profile: None,
+                    capabilities: Vec::new(),
+                    permissions: Vec::new(),
+                    initial_items: text_input("initial task"),
+                    config: turn.config.as_ref().clone(),
+                    session_source: None,
+                },
+                &agent_control,
+            )
+            .await
+            .expect("spawn member b");
+
+        let stopped = registry
+            .stop_member(team.id, member_a.id, &agent_control)
+            .await
+            .expect("stop member");
+        assert_eq!(stopped.team.status, TeamStatus::Active);
+        assert_eq!(stopped.team.members[0].status, TeamMemberStatus::Stopped);
+        assert_eq!(stopped.team.members[0].agent_status, AgentStatus::NotFound);
+        assert_eq!(stopped.team.members[1].status, TeamMemberStatus::Active);
+        assert!(
+            manager
+                .captured_ops()
+                .iter()
+                .any(|(id, op)| *id == member_a.agent_thread_id && matches!(op, Op::Shutdown)),
+            "single-member stop should submit shutdown to the stopped member"
+        );
+        assert!(
+            !manager
+                .captured_ops()
+                .iter()
+                .any(|(id, op)| *id == member_b.agent_thread_id && matches!(op, Op::Shutdown)),
+            "single-member stop should not shut down other members"
+        );
+
+        let send_to_stopped = registry
+            .send_message(
+                SendTeamMessageRequest {
+                    team_id: team.id,
+                    sender_member_id: None,
+                    target: SendTeamMessageTarget::Member(member_a.id),
+                    content: "stopped member".to_string(),
+                    delivery_mode: TeamMessageDeliveryMode::Queue,
+                    items: text_input("stopped member"),
+                },
+                &agent_control,
+            )
+            .await;
+        assert!(
+            send_to_stopped.is_err(),
+            "send to stopped member should fail"
+        );
+
+        let send_from_stopped = registry
+            .send_message(
+                SendTeamMessageRequest {
+                    team_id: team.id,
+                    sender_member_id: Some(member_a.id),
+                    target: SendTeamMessageTarget::Lead,
+                    content: "from stopped member".to_string(),
+                    delivery_mode: TeamMessageDeliveryMode::Queue,
+                    items: text_input("from stopped member"),
+                },
+                &agent_control,
+            )
+            .await;
+        assert!(
+            send_from_stopped.is_err(),
+            "send from stopped member should fail"
+        );
+
+        let message = registry
+            .send_message(
+                SendTeamMessageRequest {
+                    team_id: team.id,
+                    sender_member_id: None,
+                    target: SendTeamMessageTarget::Member(member_b.id),
+                    content: "active member".to_string(),
+                    delivery_mode: TeamMessageDeliveryMode::Queue,
+                    items: text_input("active member"),
+                },
+                &agent_control,
+            )
+            .await
+            .expect("send to active member");
+        assert_eq!(message.target, TeamMessageEndpoint::Member(member_b.id));
+
+        let task = registry
+            .create_task(CreateTeamTaskRequest {
+                team_id: team.id,
+                title: "claimable".to_string(),
+                assignee_member_id: None,
+                dependencies: Vec::new(),
+                note: None,
+            })
+            .await
+            .expect("create task");
+        let stopped_claim = registry.claim_task(team.id, task.id, member_a.id).await;
+        assert!(
+            stopped_claim.is_err(),
+            "stopped member should not claim tasks"
+        );
+
+        let status = registry
+            .team_status(team.id, &agent_control)
+            .await
+            .expect("team status after member stop");
+        assert_eq!(status.team.status, TeamStatus::Active);
+        assert_eq!(status.messages, vec![message]);
+        assert!(
+            status.events.iter().any(
+                |event| matches!(event, TeamEvent::MemberStopped { member_id, .. } if *member_id == member_a.id)
+            ),
+            "member stop should be observable"
+        );
+        assert_eq!(
+            registry
+                .stop_member(team.id, member_a.id, &agent_control)
+                .await
+                .expect("stop member is idempotent"),
+            status
         );
     }
 

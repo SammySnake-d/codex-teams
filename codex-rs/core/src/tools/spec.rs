@@ -950,6 +950,35 @@ fn create_team_event_list_tool() -> ToolSpec {
     })
 }
 
+fn create_team_member_stop_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_id".to_string(),
+            JsonSchema::String {
+                description: Some("Team id from create_team or list_teams.".to_string()),
+            },
+        ),
+        (
+            "member_id".to_string(),
+            JsonSchema::String {
+                description: Some("Member id from team_spawn_member or team_status.".to_string()),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_member_stop".to_string(),
+        description: "Stop one teammate agent while keeping the live team readable and active."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string(), "member_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_team_stop_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "team_id".to_string(),
@@ -2001,6 +2030,7 @@ pub(crate) fn build_specs(
         builder.push_spec(create_team_task_claim_tool());
         builder.push_spec(create_team_task_list_tool());
         builder.push_spec(create_team_event_list_tool());
+        builder.push_spec(create_team_member_stop_tool());
         builder.push_spec(create_team_stop_tool());
         builder.register_handler("spawn_agent", collab_handler.clone());
         builder.register_handler("send_input", collab_handler.clone());
@@ -2017,6 +2047,7 @@ pub(crate) fn build_specs(
         builder.register_handler("team_task_claim", team_handler.clone());
         builder.register_handler("team_task_list", team_handler.clone());
         builder.register_handler("team_event_list", team_handler.clone());
+        builder.register_handler("team_member_stop", team_handler.clone());
         builder.register_handler("team_stop", team_handler);
     }
 
@@ -2333,6 +2364,7 @@ mod tests {
                 "team_task_claim",
                 "team_task_list",
                 "team_event_list",
+                "team_member_stop",
                 "team_stop",
             ],
         );
@@ -2374,6 +2406,10 @@ mod tests {
             ("team_task_claim".to_string(), create_team_task_claim_tool()),
             ("team_task_list".to_string(), create_team_task_list_tool()),
             ("team_event_list".to_string(), create_team_event_list_tool()),
+            (
+                "team_member_stop".to_string(),
+                create_team_member_stop_tool(),
+            ),
             ("team_stop".to_string(), create_team_stop_tool()),
         ]);
 
