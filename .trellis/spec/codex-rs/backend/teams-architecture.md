@@ -56,7 +56,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 - `create_team(name)` -> creates a live-session-only `Team`.
 - `list_teams()` -> returns visible teams, including stopped teams.
 - `team_status(team_id)` -> returns `TeamSnapshot { team, messages, events }` after refreshing member agent statuses.
-- `team_spawn_member(team_id, name, profile?, capabilities?, permissions?, message?/items?)` -> spawns one independent Codex agent session through `AgentControl`.
+- `team_spawn_member(team_id, name, profile?, capabilities?, permissions?, message?/items?)` -> spawns one independent Codex agent session through `AgentControl` after prepending a generic Teams context envelope to the teammate's spawn prompt/items.
 - `team_send(team_id, member_id, sender_member_id?, delivery_mode?, message?/items?)` -> submits input to an existing member agent.
 - `team_task_create(team_id, title, assignee_member_id?, dependencies?, note?)` -> creates one generic shared task-board item.
 - `team_task_update(team_id, task_id, title?, assignee_member_id?, dependencies?, status?, note?)` -> updates one generic shared task-board item.
@@ -69,6 +69,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 - `Team.live_session_only` must be `true` until persistent resume is explicitly implemented.
 - Stopped teams remain readable through list/status/task/event readback, but mutating paths must reject them.
 - Member `capabilities` and `permissions` are generic labels. Teams core stores and returns them but does not enforce policy from them.
+- `team_spawn_member.message` or non-empty `items` is required because teammates do not inherit the lead conversation history. Teams core must prepend only generic identity and coordination context; it must not add reviewer, PASS/BLOCKERS, Darwin, tmux, or role-specific workflow policy.
 - `team_send.delivery_mode` defaults to `queue`; `interrupt` must call `AgentControl::interrupt_agent` before submitting input.
 - `team_send.sender_member_id` is optional. Omit it for a lead-originated message; provide a member id only when that member belongs to the same team.
 - Task dependencies are task ids from the same team. A task must not depend on itself.

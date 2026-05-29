@@ -664,7 +664,7 @@ fn create_team_spawn_member_tool() -> ToolSpec {
             "message".to_string(),
             JsonSchema::String {
                 description: Some(
-                    "Initial plain-text task for the teammate. Use either message or items."
+                    "Initial plain-text spawn prompt for the teammate. Use either message or items; Teams will prepend generic team/member context."
                         .to_string(),
                 ),
             },
@@ -675,7 +675,7 @@ fn create_team_spawn_member_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "team_spawn_member".to_string(),
         description:
-            "Spawn one teammate in an existing team using the existing Codex agent lifecycle."
+            "Spawn one teammate in an existing team using the existing Codex agent lifecycle, with generic Teams context prepended to the spawn prompt."
                 .to_string(),
         strict: false,
         parameters: JsonSchema::Object {

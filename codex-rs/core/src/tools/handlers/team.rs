@@ -569,11 +569,53 @@ mod tests {
         )
     }
 
-    fn text_input(text: &str) -> Vec<UserInput> {
-        vec![UserInput::Text {
-            text: text.to_string(),
-            text_elements: Vec::new(),
-        }]
+    fn expected_spawn_items(
+        team: &crate::team::Team,
+        member: &crate::team::TeamMember,
+        prompt: &str,
+    ) -> Vec<UserInput> {
+        let team_id = team.id;
+        let team_name = &team.name;
+        let lead_thread_id = team.lead_thread_id;
+        let member_id = member.id;
+        let member_name = &member.name;
+        let profile_label = member.profile.as_deref().unwrap_or("none");
+        let capabilities_label = if member.capabilities.is_empty() {
+            "none".to_string()
+        } else {
+            member.capabilities.join(", ")
+        };
+        let permissions_label = if member.permissions.is_empty() {
+            "none".to_string()
+        } else {
+            member.permissions.join(", ")
+        };
+        vec![
+            UserInput::Text {
+                text: format!(
+                    "Codex Teams context:\n\
+                     - team_id: {team_id}\n\
+                     - team_name: {team_name}\n\
+                     - lead_thread_id: {lead_thread_id}\n\
+                     - member_id: {member_id}\n\
+                     - member_name: {member_name}\n\
+                     - profile: {profile_label}\n\
+                     - capabilities: {capabilities_label}\n\
+                     - permissions: {permissions_label}\n\
+                     - live_session_only: true\n\
+                     \n\
+                     You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
+                     Treat the spawn prompt/items after this context as your assigned task boundary.\n\
+                     Use generic Teams tools when available: team_status, team_send, team_task_list, team_task_update, and team_event_list.\n\
+                     When sending as this teammate, set sender_member_id to your member_id."
+                ),
+                text_elements: Vec::new(),
+            },
+            UserInput::Text {
+                text: prompt.to_string(),
+                text_elements: Vec::new(),
+            },
+        ]
     }
 
     fn text_output(output: ToolOutput) -> String {
@@ -689,7 +731,11 @@ mod tests {
             manager.captured_ops().contains(&(
                 spawned.member.agent_thread_id,
                 Op::UserInput {
-                    items: text_input("investigate one slice"),
+                    items: expected_spawn_items(
+                        &created.team,
+                        &spawned.member,
+                        "investigate one slice"
+                    ),
                     final_output_json_schema: None,
                 },
             )),

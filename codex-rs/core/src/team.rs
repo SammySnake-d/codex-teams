@@ -260,18 +260,61 @@ impl TeamRegistry {
             profile,
             capabilities,
             permissions,
-            initial_items,
+            mut initial_items,
             config,
             session_source,
         } = request;
         self.ensure_team_active(team_id).await?;
+        let (team_name, lead_thread_id) = {
+            let state = self.state.read().await;
+            let team = state
+                .teams
+                .get(&team_id)
+                .ok_or(CodexErr::ThreadNotFound(team_id))?;
+            (team.name.clone(), team.lead_thread_id)
+        };
+        let member_id = ThreadId::new();
+        let profile_label = profile.as_deref().unwrap_or("none");
+        let capabilities_label = if capabilities.is_empty() {
+            "none".to_string()
+        } else {
+            capabilities.join(", ")
+        };
+        let permissions_label = if permissions.is_empty() {
+            "none".to_string()
+        } else {
+            permissions.join(", ")
+        };
+        let context = format!(
+            "Codex Teams context:\n\
+             - team_id: {team_id}\n\
+             - team_name: {team_name}\n\
+             - lead_thread_id: {lead_thread_id}\n\
+             - member_id: {member_id}\n\
+             - member_name: {name}\n\
+             - profile: {profile_label}\n\
+             - capabilities: {capabilities_label}\n\
+             - permissions: {permissions_label}\n\
+             - live_session_only: true\n\
+             \n\
+             You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
+             Treat the spawn prompt/items after this context as your assigned task boundary.\n\
+             Use generic Teams tools when available: team_status, team_send, team_task_list, team_task_update, and team_event_list.\n\
+             When sending as this teammate, set sender_member_id to your member_id."
+        );
+        let mut wrapped_items = Vec::with_capacity(initial_items.len() + 1);
+        wrapped_items.push(UserInput::Text {
+            text: context,
+            text_elements: Vec::new(),
+        });
+        wrapped_items.append(&mut initial_items);
         let agent_thread_id = agent_control
-            .spawn_agent(config, initial_items, session_source)
+            .spawn_agent(config, wrapped_items, session_source)
             .await?;
         let at = unix_timestamp();
         let agent_status = agent_control.get_status(agent_thread_id).await;
         let member = TeamMember {
-            id: ThreadId::new(),
+            id: member_id,
             name,
             agent_thread_id,
             profile,
@@ -712,6 +755,51 @@ mod tests {
         }]
     }
 
+    fn expected_spawn_items(team: &Team, member: &TeamMember, prompt: &str) -> Vec<UserInput> {
+        let team_id = team.id;
+        let team_name = &team.name;
+        let lead_thread_id = team.lead_thread_id;
+        let member_id = member.id;
+        let member_name = &member.name;
+        let profile_label = member.profile.as_deref().unwrap_or("none");
+        let capabilities_label = if member.capabilities.is_empty() {
+            "none".to_string()
+        } else {
+            member.capabilities.join(", ")
+        };
+        let permissions_label = if member.permissions.is_empty() {
+            "none".to_string()
+        } else {
+            member.permissions.join(", ")
+        };
+        vec![
+            UserInput::Text {
+                text: format!(
+                    "Codex Teams context:\n\
+                     - team_id: {team_id}\n\
+                     - team_name: {team_name}\n\
+                     - lead_thread_id: {lead_thread_id}\n\
+                     - member_id: {member_id}\n\
+                     - member_name: {member_name}\n\
+                     - profile: {profile_label}\n\
+                     - capabilities: {capabilities_label}\n\
+                     - permissions: {permissions_label}\n\
+                     - live_session_only: true\n\
+                     \n\
+                     You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
+                     Treat the spawn prompt/items after this context as your assigned task boundary.\n\
+                     Use generic Teams tools when available: team_status, team_send, team_task_list, team_task_update, and team_event_list.\n\
+                     When sending as this teammate, set sender_member_id to your member_id."
+                ),
+                text_elements: Vec::new(),
+            },
+            UserInput::Text {
+                text: prompt.to_string(),
+                text_elements: Vec::new(),
+            },
+        ]
+    }
+
     fn thread_manager() -> ThreadManager {
         ThreadManager::with_models_provider_for_tests(
             CodexAuth::from_api_key("dummy"),
@@ -767,7 +855,7 @@ mod tests {
         let expected_initial = (
             member.agent_thread_id,
             Op::UserInput {
-                items: text_input("initial task"),
+                items: expected_spawn_items(&team, &member, "initial task"),
                 final_output_json_schema: None,
             },
         );
