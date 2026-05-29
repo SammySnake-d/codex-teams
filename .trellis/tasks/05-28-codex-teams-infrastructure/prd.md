@@ -46,7 +46,7 @@ The first vertical slice should support:
 - spawn one teammate from the team
 - route lead-to-member and member-to-member messages
 - list team/member status
-- create, update, and list generic shared task-board items
+- create, claim, update, and list generic shared task-board items
 - list the append-only team event feed
 - stop the team
 - expose minimal `/teams` manual guidance; model-callable tools are the action path
@@ -68,10 +68,11 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 - `team_status` refreshes member agent statuses from `AgentControl` before returning the snapshot.
 - `team_spawn_member` treats `message` or non-empty `items` as the teammate's spawn prompt. Teams core prepends a generic context envelope with team id/name, lead thread id, member id/name, profile, capabilities, permissions, live-session-only status, and available generic team coordination tools before submitting the initial input to `AgentControl`.
 - Task state is now a generic substrate mutation boundary: `team_task_create`, `team_task_update`, and `team_task_list` can manage shared task-board items without encoding workflow policy.
+- `team_task_claim` adds the smallest task-board state-machine transition: a known team member can claim an open task only when dependencies are completed and any existing assignee matches the claimant.
 - `team_event_list` exposes lifecycle, message, task, and failure events as the standalone event-feed readback path.
 - Member `capabilities` and `permissions` are generic labels attached to team members; Teams core stores and returns them but does not enforce policy from them.
 - `team_send` records either the lead or a member as sender and supports `queue` or `interrupt` delivery through existing `AgentControl` input primitives.
-- Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, `team_task_create`, `team_task_update`, `team_task_list`, `team_event_list`, and `team_stop`.
+- Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, `team_task_create`, `team_task_update`, `team_task_claim`, `team_task_list`, `team_event_list`, and `team_stop`.
 - `/teams` is a manual TUI guidance surface only for this slice; it does not perform list/status/send/stop actions directly.
 
 ## Out Of Scope For First Slice
@@ -90,7 +91,7 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 
 - [x] Core has explicit Team, Member, Message, Task, and TeamEvent substrate types or equivalent clearly named boundaries.
 - [x] Natural-language model path can create and inspect a team through tool exposure, not only slash commands.
-- [x] Natural-language model path can create/update/list generic team tasks and read the event feed through model-callable tools.
+- [x] Natural-language model path can create/claim/update/list generic team tasks and read the event feed through model-callable tools.
 - [x] TUI has a documented first subset: `/teams` renders manual guidance only.
 - [x] First slice reuses existing AgentControl/input primitives instead of duplicating agent lifecycle.
 - [x] Team core does not hardcode reviewer, PASS/BLOCKERS, or Darwin policy.
@@ -127,6 +128,18 @@ Spawn context envelope proof from 2026-05-29:
 - `cargo test -p codex-core spawn_send_status_and_stop_use_agent_control --locked` passed: 1 passed.
 - `cargo test -p codex-core team_tool_chain_creates_spawns_sends_statuses_and_stops --locked` passed: 1 passed.
 - `cargo test -p codex-core team --locked` passed: 6 passed.
+- `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked` passed: 1 passed.
+- `just fix -p codex-core` passed.
+- `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
+- `git diff --check` passed.
+- `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs` returned no matches.
+
+Task claim state-machine proof from 2026-05-29:
+
+- `cd codex-rs && just fmt` passed.
+- `cargo test -p codex-core task_claim_respects_dependency_and_assignment_boundaries --locked` passed: 1 passed.
+- `cargo test -p codex-core team_tool_chain_creates_spawns_sends_statuses_and_stops --locked` passed: 1 passed.
+- `cargo test -p codex-core team --locked` passed: 7 passed.
 - `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked` passed: 1 passed.
 - `just fix -p codex-core` passed.
 - `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.

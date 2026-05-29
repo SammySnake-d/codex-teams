@@ -38,7 +38,7 @@ First implementation should prove:
 2. Spawn one teammate as an independent agent session.
 3. Send lead-to-member and member-to-member messages.
 4. List team status and member status.
-5. Create, update, and list generic task-board items.
+5. Create, claim, update, and list generic task-board items.
 6. List the team event feed.
 7. Stop the team cleanly.
 
@@ -60,6 +60,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 - `team_send(team_id, member_id, sender_member_id?, delivery_mode?, message?/items?)` -> submits input to an existing member agent.
 - `team_task_create(team_id, title, assignee_member_id?, dependencies?, note?)` -> creates one generic shared task-board item.
 - `team_task_update(team_id, task_id, title?, assignee_member_id?, dependencies?, status?, note?)` -> updates one generic shared task-board item.
+- `team_task_claim(team_id, task_id, member_id)` -> claims one open shared task-board item for a team member after dependency and assignee checks.
 - `team_task_list(team_id)` -> lists a team's shared task-board items.
 - `team_event_list(team_id)` -> lists a team's append-only lifecycle, message, task, and failure events.
 - `team_stop(team_id)` -> shuts down active teammate agents and marks the team stopped.
@@ -73,6 +74,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 - `team_send.delivery_mode` defaults to `queue`; `interrupt` must call `AgentControl::interrupt_agent` before submitting input.
 - `team_send.sender_member_id` is optional. Omit it for a lead-originated message; provide a member id only when that member belongs to the same team.
 - Task dependencies are task ids from the same team. A task must not depend on itself.
+- `team_task_claim` requires an active team, known member, open task status, completed dependencies, and either no assignee or the same assignee as the claiming member.
 - Task `note` is generic metadata for the shared task board. It must not become a policy-specific result, blocker, review verdict, or workflow template field in Teams core.
 - `TeamEvent::Failure` records team-tool operation errors so failed tool calls remain observable in the event feed.
 
@@ -89,13 +91,13 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 
 ### 5. Good/Base/Bad Cases
 
-- Good: create a team, spawn members with generic labels, send messages, create/update/list tasks, list events, inspect status, and stop the team.
+- Good: create a team, spawn members with generic labels, send messages, create/claim/update/list tasks, list events, inspect status, and stop the team.
 - Base: create a team with no members or tasks; status still returns an explicit live-session-only snapshot.
 - Bad: encode reviewer, PASS/BLOCKERS, Darwin, split-pane, or role-marketplace behavior in core team types or tools.
 
 ### 6. Tests Required
 
-- Core registry tests must cover create/list, spawn/send/status/stop, task create/update/list, and task/event visibility.
+- Core registry tests must cover create/list, spawn/send/status/stop, task create/claim/update/list, and task/event visibility.
 - Tool-handler tests must cover the natural-language tool path: spec args parse into registry operations and return JSON outputs.
 - Tool-spec tests must prove the collab feature exposes the exact Teams tool set and handler registrations.
 - TUI tests must keep `/teams` snapshot coverage limited to manual guidance until a later UI action surface is intentionally added.

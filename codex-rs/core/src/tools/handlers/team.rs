@@ -62,6 +62,7 @@ impl ToolHandler for TeamHandler {
             "team_send" => team_send(session, arguments).await,
             "team_task_create" => team_task_create(session, arguments).await,
             "team_task_update" => team_task_update(session, arguments).await,
+            "team_task_claim" => team_task_claim(session, arguments).await,
             "team_task_list" => team_task_list(session, arguments).await,
             "team_event_list" => team_event_list(session, arguments).await,
             "team_stop" => team_stop(session, arguments).await,
@@ -123,6 +124,13 @@ struct TeamTaskUpdateArgs {
     note: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TeamTaskClaimArgs {
+    team_id: String,
+    task_id: String,
+    member_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct CreateTeamResult {
     team: crate::team::Team,
@@ -155,6 +163,11 @@ struct TeamTaskCreateResult {
 
 #[derive(Debug, Serialize)]
 struct TeamTaskUpdateResult {
+    task: crate::team::TeamTask,
+}
+
+#[derive(Debug, Serialize)]
+struct TeamTaskClaimResult {
     task: crate::team::TeamTask,
 }
 
@@ -389,6 +402,27 @@ async fn team_task_update(
         Some(true),
         "team_task_update",
     )
+}
+
+async fn team_task_claim(
+    session: Arc<Session>,
+    arguments: String,
+) -> Result<ToolOutput, FunctionCallError> {
+    let args: TeamTaskClaimArgs = parse_arguments(&arguments)?;
+    let team_id = id_from_str("team", &args.team_id)?;
+    let task_id = id_from_str("task", &args.task_id)?;
+    let member_id = id_from_str("member", &args.member_id)?;
+    let task = team_result(
+        session.as_ref(),
+        Some(team_id),
+        session
+            .services
+            .team_registry
+            .claim_task(team_id, task_id, member_id)
+            .await,
+    )
+    .await?;
+    json_output(&TeamTaskClaimResult { task }, Some(true), "team_task_claim")
 }
 
 async fn team_task_list(
@@ -655,6 +689,11 @@ mod tests {
     }
 
     #[derive(Debug, Deserialize)]
+    struct TestTeamTaskClaimResult {
+        task: crate::team::TeamTask,
+    }
+
+    #[derive(Debug, Deserialize)]
     struct TestTeamTaskListResult {
         tasks: Vec<crate::team::TeamTask>,
     }
@@ -847,6 +886,30 @@ mod tests {
         assert_eq!(
             created_task.task.assignee_member_id,
             Some(spawned.member.id)
+        );
+
+        let claimed_task = TeamHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "team_task_claim",
+                json!({
+                    "team_id": created.team.id.to_string(),
+                    "task_id": created_task.task.id.to_string(),
+                    "member_id": spawned.member.id.to_string()
+                }),
+            ))
+            .await
+            .expect("claim task");
+        let claimed_task: TestTeamTaskClaimResult =
+            serde_json::from_str(&text_output(claimed_task)).expect("claim task result");
+        assert_eq!(
+            claimed_task.task.assignee_member_id,
+            Some(spawned.member.id)
+        );
+        assert_eq!(
+            claimed_task.task.status,
+            crate::team::TeamTaskStatus::Claimed
         );
 
         let bad_dependency = TeamHandler

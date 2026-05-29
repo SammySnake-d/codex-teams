@@ -554,6 +554,68 @@ impl TeamRegistry {
         Ok(task)
     }
 
+    pub(crate) async fn claim_task(
+        &self,
+        team_id: ThreadId,
+        task_id: ThreadId,
+        member_id: ThreadId,
+    ) -> CodexResult<TeamTask> {
+        self.ensure_team_active(team_id).await?;
+        let at = unix_timestamp();
+        let mut state = self.state.write().await;
+        let team = state
+            .teams
+            .get_mut(&team_id)
+            .ok_or(CodexErr::ThreadNotFound(team_id))?;
+        validate_member(team, Some(member_id))?;
+        let task_index = team
+            .tasks
+            .iter()
+            .position(|task| task.id == task_id)
+            .ok_or(CodexErr::ThreadNotFound(task_id))?;
+        let task = &team.tasks[task_index];
+        if task.status == TeamTaskStatus::Claimed && task.assignee_member_id == Some(member_id) {
+            return Ok(task.clone());
+        }
+        if task.status != TeamTaskStatus::Open {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "task {task_id} must be open before it can be claimed"
+            )));
+        }
+        if let Some(assignee_member_id) = task.assignee_member_id
+            && assignee_member_id != member_id
+        {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "task {task_id} is assigned to member {assignee_member_id}"
+            )));
+        }
+        for dependency in &task.dependencies {
+            let dependency_task = team
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == *dependency)
+                .ok_or(CodexErr::ThreadNotFound(*dependency))?;
+            if dependency_task.status != TeamTaskStatus::Completed {
+                return Err(CodexErr::UnsupportedOperation(format!(
+                    "task {task_id} depends on incomplete task {dependency}"
+                )));
+            }
+        }
+
+        let task = &mut team.tasks[task_index];
+        task.assignee_member_id = Some(member_id);
+        task.status = TeamTaskStatus::Claimed;
+        task.updated_at = at;
+        let task = task.clone();
+        team.updated_at = at;
+        state.events.push(TeamEvent::TaskUpdated {
+            team_id,
+            task_id,
+            at,
+        });
+        Ok(task)
+    }
+
     pub(crate) async fn stop_team(
         &self,
         team_id: ThreadId,
@@ -1003,6 +1065,129 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, TeamEvent::TaskUpdated { task_id, .. } if *task_id == updated.id)),
             "task updates should be observable"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_claim_respects_dependency_and_assignment_boundaries() {
+        let registry = TeamRegistry::default();
+        let manager = thread_manager();
+        let agent_control = manager.agent_control();
+        let (_session, turn) = make_session_and_context().await;
+        let team = registry
+            .create_team("claims".to_string(), ThreadId::new())
+            .await;
+        let member_a = registry
+            .spawn_member(
+                SpawnTeamMemberRequest {
+                    team_id: team.id,
+                    name: "member-a".to_string(),
+                    profile: None,
+                    capabilities: Vec::new(),
+                    permissions: Vec::new(),
+                    initial_items: text_input("initial task"),
+                    config: turn.config.as_ref().clone(),
+                    session_source: None,
+                },
+                &agent_control,
+            )
+            .await
+            .expect("spawn member a");
+        let member_b = registry
+            .spawn_member(
+                SpawnTeamMemberRequest {
+                    team_id: team.id,
+                    name: "member-b".to_string(),
+                    profile: None,
+                    capabilities: Vec::new(),
+                    permissions: Vec::new(),
+                    initial_items: text_input("initial task"),
+                    config: turn.config.as_ref().clone(),
+                    session_source: None,
+                },
+                &agent_control,
+            )
+            .await
+            .expect("spawn member b");
+        let first = registry
+            .create_task(CreateTeamTaskRequest {
+                team_id: team.id,
+                title: "first".to_string(),
+                assignee_member_id: None,
+                dependencies: Vec::new(),
+                note: None,
+            })
+            .await
+            .expect("create first task");
+        let second = registry
+            .create_task(CreateTeamTaskRequest {
+                team_id: team.id,
+                title: "second".to_string(),
+                assignee_member_id: None,
+                dependencies: vec![first.id],
+                note: None,
+            })
+            .await
+            .expect("create second task");
+
+        let blocked = registry.claim_task(team.id, second.id, member_a.id).await;
+        assert!(
+            blocked.is_err(),
+            "dependency should block claiming dependent task"
+        );
+
+        let claimed_first = registry
+            .claim_task(team.id, first.id, member_a.id)
+            .await
+            .expect("claim first task");
+        let mut expected_first = first.clone();
+        expected_first.assignee_member_id = Some(member_a.id);
+        expected_first.status = TeamTaskStatus::Claimed;
+        expected_first.updated_at = claimed_first.updated_at;
+        assert_eq!(claimed_first, expected_first);
+        assert_eq!(
+            registry
+                .claim_task(team.id, first.id, member_a.id)
+                .await
+                .expect("same member reclaim is idempotent"),
+            claimed_first
+        );
+
+        registry
+            .update_task(
+                team.id,
+                first.id,
+                UpdateTeamTaskRequest {
+                    status: Some(TeamTaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("complete first task");
+        let claimed_second = registry
+            .claim_task(team.id, second.id, member_a.id)
+            .await
+            .expect("claim unblocked second task");
+        let mut expected_second = second.clone();
+        expected_second.assignee_member_id = Some(member_a.id);
+        expected_second.status = TeamTaskStatus::Claimed;
+        expected_second.updated_at = claimed_second.updated_at;
+        assert_eq!(claimed_second, expected_second);
+
+        let assigned = registry
+            .create_task(CreateTeamTaskRequest {
+                team_id: team.id,
+                title: "assigned".to_string(),
+                assignee_member_id: Some(member_a.id),
+                dependencies: Vec::new(),
+                note: None,
+            })
+            .await
+            .expect("create assigned task");
+        let wrong_member = registry.claim_task(team.id, assigned.id, member_b.id).await;
+        assert!(
+            wrong_member.is_err(),
+            "task assigned to one member should reject another claimant"
         );
     }
 }
