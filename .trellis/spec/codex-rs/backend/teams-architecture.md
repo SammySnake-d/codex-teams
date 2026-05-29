@@ -50,6 +50,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 
 - Trigger: Teams adds model-callable core tools that create and mutate collaboration state across agent lifecycle, message routing, task-board state, and event readback.
 - Scope: `codex-core` owns the live-session-only registry and function tools. The TUI `/teams` surface remains manual guidance over the same substrate.
+- Registry lifetime: the live `TeamRegistry` is scoped to the owning `ThreadManager` and carried by `AgentControl` into spawned Codex sessions, so lead and teammate tools read and mutate the same live team state.
 
 ### 2. Signatures
 
@@ -68,6 +69,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 ### 3. Contracts
 
 - `Team.live_session_only` must be `true` until persistent resume is explicitly implemented.
+- `TeamRegistry` must be shared across lead and spawned teammate sessions within the same `ThreadManager`; per-session registries would make teammate-originated team tools unable to see the lead-created team.
 - Stopped teams remain readable through list/status/task/event readback, but mutating paths must reject them.
 - Member `capabilities` and `permissions` are generic labels. Teams core stores and returns them but does not enforce policy from them.
 - `team_spawn_member.message` or non-empty `items` is required because teammates do not inherit the lead conversation history. Teams core must prepend only generic identity and coordination context; it must not add reviewer, PASS/BLOCKERS, Darwin, tmux, or role-specific workflow policy.

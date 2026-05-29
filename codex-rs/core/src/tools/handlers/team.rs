@@ -713,6 +713,7 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
+        session.services.team_registry = manager.team_registry();
         let session = Arc::new(session);
         let turn = Arc::new(turn);
 

@@ -18,6 +18,7 @@ use crate::protocol::SessionConfiguredEvent;
 use crate::rollout::RolloutRecorder;
 use crate::rollout::truncation;
 use crate::skills::SkillsManager;
+use crate::team::TeamRegistry;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelPreset;
@@ -131,6 +132,7 @@ pub(crate) struct ThreadManagerState {
     models_manager: Arc<ModelsManager>,
     skills_manager: Arc<SkillsManager>,
     file_watcher: Arc<FileWatcher>,
+    team_registry: Arc<TeamRegistry>,
     session_source: SessionSource,
     // Captures submitted ops for testing purpose when test mode is enabled.
     ops_log: Option<SharedCapturedOps>,
@@ -152,6 +154,7 @@ impl ThreadManager {
                 models_manager: Arc::new(ModelsManager::new(codex_home, auth_manager.clone())),
                 skills_manager,
                 file_watcher,
+                team_registry: Arc::new(TeamRegistry::default()),
                 auth_manager,
                 session_source,
                 ops_log: should_use_test_thread_manager_behavior()
@@ -203,6 +206,7 @@ impl ThreadManager {
                 )),
                 skills_manager,
                 file_watcher,
+                team_registry: Arc::new(TeamRegistry::default()),
                 auth_manager,
                 session_source: SessionSource::Exec,
                 ops_log: should_use_test_thread_manager_behavior()
@@ -371,7 +375,15 @@ impl ThreadManager {
     }
 
     pub(crate) fn agent_control(&self) -> AgentControl {
-        AgentControl::new(Arc::downgrade(&self.state))
+        AgentControl::new(
+            Arc::downgrade(&self.state),
+            Arc::clone(&self.state.team_registry),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn team_registry(&self) -> Arc<TeamRegistry> {
+        Arc::clone(&self.state.team_registry)
     }
 
     #[cfg(test)]
@@ -671,6 +683,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&got_items).unwrap(),
             serde_json::to_value(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn agent_control_uses_thread_manager_team_registry() {
+        let manager = ThreadManager::with_models_provider_for_tests(
+            CodexAuth::from_api_key("dummy"),
+            crate::built_in_model_providers()["openai"].clone(),
+        );
+
+        assert!(
+            Arc::ptr_eq(
+                &manager.team_registry(),
+                &manager.agent_control().team_registry()
+            ),
+            "spawned threads should inherit the manager-scoped team registry"
         );
     }
 }

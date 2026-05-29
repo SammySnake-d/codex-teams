@@ -64,6 +64,7 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 ## First-Slice Design Decisions
 
 - Team state is live-session-only. Persistent resume is out of scope, and team snapshots must make the live-only boundary explicit.
+- Live team state is scoped to the owning `ThreadManager`, and `AgentControl` carries the manager-scoped `TeamRegistry` into spawned teammate sessions so team tools operate on the same live registry across lead and teammate threads.
 - Stopped teams remain visible in `list_teams` and `team_status` so users can inspect final members, messages, tasks, and events after cleanup.
 - `team_status` refreshes member agent statuses from `AgentControl` before returning the snapshot.
 - `team_spawn_member` treats `message` or non-empty `items` as the teammate's spawn prompt. Teams core prepends a generic context envelope with team id/name, lead thread id, member id/name, profile, capabilities, permissions, live-session-only status, and available generic team coordination tools before submitting the initial input to `AgentControl`.
@@ -133,6 +134,19 @@ Spawn context envelope proof from 2026-05-29:
 - `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
 - `git diff --check` passed.
 - `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs` returned no matches.
+
+Shared team registry proof from 2026-05-29:
+
+- `cd codex-rs && just fmt` passed.
+- `cargo test -p codex-core agent_control_uses_thread_manager_team_registry --locked` passed: 1 passed.
+- `cargo test -p codex-core team_tool_chain_creates_spawns_sends_statuses_and_stops --locked` passed: 1 passed.
+- `cargo test -p codex-core team --locked` passed: 8 passed.
+- `cargo test -p codex-core thread_manager --locked` passed: 3 passed.
+- `cargo test -p codex-core test_build_specs_collab_tools_enabled --locked` passed: 1 passed.
+- `just fix -p codex-core` passed.
+- `python3 ./.trellis/scripts/task.py validate 05-28-codex-teams-infrastructure` passed.
+- `git diff --check` passed.
+- `rg -n "PASS|BLOCKERS|Darwin|tmux|reviewer" codex-rs/core/src/team.rs codex-rs/core/src/tools/handlers/team.rs codex-rs/core/src/tools/spec.rs codex-rs/core/src/agent/control.rs codex-rs/core/src/thread_manager.rs codex-rs/core/src/codex.rs` returned no matches.
 
 Task claim state-machine proof from 2026-05-29:
 

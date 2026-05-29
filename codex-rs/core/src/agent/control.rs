@@ -2,6 +2,7 @@ use crate::agent::AgentStatus;
 use crate::agent::guards::Guards;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
+use crate::team::TeamRegistry;
 use crate::thread_manager::ThreadManagerState;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::Op;
@@ -25,15 +26,21 @@ pub(crate) struct AgentControl {
     /// `ThreadManagerState -> CodexThread -> Session -> SessionServices -> ThreadManagerState`.
     manager: Weak<ThreadManagerState>,
     state: Arc<Guards>,
+    team_registry: Arc<TeamRegistry>,
 }
 
 impl AgentControl {
     /// Construct a new `AgentControl` that can spawn/message agents via the given manager state.
-    pub(crate) fn new(manager: Weak<ThreadManagerState>) -> Self {
+    pub(crate) fn new(manager: Weak<ThreadManagerState>, team_registry: Arc<TeamRegistry>) -> Self {
         Self {
             manager,
+            team_registry,
             ..Default::default()
         }
+    }
+
+    pub(crate) fn team_registry(&self) -> Arc<TeamRegistry> {
+        Arc::clone(&self.team_registry)
     }
 
     /// Spawn a new agent thread and submit the initial prompt.
