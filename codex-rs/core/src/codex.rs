@@ -11,7 +11,6 @@ use crate::CodexAuth;
 use crate::SandboxState;
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
-use crate::agent::MAX_THREAD_SPAWN_DEPTH;
 use crate::agent::agent_status_from_event;
 use crate::analytics_client::AnalyticsEventsClient;
 use crate::analytics_client::AppInvocation;
@@ -69,7 +68,6 @@ use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnContextNetworkItem;
@@ -281,7 +279,7 @@ impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn spawn(
-        mut config: Config,
+        config: Config,
         auth_manager: Arc<AuthManager>,
         models_manager: Arc<ModelsManager>,
         skills_manager: Arc<SkillsManager>,
@@ -303,12 +301,6 @@ impl Codex {
                 err.path.display(),
                 err.message
             );
-        }
-
-        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) = session_source
-            && depth >= MAX_THREAD_SPAWN_DEPTH
-        {
-            config.features.disable(Feature::Collab);
         }
 
         let allowed_skills_for_implicit_invocation =
