@@ -1,14 +1,64 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
-    "AskForApproval": {
+    "ApprovalsReviewer": {
+      "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
       "enum": [
-        "untrusted",
-        "on-failure",
-        "on-request",
-        "never"
+        "user",
+        "auto_review",
+        "guardian_subagent"
       ],
       "type": "string"
+    },
+    "AskForApproval": {
+      "oneOf": [
+        {
+          "enum": [
+            "untrusted",
+            "on-failure",
+            "on-request",
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "granular": {
+              "properties": {
+                "mcp_elicitations": {
+                  "type": "boolean"
+                },
+                "request_permissions": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "rules": {
+                  "type": "boolean"
+                },
+                "sandbox_approval": {
+                  "type": "boolean"
+                },
+                "skill_approval": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "mcp_elicitations",
+                "rules",
+                "sandbox_approval"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "granular"
+          ],
+          "title": "GranularAskForApproval",
+          "type": "object"
+        }
+      ]
     },
     "ContentItem": {
       "oneOf": [
@@ -34,6 +84,16 @@
         },
         {
           "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "image_url": {
               "type": "string"
             },
@@ -112,6 +172,16 @@
         },
         {
           "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "image_url": {
               "type": "string"
             },
@@ -129,58 +199,37 @@
           ],
           "title": "InputImageFunctionCallOutputContentItem",
           "type": "object"
+        },
+        {
+          "properties": {
+            "encrypted_content": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "encrypted_content"
+              ],
+              "title": "EncryptedContentFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "encrypted_content",
+            "type"
+          ],
+          "title": "EncryptedContentFunctionCallOutputContentItem",
+          "type": "object"
         }
       ]
     },
-    "FunctionCallOutputPayload": {
-      "description": "The payload we send back to OpenAI when reporting a tool call result.\n\n`body` serializes directly as the wire value for `function_call_output.output`. `success` remains internal metadata for downstream handling.",
-      "properties": {
-        "body": {
-          "$ref": "#/definitions/FunctionCallOutputBody"
-        },
-        "success": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "body"
+    "ImageDetail": {
+      "enum": [
+        "auto",
+        "low",
+        "high",
+        "original"
       ],
-      "type": "object"
-    },
-    "GhostCommit": {
-      "description": "Details of a ghost commit created from a repository state.",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "parent": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "preexisting_untracked_dirs": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "preexisting_untracked_files": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "id",
-        "preexisting_untracked_dirs",
-        "preexisting_untracked_files"
-      ],
-      "type": "object"
+      "type": "string"
     },
     "LocalShellAction": {
       "oneOf": [
@@ -351,12 +400,6 @@
               },
               "type": "array"
             },
-            "end_turn": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
             "id": {
               "type": [
                 "string",
@@ -411,10 +454,6 @@
                 "null"
               ]
             },
-            "id": {
-              "type": "string",
-              "writeOnly": true
-            },
             "summary": {
               "items": {
                 "$ref": "#/definitions/ReasoningItemReasoningSummary"
@@ -430,7 +469,6 @@
             }
           },
           "required": [
-            "id",
             "summary",
             "type"
           ],
@@ -494,6 +532,12 @@
             "name": {
               "type": "string"
             },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "function_call"
@@ -513,11 +557,52 @@
         },
         {
           "properties": {
+            "arguments": true,
+            "call_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "writeOnly": true
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "tool_search_call"
+              ],
+              "title": "ToolSearchCallResponseItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "arguments",
+            "execution",
+            "type"
+          ],
+          "title": "ToolSearchCallResponseItem",
+          "type": "object"
+        },
+        {
+          "properties": {
             "call_id": {
               "type": "string"
             },
             "output": {
-              "$ref": "#/definitions/FunctionCallOutputPayload"
+              "$ref": "#/definitions/FunctionCallOutputBody"
             },
             "type": {
               "enum": [
@@ -581,8 +666,14 @@
             "call_id": {
               "type": "string"
             },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "output": {
-              "type": "string"
+              "$ref": "#/definitions/FunctionCallOutputBody"
             },
             "type": {
               "enum": [
@@ -602,10 +693,45 @@
         },
         {
           "properties": {
+            "call_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "tools": {
+              "items": true,
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "tool_search_output"
+              ],
+              "title": "ToolSearchOutputResponseItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution",
+            "status",
+            "tools",
+            "type"
+          ],
+          "title": "ToolSearchOutputResponseItem",
+          "type": "object"
+        },
+        {
+          "properties": {
             "action": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/WebSearchAction"
+                  "$ref": "#/definitions/ResponsesApiWebSearchAction"
                 },
                 {
                   "type": "null"
@@ -641,22 +767,36 @@
         },
         {
           "properties": {
-            "ghost_commit": {
-              "$ref": "#/definitions/GhostCommit"
+            "id": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string"
+            },
+            "revised_prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "type": "string"
             },
             "type": {
               "enum": [
-                "ghost_snapshot"
+                "image_generation_call"
               ],
-              "title": "GhostSnapshotResponseItemType",
+              "title": "ImageGenerationCallResponseItemType",
               "type": "string"
             }
           },
           "required": [
-            "ghost_commit",
+            "id",
+            "result",
+            "status",
             "type"
           ],
-          "title": "GhostSnapshotResponseItem",
+          "title": "ImageGenerationCallResponseItem",
           "type": "object"
         },
         {
@@ -683,6 +823,44 @@
           "properties": {
             "type": {
               "enum": [
+                "compaction_trigger"
+              ],
+              "title": "CompactionTriggerResponseItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "CompactionTriggerResponseItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "encrypted_content": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "context_compaction"
+              ],
+              "title": "ContextCompactionResponseItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ContextCompactionResponseItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
                 "other"
               ],
               "title": "OtherResponseItemType",
@@ -697,15 +875,7 @@
         }
       ]
     },
-    "SandboxMode": {
-      "enum": [
-        "read-only",
-        "workspace-write",
-        "danger-full-access"
-      ],
-      "type": "string"
-    },
-    "WebSearchAction": {
+    "ResponsesApiWebSearchAction": {
       "oneOf": [
         {
           "properties": {
@@ -728,14 +898,14 @@
               "enum": [
                 "search"
               ],
-              "title": "SearchWebSearchActionType",
+              "title": "SearchResponsesApiWebSearchActionType",
               "type": "string"
             }
           },
           "required": [
             "type"
           ],
-          "title": "SearchWebSearchAction",
+          "title": "SearchResponsesApiWebSearchAction",
           "type": "object"
         },
         {
@@ -744,7 +914,7 @@
               "enum": [
                 "open_page"
               ],
-              "title": "OpenPageWebSearchActionType",
+              "title": "OpenPageResponsesApiWebSearchActionType",
               "type": "string"
             },
             "url": {
@@ -757,7 +927,7 @@
           "required": [
             "type"
           ],
-          "title": "OpenPageWebSearchAction",
+          "title": "OpenPageResponsesApiWebSearchAction",
           "type": "object"
         },
         {
@@ -772,7 +942,7 @@
               "enum": [
                 "find_in_page"
               ],
-              "title": "FindInPageWebSearchActionType",
+              "title": "FindInPageResponsesApiWebSearchActionType",
               "type": "string"
             },
             "url": {
@@ -785,7 +955,7 @@
           "required": [
             "type"
           ],
-          "title": "FindInPageWebSearchAction",
+          "title": "FindInPageResponsesApiWebSearchAction",
           "type": "object"
         },
         {
@@ -794,20 +964,96 @@
               "enum": [
                 "other"
               ],
-              "title": "OtherWebSearchActionType",
+              "title": "OtherResponsesApiWebSearchActionType",
               "type": "string"
             }
           },
           "required": [
             "type"
           ],
-          "title": "OtherWebSearchAction",
+          "title": "OtherResponsesApiWebSearchAction",
           "type": "object"
+        }
+      ]
+    },
+    "SandboxMode": {
+      "enum": [
+        "read-only",
+        "workspace-write",
+        "danger-full-access"
+      ],
+      "type": "string"
+    },
+    "SortDirection": {
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "type": "string"
+    },
+    "ThreadResumeInitialTurnsPageParams": {
+      "properties": {
+        "itemsView": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnItemsView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How much item detail to include for each returned turn; defaults to summary."
+        },
+        "limit": {
+          "description": "Optional turn page size.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sortDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SortDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional turn pagination direction; defaults to descending."
+        }
+      },
+      "type": "object"
+    },
+    "TurnItemsView": {
+      "oneOf": [
+        {
+          "description": "`items` was not loaded for this turn. The field is intentionally empty.",
+          "enum": [
+            "notLoaded"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`items` contains only a display summary for this turn.",
+          "enum": [
+            "summary"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`items` contains every ThreadItem available from persisted app-server history for this turn.",
+          "enum": [
+            "full"
+          ],
+          "type": "string"
         }
       ]
     }
   },
-  "description": "There are three ways to resume a thread: 1. By thread_id: load the thread from disk by thread_id and resume it. 2. By history: instantiate the thread from memory and resume it. 3. By path: load the thread from disk by path and resume it.\n\nThe precedence is: history > path > thread_id. If using history or path, the thread_id param will be ignored.\n\nPrefer using thread_id whenever possible.",
+  "description": "There are three ways to resume a thread: 1. By thread_id: load the thread from disk by thread_id and resume it. 2. By history: instantiate the thread from memory and resume it. 3. By path: load the thread from disk by path and resume it.\n\nFor non-running threads, the precedence is: history > non-empty path > thread_id. If using history or a non-empty path for a non-running thread, the thread_id param will be ignored.\n\nIf thread_id identifies a running thread, app-server rejoins that thread and treats a non-empty path as a consistency check against the active rollout path. Empty string path values are treated as absent.\n\nPrefer using thread_id whenever possible.",
   "properties": {
     "approvalPolicy": {
       "anyOf": [
@@ -818,6 +1064,17 @@
           "type": "null"
         }
       ]
+    },
+    "approvalsReviewer": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ApprovalsReviewer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Override where approval requests are routed for review on this thread and subsequent turns."
     },
     "baseInstructions": {
       "type": [
@@ -875,6 +1132,12 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "serviceTier": {
+      "type": [
+        "string",
+        "null"
       ]
     },
     "threadId": {

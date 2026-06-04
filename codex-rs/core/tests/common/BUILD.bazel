@@ -4,4 +4,7 @@ codex_rust_crate(
     name = "common",
     crate_name = "core_test_support",
     crate_srcs = glob(["*.rs"]),
+    deps_extra = [
+        "@crates//:similar",
+    ],
 )

@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -6,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::ChatGptAuthFixture;
-use app_test_support::McpProcess;
+use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use axum::Json;
@@ -14,19 +16,28 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
+use axum::http::Uri;
 use axum::http::header::AUTHORIZATION;
 use axum::routing::get;
+use codex_app_server_protocol::AppBranding;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::AppListUpdatedNotification;
+use codex_app_server_protocol::AppMetadata;
+use codex_app_server_protocol::AppReview;
+use codex_app_server_protocol::AppScreenshot;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
+use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
-use codex_core::auth::AuthCredentialsStoreMode;
+use codex_config::types::AuthCredentialsStoreMode;
+use codex_login::AuthDotJson;
+use codex_login::save_auth;
 use pretty_assertions::assert_eq;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::JsonObject;
@@ -45,12 +56,14 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+// Bazel CI can spend tens of seconds starting app-server subprocesses or
+// processing app-list RPCs under load.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[tokio::test]
 async fn list_apps_returns_empty_when_connectors_disabled() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
 
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
@@ -77,6 +90,130 @@ async fn list_apps_returns_empty_when_connectors_disabled() -> Result<()> {
 }
 
 #[tokio::test]
+async fn list_apps_returns_empty_with_api_key_auth() -> Result<()> {
+    let connectors = vec![AppInfo {
+        id: "beta".to_string(),
+        name: "Beta".to_string(),
+        description: Some("Beta connector".to_string()),
+        logo_url: None,
+        logo_url_dark: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: None,
+        is_accessible: false,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }];
+    let tools = vec![connector_tool("beta", "Beta App")?];
+    let (server_url, server_handle) =
+        start_apps_server_with_delays(connectors, tools, Duration::ZERO, Duration::ZERO).await?;
+
+    let codex_home = TempDir::new()?;
+    write_connectors_config(codex_home.path(), &server_url)?;
+    save_auth(
+        codex_home.path(),
+        &AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: Some("test-api-key".to_string()),
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+        },
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_apps_list_request(AppsListParams {
+            limit: Some(50),
+            cursor: None,
+            thread_id: None,
+            force_refetch: false,
+        })
+        .await?;
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let AppsListResponse { data, next_cursor } = to_response(response)?;
+    assert!(data.is_empty());
+    assert!(next_cursor.is_none());
+
+    server_handle.abort();
+    let _ = server_handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_apps_returns_empty_when_workspace_codex_plugins_disabled() -> Result<()> {
+    let connectors = vec![AppInfo {
+        id: "beta".to_string(),
+        name: "Beta".to_string(),
+        description: Some("Beta connector".to_string()),
+        logo_url: None,
+        logo_url_dark: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: None,
+        is_accessible: false,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }];
+    let tools = vec![connector_tool("beta", "Beta App")?];
+    let (server_url, server_handle) = start_apps_server_with_workspace_plugins_enabled(
+        connectors, tools, /*workspace_plugins_enabled*/ false,
+    )
+    .await?;
+
+    let codex_home = TempDir::new()?;
+    write_connectors_config(codex_home.path(), &server_url)?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("chatgpt-token")
+            .account_id("account-123")
+            .chatgpt_user_id("user-123")
+            .chatgpt_account_id("account-123")
+            .plan_type("team"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::new_without_managed_config(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_apps_list_request(AppsListParams {
+            limit: Some(50),
+            cursor: None,
+            thread_id: None,
+            force_refetch: false,
+        })
+        .await?;
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let AppsListResponse { data, next_cursor } = to_response(response)?;
+    assert!(data.is_empty());
+    assert!(next_cursor.is_none());
+
+    server_handle.abort();
+    let _ = server_handle.await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_apps_uses_thread_feature_flag_when_thread_id_is_provided() -> Result<()> {
     let connectors = vec![AppInfo {
         id: "beta".to_string(),
@@ -85,9 +222,13 @@ async fn list_apps_uses_thread_feature_flag_when_thread_id_is_provided() -> Resu
         logo_url: None,
         logo_url_dark: None,
         distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
         install_url: None,
         is_accessible: false,
         is_enabled: true,
+        plugin_display_names: Vec::new(),
     }];
     let tools = vec![connector_tool("beta", "Beta App")?];
     let (server_url, server_handle) =
@@ -104,7 +245,7 @@ async fn list_apps_uses_thread_feature_flag_when_thread_id_is_provided() -> Resu
         AuthCredentialsStoreMode::File,
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let start_request = mcp
@@ -176,6 +317,73 @@ connectors = false
 }
 
 #[tokio::test]
+async fn list_apps_keeps_apps_with_app_only_tools_accessible() -> Result<()> {
+    let connectors = vec![AppInfo {
+        id: "beta".to_string(),
+        name: "Beta".to_string(),
+        description: Some("Beta connector".to_string()),
+        logo_url: None,
+        logo_url_dark: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: None,
+        is_accessible: false,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }];
+    let mut app_only_tool = connector_tool("beta", "Beta App")?;
+    app_only_tool
+        .meta
+        .as_mut()
+        .expect("connector tool should include metadata")
+        .0
+        .insert("ui".to_string(), json!({ "visibility": ["app"] }));
+    let tools = vec![app_only_tool];
+    let (server_url, server_handle) =
+        start_apps_server_with_delays(connectors, tools, Duration::ZERO, Duration::ZERO).await?;
+
+    let codex_home = TempDir::new()?;
+    write_connectors_config(codex_home.path(), &server_url)?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("chatgpt-token")
+            .account_id("account-123")
+            .chatgpt_user_id("user-app-only")
+            .chatgpt_account_id("account-123"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_apps_list_request(AppsListParams {
+            limit: None,
+            cursor: None,
+            thread_id: None,
+            force_refetch: true,
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let AppsListResponse { data, next_cursor } = to_response(response)?;
+
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0].id, "beta");
+    assert!(data[0].is_accessible);
+    assert!(next_cursor.is_none());
+
+    server_handle.abort();
+    let _ = server_handle.await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_apps_reports_is_enabled_from_config() -> Result<()> {
     let connectors = vec![AppInfo {
         id: "beta".to_string(),
@@ -184,9 +392,13 @@ async fn list_apps_reports_is_enabled_from_config() -> Result<()> {
         logo_url: None,
         logo_url_dark: None,
         distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
         install_url: None,
         is_accessible: false,
         is_enabled: true,
+        plugin_display_names: Vec::new(),
     }];
     let tools = vec![connector_tool("beta", "Beta App")?];
     let (server_url, server_handle) =
@@ -216,7 +428,7 @@ enabled = false
         AuthCredentialsStoreMode::File,
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
@@ -249,6 +461,39 @@ enabled = false
 
 #[tokio::test]
 async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<()> {
+    let alpha_branding = Some(AppBranding {
+        category: Some("PRODUCTIVITY".to_string()),
+        developer: Some("Acme".to_string()),
+        website: Some("https://acme.example".to_string()),
+        privacy_policy: Some("https://acme.example/privacy".to_string()),
+        terms_of_service: Some("https://acme.example/terms".to_string()),
+        is_discoverable_app: true,
+    });
+    let alpha_app_metadata = Some(AppMetadata {
+        review: Some(AppReview {
+            status: "APPROVED".to_string(),
+        }),
+        categories: Some(vec!["PRODUCTIVITY".to_string()]),
+        sub_categories: Some(vec!["WRITING".to_string()]),
+        seo_description: Some("Alpha connector".to_string()),
+        screenshots: Some(vec![AppScreenshot {
+            url: Some("https://example.com/alpha-screenshot.png".to_string()),
+            file_id: Some("file_123".to_string()),
+            user_prompt: "Summarize this draft".to_string(),
+        }]),
+        developer: Some("Acme".to_string()),
+        version: Some("1.2.3".to_string()),
+        version_id: Some("version_123".to_string()),
+        version_notes: Some("Fixes and improvements".to_string()),
+        first_party_type: Some("internal".to_string()),
+        first_party_requires_install: Some(true),
+        show_in_composer_when_unlinked: Some(true),
+    });
+    let alpha_labels = Some(HashMap::from([
+        ("feature".to_string(), "beta".to_string()),
+        ("source".to_string(), "directory".to_string()),
+    ]));
+
     let connectors = vec![
         AppInfo {
             id: "alpha".to_string(),
@@ -257,9 +502,13 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
             logo_url: Some("https://example.com/alpha.png".to_string()),
             logo_url_dark: None,
             distribution_channel: None,
+            branding: alpha_branding.clone(),
+            app_metadata: alpha_app_metadata.clone(),
+            labels: alpha_labels.clone(),
             install_url: None,
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
         AppInfo {
             id: "beta".to_string(),
@@ -268,9 +517,13 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: None,
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
     ];
 
@@ -294,7 +547,7 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
         AuthCredentialsStoreMode::File,
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
@@ -313,9 +566,13 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
         logo_url: None,
         logo_url_dark: None,
         distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
         install_url: Some("https://chatgpt.com/apps/beta-app/beta".to_string()),
         is_accessible: true,
         is_enabled: true,
+        plugin_display_names: Vec::new(),
     }];
 
     let first_update = read_app_list_updated_notification(&mut mcp).await?;
@@ -329,9 +586,13 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: Some("https://chatgpt.com/apps/beta/beta".to_string()),
             is_accessible: true,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
         AppInfo {
             id: "alpha".to_string(),
@@ -340,9 +601,13 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
             logo_url: Some("https://example.com/alpha.png".to_string()),
             logo_url_dark: None,
             distribution_channel: None,
+            branding: alpha_branding,
+            app_metadata: alpha_app_metadata,
+            labels: alpha_labels,
             install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
     ];
 
@@ -368,7 +633,7 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
 }
 
 #[tokio::test]
-async fn list_apps_returns_connectors_with_accessible_flags() -> Result<()> {
+async fn list_apps_waits_for_accessible_data_before_emitting_directory_updates() -> Result<()> {
     let connectors = vec![
         AppInfo {
             id: "alpha".to_string(),
@@ -377,9 +642,13 @@ async fn list_apps_returns_connectors_with_accessible_flags() -> Result<()> {
             logo_url: Some("https://example.com/alpha.png".to_string()),
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: None,
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
         AppInfo {
             id: "beta".to_string(),
@@ -388,9 +657,13 @@ async fn list_apps_returns_connectors_with_accessible_flags() -> Result<()> {
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: None,
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
     ];
 
@@ -409,12 +682,12 @@ async fn list_apps_returns_connectors_with_accessible_flags() -> Result<()> {
         codex_home.path(),
         ChatGptAuthFixture::new("chatgpt-token")
             .account_id("account-123")
-            .chatgpt_user_id("user-123")
+            .chatgpt_user_id("user-directory-first")
             .chatgpt_account_id("account-123"),
         AuthCredentialsStoreMode::File,
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
@@ -426,35 +699,6 @@ async fn list_apps_returns_connectors_with_accessible_flags() -> Result<()> {
         })
         .await?;
 
-    let first_update = read_app_list_updated_notification(&mut mcp).await?;
-    assert_eq!(
-        first_update.data,
-        vec![
-            AppInfo {
-                id: "alpha".to_string(),
-                name: "Alpha".to_string(),
-                description: Some("Alpha connector".to_string()),
-                logo_url: Some("https://example.com/alpha.png".to_string()),
-                logo_url_dark: None,
-                distribution_channel: None,
-                install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
-                is_accessible: false,
-                is_enabled: true,
-            },
-            AppInfo {
-                id: "beta".to_string(),
-                name: "beta".to_string(),
-                description: None,
-                logo_url: None,
-                logo_url_dark: None,
-                distribution_channel: None,
-                install_url: Some("https://chatgpt.com/apps/beta/beta".to_string()),
-                is_accessible: false,
-                is_enabled: true,
-            },
-        ]
-    );
-
     let expected = vec![
         AppInfo {
             id: "beta".to_string(),
@@ -463,9 +707,13 @@ async fn list_apps_returns_connectors_with_accessible_flags() -> Result<()> {
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: Some("https://chatgpt.com/apps/beta/beta".to_string()),
             is_accessible: true,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
         AppInfo {
             id: "alpha".to_string(),
@@ -474,14 +722,117 @@ async fn list_apps_returns_connectors_with_accessible_flags() -> Result<()> {
             logo_url: Some("https://example.com/alpha.png".to_string()),
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
     ];
 
-    let second_update = read_app_list_updated_notification(&mut mcp).await?;
-    assert_eq!(second_update.data, expected);
+    loop {
+        let update = read_app_list_updated_notification(&mut mcp).await?;
+        if update.data == expected {
+            break;
+        }
+
+        assert!(
+            !update.data.is_empty() && update.data.iter().all(|connector| connector.is_accessible),
+            "unexpected directory-only app/list update before accessible apps loaded"
+        );
+    }
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let AppsListResponse { data, next_cursor } = to_response(response)?;
+    assert_eq!(data, expected);
+    assert!(next_cursor.is_none());
+
+    server_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_apps_does_not_emit_empty_interim_updates() -> Result<()> {
+    let connectors = vec![AppInfo {
+        id: "alpha".to_string(),
+        name: "Alpha".to_string(),
+        description: Some("Alpha connector".to_string()),
+        logo_url: None,
+        logo_url_dark: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: None,
+        is_accessible: false,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }];
+    let (server_url, server_handle) = start_apps_server_with_delays(
+        connectors.clone(),
+        Vec::new(),
+        Duration::from_millis(300),
+        Duration::ZERO,
+    )
+    .await?;
+
+    let codex_home = TempDir::new()?;
+    write_connectors_config(codex_home.path(), &server_url)?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("chatgpt-token")
+            .account_id("account-123")
+            .chatgpt_user_id("user-empty-interim")
+            .chatgpt_account_id("account-123"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_apps_list_request(AppsListParams {
+            limit: None,
+            cursor: None,
+            thread_id: None,
+            force_refetch: false,
+        })
+        .await?;
+
+    let maybe_update = timeout(
+        Duration::from_millis(150),
+        read_app_list_updated_notification(&mut mcp),
+    )
+    .await;
+    assert!(
+        maybe_update.is_err(),
+        "unexpected empty interim app/list update"
+    );
+
+    let expected = vec![AppInfo {
+        id: "alpha".to_string(),
+        name: "Alpha".to_string(),
+        description: Some("Alpha connector".to_string()),
+        logo_url: None,
+        logo_url_dark: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
+        is_accessible: false,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }];
+
+    let update = read_app_list_updated_notification(&mut mcp).await?;
+    assert_eq!(update.data, expected);
 
     let response: JSONRPCResponse = timeout(
         DEFAULT_TIMEOUT,
@@ -506,9 +857,13 @@ async fn list_apps_paginates_results() -> Result<()> {
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: None,
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
         AppInfo {
             id: "beta".to_string(),
@@ -517,9 +872,13 @@ async fn list_apps_paginates_results() -> Result<()> {
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: None,
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
     ];
 
@@ -543,7 +902,7 @@ async fn list_apps_paginates_results() -> Result<()> {
         AuthCredentialsStoreMode::File,
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let first_request = mcp
@@ -571,9 +930,13 @@ async fn list_apps_paginates_results() -> Result<()> {
         logo_url: None,
         logo_url_dark: None,
         distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
         install_url: Some("https://chatgpt.com/apps/beta/beta".to_string()),
         is_accessible: true,
         is_enabled: true,
+        plugin_display_names: Vec::new(),
     }];
 
     assert_eq!(first_page, expected_first);
@@ -611,9 +974,13 @@ async fn list_apps_paginates_results() -> Result<()> {
         logo_url: None,
         logo_url_dark: None,
         distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
         install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
         is_accessible: false,
         is_enabled: true,
+        plugin_display_names: Vec::new(),
     }];
 
     assert_eq!(second_page, expected_second);
@@ -632,9 +999,13 @@ async fn list_apps_force_refetch_preserves_previous_cache_on_failure() -> Result
         logo_url: None,
         logo_url_dark: None,
         distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
         install_url: None,
         is_accessible: false,
         is_enabled: true,
+        plugin_display_names: Vec::new(),
     }];
     let tools = vec![connector_tool("beta", "Beta App")?];
     let (server_url, server_handle) =
@@ -651,7 +1022,7 @@ async fn list_apps_force_refetch_preserves_previous_cache_on_failure() -> Result
         AuthCredentialsStoreMode::File,
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let initial_request = mcp
@@ -733,9 +1104,13 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: None,
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
         AppInfo {
             id: "beta".to_string(),
@@ -744,9 +1119,13 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: None,
             is_accessible: false,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         },
     ];
     let initial_tools = vec![connector_tool("beta", "Beta App")?];
@@ -769,7 +1148,7 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
         AuthCredentialsStoreMode::File,
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let warm_request = mcp
@@ -790,9 +1169,13 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: Some("https://chatgpt.com/apps/beta-app/beta".to_string()),
             is_accessible: true,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         }]
     );
 
@@ -807,9 +1190,13 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
                 logo_url: None,
                 logo_url_dark: None,
                 distribution_channel: None,
+                branding: None,
+                app_metadata: None,
+                labels: None,
                 install_url: Some("https://chatgpt.com/apps/beta-app/beta".to_string()),
                 is_accessible: true,
                 is_enabled: true,
+                plugin_display_names: Vec::new(),
             },
             AppInfo {
                 id: "alpha".to_string(),
@@ -818,9 +1205,13 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
                 logo_url: None,
                 logo_url_dark: None,
                 distribution_channel: None,
+                branding: None,
+                app_metadata: None,
+                labels: None,
                 install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
                 is_accessible: false,
                 is_enabled: true,
+                plugin_display_names: Vec::new(),
             },
         ]
     );
@@ -844,9 +1235,13 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
         logo_url: None,
         logo_url_dark: None,
         distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
         install_url: None,
         is_accessible: false,
         is_enabled: true,
+        plugin_display_names: Vec::new(),
     }]);
     server_control.set_tools(Vec::new());
 
@@ -864,28 +1259,46 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
         first_update.data,
         vec![
             AppInfo {
-                id: "alpha".to_string(),
-                name: "Alpha".to_string(),
-                description: Some("Alpha v1".to_string()),
-                logo_url: None,
-                logo_url_dark: None,
-                distribution_channel: None,
-                install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
-                is_accessible: false,
-                is_enabled: true,
-            },
-            AppInfo {
                 id: "beta".to_string(),
                 name: "Beta App".to_string(),
                 description: Some("Beta v1".to_string()),
                 logo_url: None,
                 logo_url_dark: None,
                 distribution_channel: None,
+                branding: None,
+                app_metadata: None,
+                labels: None,
                 install_url: Some("https://chatgpt.com/apps/beta-app/beta".to_string()),
+                is_accessible: true,
+                is_enabled: true,
+                plugin_display_names: Vec::new(),
+            },
+            AppInfo {
+                id: "alpha".to_string(),
+                name: "Alpha".to_string(),
+                description: Some("Alpha v1".to_string()),
+                logo_url: None,
+                logo_url_dark: None,
+                distribution_channel: None,
+                branding: None,
+                app_metadata: None,
+                labels: None,
+                install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
                 is_accessible: false,
                 is_enabled: true,
+                plugin_display_names: Vec::new(),
             },
         ]
+    );
+
+    let maybe_second_update = timeout(
+        Duration::from_millis(150),
+        read_app_list_updated_notification(&mut mcp),
+    )
+    .await;
+    assert!(
+        maybe_second_update.is_err(),
+        "unexpected inaccessible-only app/list update during force refetch"
     );
 
     let expected_final = vec![AppInfo {
@@ -895,9 +1308,13 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
         logo_url: None,
         logo_url_dark: None,
         distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
         install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
         is_accessible: false,
         is_enabled: true,
+        plugin_display_names: Vec::new(),
     }];
     let second_update = read_app_list_updated_notification(&mut mcp).await?;
     assert_eq!(second_update.data, expected_final);
@@ -918,8 +1335,110 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
     Ok(())
 }
 
+#[tokio::test]
+async fn experimental_feature_enablement_set_refreshes_apps_list_when_apps_turn_on() -> Result<()> {
+    let initial_connectors = vec![AppInfo {
+        id: "alpha".to_string(),
+        name: "Alpha".to_string(),
+        description: Some("Alpha v1".to_string()),
+        logo_url: None,
+        logo_url_dark: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: None,
+        is_accessible: false,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }];
+    let (server_url, server_handle, server_control) = start_apps_server_with_delays_and_control(
+        initial_connectors,
+        Vec::new(),
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .await?;
+
+    let codex_home = TempDir::new()?;
+    write_connectors_config(codex_home.path(), &server_url)?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("chatgpt-token")
+            .account_id("account-123")
+            .chatgpt_user_id("user-enable-refresh")
+            .chatgpt_account_id("account-123"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let disable_request = mcp
+        .send_experimental_feature_enablement_set_request(ExperimentalFeatureEnablementSetParams {
+            enablement: BTreeMap::from([("apps".to_string(), false)]),
+        })
+        .await?;
+    let _disable_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(disable_request)),
+    )
+    .await??;
+
+    server_control.set_connectors(vec![AppInfo {
+        id: "alpha".to_string(),
+        name: "Alpha".to_string(),
+        description: Some("Alpha v2".to_string()),
+        logo_url: None,
+        logo_url_dark: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: None,
+        is_accessible: false,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }]);
+    server_control.set_tools(vec![connector_tool("alpha", "Alpha App")?]);
+
+    let enable_request = mcp
+        .send_experimental_feature_enablement_set_request(ExperimentalFeatureEnablementSetParams {
+            enablement: BTreeMap::from([("apps".to_string(), true)]),
+        })
+        .await?;
+    let _enable_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(enable_request)),
+    )
+    .await??;
+
+    let update = read_app_list_updated_notification(&mut mcp).await?;
+    assert_eq!(
+        update.data,
+        vec![AppInfo {
+            id: "alpha".to_string(),
+            name: "Alpha".to_string(),
+            description: Some("Alpha v2".to_string()),
+            logo_url: None,
+            logo_url_dark: None,
+            distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
+            install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
+            is_accessible: true,
+            is_enabled: true,
+            plugin_display_names: Vec::new(),
+        }]
+    );
+
+    server_handle.abort();
+    Ok(())
+}
+
 async fn read_app_list_updated_notification(
-    mcp: &mut McpProcess,
+    mcp: &mut TestAppServer,
 ) -> Result<AppListUpdatedNotification> {
     let notification = timeout(
         DEFAULT_TIMEOUT,
@@ -939,6 +1458,7 @@ struct AppsServerState {
     expected_account_id: String,
     response: Arc<StdMutex<serde_json::Value>>,
     directory_delay: Duration,
+    workspace_plugins_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -979,10 +1499,7 @@ impl AppsServerControl {
 
 impl ServerHandler for AppListMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..ServerInfo::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     fn list_tools(
@@ -1022,11 +1539,45 @@ async fn start_apps_server_with_delays(
     Ok((server_url, server_handle))
 }
 
+async fn start_apps_server_with_workspace_plugins_enabled(
+    connectors: Vec<AppInfo>,
+    tools: Vec<Tool>,
+    workspace_plugins_enabled: bool,
+) -> Result<(String, JoinHandle<()>)> {
+    let (server_url, server_handle, _server_control) =
+        start_apps_server_with_delays_and_control_inner(
+            connectors,
+            tools,
+            Duration::ZERO,
+            Duration::ZERO,
+            workspace_plugins_enabled,
+        )
+        .await?;
+    Ok((server_url, server_handle))
+}
+
 async fn start_apps_server_with_delays_and_control(
     connectors: Vec<AppInfo>,
     tools: Vec<Tool>,
     directory_delay: Duration,
     tools_delay: Duration,
+) -> Result<(String, JoinHandle<()>, AppsServerControl)> {
+    start_apps_server_with_delays_and_control_inner(
+        connectors,
+        tools,
+        directory_delay,
+        tools_delay,
+        /*workspace_plugins_enabled*/ true,
+    )
+    .await
+}
+
+async fn start_apps_server_with_delays_and_control_inner(
+    connectors: Vec<AppInfo>,
+    tools: Vec<Tool>,
+    directory_delay: Duration,
+    tools_delay: Duration,
+    workspace_plugins_enabled: bool,
 ) -> Result<(String, JoinHandle<()>, AppsServerControl)> {
     let response = Arc::new(StdMutex::new(
         json!({ "apps": connectors, "next_token": null }),
@@ -1037,6 +1588,7 @@ async fn start_apps_server_with_delays_and_control(
         expected_account_id: "account-123".to_string(),
         response: response.clone(),
         directory_delay,
+        workspace_plugins_enabled,
     };
     let state = Arc::new(state);
     let server_control = AppsServerControl {
@@ -1062,6 +1614,10 @@ async fn start_apps_server_with_delays_and_control(
             "/connectors/directory/list_workspace",
             get(list_directory_connectors),
         )
+        .route(
+            "/accounts/account-123/settings",
+            get(workspace_settings_response),
+        )
         .with_state(state)
         .nest_service("/api/codex/apps", mcp_service);
 
@@ -1072,9 +1628,34 @@ async fn start_apps_server_with_delays_and_control(
     Ok((format!("http://{addr}"), handle, server_control))
 }
 
+async fn workspace_settings_response(
+    State(state): State<Arc<AppsServerState>>,
+    headers: HeaderMap,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    let bearer_ok = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == state.expected_bearer);
+    let account_ok = headers
+        .get("chatgpt-account-id")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == state.expected_account_id);
+
+    if !bearer_ok || !account_ok {
+        Err(StatusCode::UNAUTHORIZED)
+    } else {
+        Ok(Json(json!({
+            "beta_settings": {
+                "enable_plugins": state.workspace_plugins_enabled
+            }
+        })))
+    }
+}
+
 async fn list_directory_connectors(
     State(state): State<Arc<AppsServerState>>,
     headers: HeaderMap,
+    uri: Uri,
 ) -> Result<impl axum::response::IntoResponse, StatusCode> {
     if state.directory_delay > Duration::ZERO {
         tokio::time::sleep(state.directory_delay).await;
@@ -1088,16 +1669,21 @@ async fn list_directory_connectors(
         .get("chatgpt-account-id")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == state.expected_account_id);
+    let external_logos_ok = uri
+        .query()
+        .is_some_and(|query| query.split('&').any(|pair| pair == "external_logos=true"));
 
-    if bearer_ok && account_ok {
+    if !bearer_ok || !account_ok {
+        Err(StatusCode::UNAUTHORIZED)
+    } else if !external_logos_ok {
+        Err(StatusCode::BAD_REQUEST)
+    } else {
         let response = state
             .response
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         Ok(Json(response))
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
     }
 }
 

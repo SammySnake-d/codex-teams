@@ -1,6 +1,6 @@
-use codex_core::protocol::EventMsg;
-use codex_core::protocol::Op;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -9,7 +9,7 @@ use pretty_assertions::assert_eq;
 const CONFIG_TOML: &str = "config.toml";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn override_turn_context_does_not_persist_when_config_exists() {
+async fn thread_settings_update_does_not_persist_when_config_exists() {
     let server = start_mock_server().await;
     let initial_contents = "model = \"gpt-4o\"\n";
     let mut builder = test_codex()
@@ -24,20 +24,16 @@ async fn override_turn_context_does_not_persist_when_config_exists() {
     let codex = test.codex.clone();
     let config_path = test.home.path().join(CONFIG_TOML);
 
-    codex
-        .submit(Op::OverrideTurnContext {
-            cwd: None,
-            approval_policy: None,
-            sandbox_policy: None,
-            windows_sandbox_level: None,
+    core_test_support::submit_thread_settings(
+        &codex,
+        codex_protocol::protocol::ThreadSettingsOverrides {
             model: Some("o3".to_string()),
             effort: Some(Some(ReasoningEffort::High)),
-            summary: None,
-            collaboration_mode: None,
-            personality: None,
-        })
-        .await
-        .expect("submit override");
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("submit override");
 
     codex.submit(Op::Shutdown).await.expect("request shutdown");
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
@@ -49,7 +45,7 @@ async fn override_turn_context_does_not_persist_when_config_exists() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn override_turn_context_does_not_create_config_file() {
+async fn thread_settings_update_does_not_create_config_file() {
     let server = start_mock_server().await;
     let mut builder = test_codex();
     let test = builder.build(&server).await.expect("create conversation");
@@ -60,20 +56,16 @@ async fn override_turn_context_does_not_create_config_file() {
         "test setup should start without config"
     );
 
-    codex
-        .submit(Op::OverrideTurnContext {
-            cwd: None,
-            approval_policy: None,
-            sandbox_policy: None,
-            windows_sandbox_level: None,
+    core_test_support::submit_thread_settings(
+        &codex,
+        codex_protocol::protocol::ThreadSettingsOverrides {
             model: Some("o3".to_string()),
             effort: Some(Some(ReasoningEffort::Medium)),
-            summary: None,
-            collaboration_mode: None,
-            personality: None,
-        })
-        .await
-        .expect("submit override");
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("submit override");
 
     codex.submit(Op::Shutdown).await.expect("request shutdown");
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;

@@ -1,10 +1,13 @@
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
+use crate::agent::control::SpawnAgentOptions;
 use crate::config::Config;
-use crate::error::CodexErr;
-use crate::error::Result as CodexResult;
 use codex_protocol::ThreadId;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
@@ -178,6 +181,7 @@ pub(crate) struct SpawnTeamMemberRequest {
     pub(crate) initial_items: Vec<UserInput>,
     pub(crate) config: Config,
     pub(crate) session_source: Option<SessionSource>,
+    pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
 }
 
 pub(crate) struct SendTeamMessageRequest {
@@ -352,6 +356,7 @@ impl TeamRegistry {
             mut initial_items,
             config,
             session_source,
+            environments,
         } = request;
         let (team_name, lead_thread_id) = {
             let state = self.state.read().await;
@@ -397,9 +402,25 @@ impl TeamRegistry {
             text_elements: Vec::new(),
         });
         wrapped_items.append(&mut initial_items);
-        let agent_thread_id = agent_control
-            .spawn_agent(config, wrapped_items, session_source)
+        let parent_thread_id = match session_source.as_ref() {
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            })) => Some(*parent_thread_id),
+            _ => None,
+        };
+        let spawned_agent = agent_control
+            .spawn_agent_with_metadata(
+                config,
+                wrapped_items.into(),
+                session_source,
+                SpawnAgentOptions {
+                    parent_thread_id,
+                    environments,
+                    ..Default::default()
+                },
+            )
             .await?;
+        let agent_thread_id = spawned_agent.thread_id;
         let at = unix_timestamp();
         let agent_status = agent_control.get_status(agent_thread_id).await;
         let member = TeamMember {
@@ -437,7 +458,7 @@ impl TeamRegistry {
             }
         };
         if stale_team {
-            let _ = agent_control.shutdown_agent(agent_thread_id).await;
+            let _ = Box::pin(agent_control.close_agent(agent_thread_id)).await;
             return Err(stopped_team_error(team_id));
         }
         Ok(member)
@@ -557,7 +578,10 @@ impl TeamRegistry {
             &message.content,
             items,
         );
-        match agent_control.send_input(agent_thread_id, items).await {
+        match agent_control
+            .send_input(agent_thread_id, items.into())
+            .await
+        {
             Ok(submission_id) => {
                 let agent_status = agent_control.get_status(agent_thread_id).await;
                 message.submitted_id = Some(submission_id.clone());
@@ -957,7 +981,7 @@ impl TeamRegistry {
             return self.snapshot(team_id).await;
         }
 
-        let _ = agent_control.shutdown_agent(agent_thread_id).await;
+        let _ = Box::pin(agent_control.close_agent(agent_thread_id)).await;
         let agent_status = agent_control.get_status(agent_thread_id).await;
         {
             let mut state = self.state.write().await;
@@ -1007,7 +1031,7 @@ impl TeamRegistry {
         };
 
         for agent_thread_id in &agent_thread_ids {
-            let _ = agent_control.shutdown_agent(*agent_thread_id).await;
+            let _ = Box::pin(agent_control.close_agent(*agent_thread_id)).await;
         }
 
         let mut resolved_statuses = Vec::with_capacity(agent_thread_ids.len());
@@ -1288,11 +1312,11 @@ fn unix_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CodexAuth;
     use crate::ThreadManager;
-    use crate::built_in_model_providers;
-    use crate::codex::make_session_and_context;
-    use crate::protocol::Op;
+    use crate::session::tests::make_session_and_context;
+    use codex_login::CodexAuth;
+    use codex_model_provider_info::built_in_model_providers;
+    use codex_protocol::protocol::Op;
     use pretty_assertions::assert_eq;
 
     fn text_input(text: &str) -> Vec<UserInput> {
@@ -1392,8 +1416,38 @@ mod tests {
     fn thread_manager() -> ThreadManager {
         ThreadManager::with_models_provider_for_tests(
             CodexAuth::from_api_key("dummy"),
-            built_in_model_providers()["openai"].clone(),
+            built_in_model_providers(/*openai_base_url*/ None)["openai"].clone(),
         )
+    }
+
+    fn run_team_test<F, Fut>(test: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = std::thread::Builder::new()
+            .name("team-test".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("create team test runtime");
+                runtime.block_on(test());
+            })
+            .expect("spawn team test thread");
+        handle.join().expect("team test thread should not panic");
+    }
+
+    async fn remove_backing_agent(manager: &ThreadManager, thread_id: ThreadId) {
+        let stale_thread = manager
+            .remove_thread(&thread_id)
+            .await
+            .expect("member thread should be loaded before removal");
+        Box::pin(stale_thread.submit(Op::Shutdown {}))
+            .await
+            .expect("removed member thread should accept shutdown");
+        stale_thread.wait_until_terminated().await;
     }
 
     #[tokio::test]
@@ -1414,8 +1468,12 @@ mod tests {
         assert_eq!(registry.list_teams().await, vec![team]);
     }
 
-    #[tokio::test]
-    async fn spawn_send_status_and_stop_use_agent_control() {
+    #[test]
+    fn spawn_send_status_and_stop_use_agent_control() {
+        run_team_test(spawn_send_status_and_stop_use_agent_control_body);
+    }
+
+    async fn spawn_send_status_and_stop_use_agent_control_body() {
         let registry = TeamRegistry::default();
         let manager = thread_manager();
         let agent_control = manager.agent_control();
@@ -1435,18 +1493,16 @@ mod tests {
                     initial_items: text_input("initial task"),
                     config: turn.config.as_ref().clone(),
                     session_source: None,
+                    environments: None,
                 },
                 &agent_control,
             )
             .await
             .expect("spawn member");
 
-        let expected_initial = (
+        let expected_initial: (ThreadId, Op) = (
             member.agent_thread_id,
-            Op::UserInput {
-                items: expected_spawn_items(&team, &member, "initial task"),
-                final_output_json_schema: None,
-            },
+            expected_spawn_items(&team, &member, "initial task").into(),
         );
         assert!(
             manager.captured_ops().contains(&expected_initial),
@@ -1472,12 +1528,9 @@ mod tests {
             TeamMessageDeliveryStatus::Submitted
         );
 
-        let expected_followup = (
+        let expected_followup: (ThreadId, Op) = (
             member.agent_thread_id,
-            Op::UserInput {
-                items: expected_message_items(&message, "follow up"),
-                final_output_json_schema: None,
-            },
+            expected_message_items(&message, "follow up").into(),
         );
         assert!(
             manager.captured_ops().contains(&expected_followup),
@@ -1491,6 +1544,7 @@ mod tests {
             },
             UserInput::Image {
                 image_url: "data:image/png;base64,BBBB".to_string(),
+                detail: None,
             },
         ];
         let structured_member_message = registry
@@ -1511,14 +1565,12 @@ mod tests {
         assert!(
             manager.captured_ops().contains(&(
                 member.agent_thread_id,
-                Op::UserInput {
-                    items: expected_message_items_with_items(
-                        &structured_member_message,
-                        "structured follow up\n[image]",
-                        member_items.clone(),
-                    ),
-                    final_output_json_schema: None,
-                },
+                expected_message_items_with_items(
+                    &structured_member_message,
+                    "structured follow up\n[image]",
+                    member_items.clone(),
+                )
+                .into(),
             )),
             "structured member messages should preserve original items after the Teams envelope"
         );
@@ -1530,6 +1582,7 @@ mod tests {
             },
             UserInput::Image {
                 image_url: "data:image/png;base64,AAAA".to_string(),
+                detail: None,
             },
         ];
         let lead_message = registry
@@ -1659,6 +1712,7 @@ mod tests {
                         initial_items: text_input("after stop"),
                         config: turn.config.as_ref().clone(),
                         session_source: None,
+                        environments: None,
                     },
                     &agent_control,
                 )
@@ -1728,8 +1782,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn failed_member_delivery_keeps_failed_message_record() {
+    #[test]
+    fn failed_member_delivery_keeps_failed_message_record() {
+        run_team_test(failed_member_delivery_keeps_failed_message_record_body);
+    }
+
+    async fn failed_member_delivery_keeps_failed_message_record_body() {
         let registry = TeamRegistry::default();
         let manager = thread_manager();
         let agent_control = manager.agent_control();
@@ -1748,16 +1806,14 @@ mod tests {
                     initial_items: text_input("initial task"),
                     config: turn.config.as_ref().clone(),
                     session_source: None,
+                    environments: None,
                 },
                 &agent_control,
             )
             .await
             .expect("spawn member");
 
-        agent_control
-            .shutdown_agent(member.agent_thread_id)
-            .await
-            .expect("remove backing agent");
+        remove_backing_agent(&manager, member.agent_thread_id).await;
         let send_result = registry
             .send_message(
                 SendTeamMessageRequest {
@@ -1793,8 +1849,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn stop_member_keeps_team_active_and_blocks_member_mutations() {
+    #[test]
+    fn stop_member_keeps_team_active_and_blocks_member_mutations() {
+        run_team_test(stop_member_keeps_team_active_and_blocks_member_mutations_body);
+    }
+
+    async fn stop_member_keeps_team_active_and_blocks_member_mutations_body() {
         let registry = TeamRegistry::default();
         let manager = thread_manager();
         let agent_control = manager.agent_control();
@@ -1813,6 +1873,7 @@ mod tests {
                     initial_items: text_input("initial task"),
                     config: turn.config.as_ref().clone(),
                     session_source: None,
+                    environments: None,
                 },
                 &agent_control,
             )
@@ -1829,14 +1890,14 @@ mod tests {
                     initial_items: text_input("initial task"),
                     config: turn.config.as_ref().clone(),
                     session_source: None,
+                    environments: None,
                 },
                 &agent_control,
             )
             .await
             .expect("spawn member b");
 
-        let stopped = registry
-            .stop_member(team.id, member_a.id, &agent_control)
+        let stopped = Box::pin(registry.stop_member(team.id, member_a.id, &agent_control))
             .await
             .expect("stop member");
         assert_eq!(stopped.team.status, TeamStatus::Active);
@@ -1967,6 +2028,7 @@ mod tests {
                     initial_items: text_input("initial task"),
                     config: turn.config.as_ref().clone(),
                     session_source: None,
+                    environments: None,
                 },
                 &agent_control,
             )
@@ -2080,8 +2142,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn task_claim_respects_dependency_and_assignment_boundaries() {
+    #[test]
+    fn task_claim_respects_dependency_and_assignment_boundaries() {
+        run_team_test(task_claim_respects_dependency_and_assignment_boundaries_body);
+    }
+
+    async fn task_claim_respects_dependency_and_assignment_boundaries_body() {
         let registry = TeamRegistry::default();
         let manager = thread_manager();
         let agent_control = manager.agent_control();
@@ -2100,6 +2166,7 @@ mod tests {
                     initial_items: text_input("initial task"),
                     config: turn.config.as_ref().clone(),
                     session_source: None,
+                    environments: None,
                 },
                 &agent_control,
             )
@@ -2116,6 +2183,7 @@ mod tests {
                     initial_items: text_input("initial task"),
                     config: turn.config.as_ref().clone(),
                     session_source: None,
+                    environments: None,
                 },
                 &agent_control,
             )

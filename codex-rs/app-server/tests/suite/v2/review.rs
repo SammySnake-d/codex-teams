@@ -1,5 +1,5 @@
 use anyhow::Result;
-use app_test_support::McpProcess;
+use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
@@ -8,6 +8,7 @@ use app_test_support::to_response;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
@@ -19,9 +20,13 @@ use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadStartedNotification;
+use codex_app_server_protocol::ThreadStatusChangedNotification;
+use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -54,7 +59,7 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_id = start_default_thread(&mut mcp).await?;
@@ -81,6 +86,18 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     assert_eq!(review_thread_id, thread_id.clone());
     let turn_id = turn.id.clone();
     assert_eq!(turn.status, TurnStatus::InProgress);
+    assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
+    assert_eq!(
+        turn.items,
+        vec![ThreadItem::UserMessage {
+            id: turn_id.clone(),
+            client_id: None,
+            content: vec![V2UserInput::Text {
+                text: "commit 1234567: Tidy UI colors".to_string(),
+                text_elements: Vec::new(),
+            }],
+        }]
+    );
 
     // Confirm we see the EnteredReviewMode marker on the main thread.
     let mut saw_entered_review_mode = false;
@@ -145,7 +162,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
                 "rev-parse".to_string(),
                 "HEAD".to_string(),
             ],
-            None,
+            /*workdir*/ None,
             Some(5000),
             "review-call-1",
         )?,
@@ -156,7 +173,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     let codex_home = TempDir::new()?;
     create_config_toml_with_approval_policy(codex_home.path(), &server.uri(), "untrusted")?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_id = start_default_thread(&mut mcp).await?;
@@ -178,6 +195,18 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     .await??;
     let ReviewStartResponse { turn, .. } = to_response::<ReviewStartResponse>(review_resp)?;
     let turn_id = turn.id.clone();
+    assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
+    assert_eq!(
+        turn.items,
+        vec![ThreadItem::UserMessage {
+            id: turn_id.clone(),
+            client_id: None,
+            content: vec![V2UserInput::Text {
+                text: "commit 1234567: Check review approvals".to_string(),
+                text_elements: Vec::new(),
+            }],
+        }]
+    );
 
     let server_req = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -209,7 +238,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
 
     mcp.send_response(
         request_id,
-        serde_json::json!({ "decision": codex_core::protocol::ReviewDecision::Approved }),
+        serde_json::json!({ "decision": codex_protocol::protocol::ReviewDecision::Approved }),
     )
     .await?;
     timeout(
@@ -227,7 +256,7 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
 
@@ -270,7 +299,7 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_id = start_default_thread(&mut mcp).await?;
@@ -296,10 +325,48 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
     } = to_response::<ReviewStartResponse>(review_resp)?;
 
     assert_eq!(turn.status, TurnStatus::InProgress);
+    assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
+    assert_eq!(
+        turn.items,
+        vec![ThreadItem::UserMessage {
+            id: turn.id.clone(),
+            client_id: None,
+            content: vec![V2UserInput::Text {
+                text: "detached review".to_string(),
+                text_elements: Vec::new(),
+            }],
+        }]
+    );
     assert_ne!(
         review_thread_id, thread_id,
         "detached review should run on a different thread"
     );
+
+    let deadline = tokio::time::Instant::now() + DEFAULT_READ_TIMEOUT;
+    let notification = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let message = timeout(remaining, mcp.read_next_message()).await??;
+        let JSONRPCMessage::Notification(notification) = message else {
+            continue;
+        };
+        if notification.method == "thread/status/changed" {
+            let status_changed: ThreadStatusChangedNotification =
+                serde_json::from_value(notification.params.expect("params must be present"))?;
+            if status_changed.thread_id == review_thread_id {
+                anyhow::bail!(
+                    "detached review threads should be introduced without a preceding thread/status/changed"
+                );
+            }
+            continue;
+        }
+        if notification.method == "thread/started" {
+            break notification;
+        }
+    };
+    let started: ThreadStartedNotification =
+        serde_json::from_value(notification.params.expect("params must be present"))?;
+    assert_eq!(started.thread.id, review_thread_id);
+    assert_eq!(started.thread.session_id, review_thread_id);
 
     Ok(())
 }
@@ -310,7 +377,7 @@ async fn review_start_rejects_empty_commit_sha() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
 
@@ -345,7 +412,7 @@ async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
 
@@ -376,7 +443,7 @@ async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
     Ok(())
 }
 
-async fn start_default_thread(mcp: &mut McpProcess) -> Result<String> {
+async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
@@ -389,13 +456,19 @@ async fn start_default_thread(mcp: &mut McpProcess) -> Result<String> {
     )
     .await??;
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/started"),
+    )
+    .await??;
     Ok(thread.id)
 }
 
-async fn materialize_thread_rollout(mcp: &mut McpProcess, thread_id: &str) -> Result<()> {
+async fn materialize_thread_rollout(mcp: &mut TestAppServer, thread_id: &str) -> Result<()> {
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread_id.to_string(),
+            client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: "materialize rollout".to_string(),
                 text_elements: Vec::new(),
@@ -437,7 +510,6 @@ sandbox_mode = "read-only"
 model_provider = "mock_provider"
 
 [features]
-remote_models = false
 shell_snapshot = false
 
 [model_providers.mock_provider]

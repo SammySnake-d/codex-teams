@@ -1,7 +1,8 @@
 use anyhow::Result;
 use anyhow::anyhow;
-use app_test_support::McpProcess;
-use app_test_support::create_mock_responses_server_sequence;
+use anyhow::bail;
+use app_test_support::TestAppServer;
+use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -17,8 +18,8 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
-use codex_core::features::FEATURES;
-use codex_core::features::Feature;
+use codex_features::FEATURES;
+use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -28,11 +29,13 @@ use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::path::Path;
 use tempfile::TempDir;
+use tokio::time::sleep;
 use tokio::time::timeout;
+use wiremock::MockServer;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plan_mode_uses_proposed_plan_block_for_plan_item() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -45,17 +48,18 @@ async fn plan_mode_uses_proposed_plan_block_for_plan_item() -> Result<()> {
         responses::ev_assistant_message("msg-1", &full_message),
         responses::ev_completed("resp-1"),
     ])];
-    let server = create_mock_responses_server_sequence(responses).await;
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let turn = start_plan_mode_turn(&mut mcp).await?;
     let (_, completed_items, plan_deltas, turn_completed) =
         collect_turn_notifications(&mut mcp).await?;
+    wait_for_responses_request_count(&server, /*expected_count*/ 1).await?;
 
     assert_eq!(turn_completed.turn.id, turn.id);
     assert_eq!(turn_completed.turn.status, TurnStatus::Completed);
@@ -93,7 +97,7 @@ async fn plan_mode_uses_proposed_plan_block_for_plan_item() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plan_mode_without_proposed_plan_does_not_emit_plan_item() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -102,16 +106,17 @@ async fn plan_mode_without_proposed_plan_does_not_emit_plan_item() -> Result<()>
         responses::ev_assistant_message("msg-1", "Done"),
         responses::ev_completed("resp-1"),
     ])];
-    let server = create_mock_responses_server_sequence(responses).await;
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let _turn = start_plan_mode_turn(&mut mcp).await?;
     let (_, completed_items, plan_deltas, _) = collect_turn_notifications(&mut mcp).await?;
+    wait_for_responses_request_count(&server, /*expected_count*/ 1).await?;
 
     let has_plan_item = completed_items
         .iter()
@@ -122,7 +127,7 @@ async fn plan_mode_without_proposed_plan_does_not_emit_plan_item() -> Result<()>
     Ok(())
 }
 
-async fn start_plan_mode_turn(mcp: &mut McpProcess) -> Result<codex_app_server_protocol::Turn> {
+async fn start_plan_mode_turn(mcp: &mut TestAppServer) -> Result<codex_app_server_protocol::Turn> {
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
@@ -147,6 +152,7 @@ async fn start_plan_mode_turn(mcp: &mut McpProcess) -> Result<codex_app_server_p
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread.id,
+            client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: "Plan this".to_string(),
                 text_elements: Vec::new(),
@@ -164,7 +170,7 @@ async fn start_plan_mode_turn(mcp: &mut McpProcess) -> Result<codex_app_server_p
 }
 
 async fn collect_turn_notifications(
-    mcp: &mut McpProcess,
+    mcp: &mut TestAppServer,
 ) -> Result<(
     Vec<ThreadItem>,
     Vec<ThreadItem>,
@@ -214,11 +220,38 @@ async fn collect_turn_notifications(
     }
 }
 
+async fn wait_for_responses_request_count(
+    server: &MockServer,
+    expected_count: usize,
+) -> Result<()> {
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let Some(requests) = server.received_requests().await else {
+                bail!("wiremock did not record requests");
+            };
+            let responses_request_count = requests
+                .iter()
+                .filter(|request| {
+                    request.method == "POST" && request.url.path().ends_with("/responses")
+                })
+                .count();
+            if responses_request_count == expected_count {
+                return Ok::<(), anyhow::Error>(());
+            }
+            if responses_request_count > expected_count {
+                bail!(
+                    "expected exactly {expected_count} /responses requests, got {responses_request_count}"
+                );
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
 fn create_config_toml(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {
-    let features = BTreeMap::from([
-        (Feature::RemoteModels, false),
-        (Feature::CollaborationModes, true),
-    ]);
+    let features = BTreeMap::from([(Feature::CollaborationModes, true)]);
     let feature_entries = features
         .into_iter()
         .map(|(feature, enabled)| {

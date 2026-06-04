@@ -2,16 +2,25 @@
 use std::io;
 use std::net::SocketAddr;
 use std::net::TcpListener;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
 use base64::Engine;
-use codex_core::auth::AuthCredentialsStoreMode;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::ServerOptions;
 use codex_login::run_login_server;
 use core_test_support::skip_if_no_network;
+use pretty_assertions::assert_eq;
 use tempfile::tempdir;
+use url::Url;
+
+const DEFAULT_LOGIN_PORT: u16 = 1455;
+const FALLBACK_LOGIN_PORT: u16 = 1457;
+const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
+const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
+const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
 
 // See spawn.rs for details
 
@@ -117,7 +126,8 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some(state),
-        forced_chatgpt_workspace_id: Some(chatgpt_account_id.to_string()),
+        forced_chatgpt_workspace_id: Some(vec![chatgpt_account_id.to_string()]),
+        codex_streamlined_login: false,
     };
     let server = run_login_server(opts)?;
     assert!(
@@ -160,7 +170,7 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
 async fn creates_missing_codex_home_dir() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let (issuer_addr, _issuer_handle) = start_mock_issuer("org-123");
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
     let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
 
     let tmp = tempdir()?;
@@ -179,6 +189,7 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
         open_browser: false,
         force_state: Some(state),
         forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
     };
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;
@@ -199,10 +210,51 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
 }
 
 #[tokio::test]
+async fn login_server_includes_forced_workspaces_as_one_query_param() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().to_path_buf();
+    let state = "state-multi".to_string();
+
+    let opts = ServerOptions {
+        codex_home,
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        client_id: codex_login::CLIENT_ID.to_string(),
+        issuer,
+        port: 0,
+        open_browser: false,
+        force_state: Some(state),
+        forced_chatgpt_workspace_id: Some(vec![
+            WORKSPACE_ID_ALLOWED.to_string(),
+            WORKSPACE_ID_SECOND_ALLOWED.to_string(),
+        ]),
+        codex_streamlined_login: false,
+    };
+    let server = run_login_server(opts)?;
+    let auth_url = Url::parse(&server.auth_url)?;
+    let allowed_workspace_ids = auth_url
+        .query_pairs()
+        .filter_map(|(key, value)| (key == "allowed_workspace_id").then(|| value.into_owned()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        allowed_workspace_ids,
+        vec![format!(
+            "{WORKSPACE_ID_ALLOWED},{WORKSPACE_ID_SECOND_ALLOWED}"
+        )]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let (issuer_addr, _issuer_handle) = start_mock_issuer("org-actual");
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_DISALLOWED);
     let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
 
     let tmp = tempdir()?;
@@ -217,13 +269,14 @@ async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some(state.clone()),
-        forced_chatgpt_workspace_id: Some("org-required".to_string()),
+        forced_chatgpt_workspace_id: Some(vec![WORKSPACE_ID_ALLOWED.to_string()]),
+        codex_streamlined_login: false,
     };
     let server = run_login_server(opts)?;
     assert!(
         server
             .auth_url
-            .contains("allowed_workspace_id=org-required"),
+            .contains(&format!("allowed_workspace_id={WORKSPACE_ID_ALLOWED}")),
         "auth URL should include forced workspace parameter"
     );
     let login_port = server.actual_port;
@@ -234,7 +287,9 @@ async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
     assert!(resp.status().is_success());
     let body = resp.text().await?;
     assert!(
-        body.contains("Login is restricted to workspace id org-required"),
+        body.contains(&format!(
+            "Login is restricted to workspace id(s) {WORKSPACE_ID_ALLOWED}"
+        )),
         "error body should mention workspace restriction"
     );
 
@@ -255,11 +310,225 @@ async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn oauth_access_denied_missing_entitlement_blocks_login_with_clear_error() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().to_path_buf();
+    let state = "state-entitlement".to_string();
+
+    let opts = ServerOptions {
+        codex_home: codex_home.clone(),
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        client_id: codex_login::CLIENT_ID.to_string(),
+        issuer,
+        port: 0,
+        open_browser: false,
+        force_state: Some(state.clone()),
+        forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
+    };
+    let server = run_login_server(opts)?;
+    let login_port = server.actual_port;
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "http://127.0.0.1:{login_port}/auth/callback?state={state}&error=access_denied&error_description=missing_codex_entitlement"
+    );
+    let resp = client.get(&url).send().await?;
+    assert!(resp.status().is_success());
+    let body = resp.text().await?;
+    assert!(
+        body.contains("You do not have access to Codex"),
+        "error body should clearly explain the Codex access denial"
+    );
+    assert!(
+        body.contains("Contact your workspace administrator"),
+        "error body should tell the user how to get access"
+    );
+    assert!(
+        body.contains("access_denied"),
+        "error body should still include the oauth error code"
+    );
+    assert!(
+        !body.contains("missing_codex_entitlement"),
+        "known entitlement errors should be mapped to user-facing copy"
+    );
+
+    let result = server.block_until_done().await;
+    assert!(result.is_err(), "login should fail for access_denied");
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string()
+            .contains("Contact your workspace administrator"),
+        "terminal error should also tell the user what to do next"
+    );
+
+    let auth_path = codex_home.join("auth.json");
+    assert!(
+        !auth_path.exists(),
+        "auth.json should not be written when oauth callback is denied"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_access_denied_unknown_reason_uses_generic_error_page() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().to_path_buf();
+    let state = "state-generic-denial".to_string();
+
+    let opts = ServerOptions {
+        codex_home: codex_home.clone(),
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        client_id: codex_login::CLIENT_ID.to_string(),
+        issuer,
+        port: 0,
+        open_browser: false,
+        force_state: Some(state.clone()),
+        forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
+    };
+    let server = run_login_server(opts)?;
+    let login_port = server.actual_port;
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "http://127.0.0.1:{login_port}/auth/callback?state={state}&error=access_denied&error_description=some_other_reason"
+    );
+    let resp = client.get(&url).send().await?;
+    assert!(resp.status().is_success());
+    let body = resp.text().await?;
+    assert!(
+        body.contains("Sign-in could not be completed"),
+        "generic oauth denial should use the generic error page title"
+    );
+    assert!(
+        body.contains("Sign-in failed: some_other_reason"),
+        "generic oauth denial should preserve the oauth error details"
+    );
+    assert!(
+        body.contains("Return to Codex to retry"),
+        "generic oauth denial should keep the generic help text"
+    );
+    assert!(
+        body.contains("access_denied"),
+        "generic oauth denial should include the oauth error code"
+    );
+    assert!(
+        body.contains("some_other_reason"),
+        "generic oauth denial should include the oauth error description"
+    );
+    assert!(
+        !body.contains("You do not have access to Codex"),
+        "generic oauth denial should not show the entitlement-specific title"
+    );
+    assert!(
+        !body.contains("get access to Codex"),
+        "generic oauth denial should not show the entitlement-specific admin guidance"
+    );
+
+    let result = server.block_until_done().await;
+    assert!(result.is_err(), "login should fail for access_denied");
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string()
+            .contains("Sign-in failed: some_other_reason"),
+        "terminal error should preserve generic oauth details"
+    );
+
+    let auth_path = codex_home.join("auth.json");
+    assert!(
+        !auth_path.exists(),
+        "auth.json should not be written when oauth callback is denied"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn falls_back_to_registered_fallback_port_when_default_port_is_in_use() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    match TcpListener::bind(("127.0.0.1", FALLBACK_LOGIN_PORT)) {
+        Ok(listener) => drop(listener),
+        Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!("Skipping test because 127.0.0.1:{FALLBACK_LOGIN_PORT} is already in use");
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    }
+
+    let default_port_listener = match TcpListener::bind(("127.0.0.1", DEFAULT_LOGIN_PORT)) {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!("Skipping test because 127.0.0.1:{DEFAULT_LOGIN_PORT} is already in use");
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let default_port_server =
+        Arc::new(tiny_http::Server::from_listener(default_port_listener, None).unwrap());
+    let default_port_server_handle = {
+        let server = default_port_server.clone();
+        thread::spawn(move || {
+            while let Ok(req) = server.recv() {
+                let _ = req.respond(tiny_http::Response::from_string("not codex"));
+            }
+        })
+    };
+
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+    let tmp = tempdir()?;
+
+    let mut opts = ServerOptions::new(
+        tmp.path().to_path_buf(),
+        codex_login::CLIENT_ID.to_string(),
+        /*forced_chatgpt_workspace_id*/ None,
+        AuthCredentialsStoreMode::File,
+    );
+    opts.issuer = issuer;
+    opts.open_browser = false;
+    opts.force_state = Some("fallback_state".to_string());
+
+    let server_result = run_login_server(opts);
+    default_port_server.unblock();
+    let _ = default_port_server_handle.join();
+
+    let server = server_result?;
+    let actual_port = server.actual_port;
+    let auth_url = server.auth_url.clone();
+    server.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), server.block_until_done())
+        .await
+        .expect("login server should shut down after cancel");
+
+    assert_eq!(actual_port, FALLBACK_LOGIN_PORT);
+    assert!(auth_url.contains(&format!(
+        "redirect_uri=http%3A%2F%2Flocalhost%3A{FALLBACK_LOGIN_PORT}%2Fauth%2Fcallback"
+    )));
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let (issuer_addr, _issuer_handle) = start_mock_issuer("org-123");
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
     let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
 
     let first_tmp = tempdir()?;
@@ -274,6 +543,7 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         open_browser: false,
         force_state: Some("cancel_state".to_string()),
         forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
     };
 
     let first_server = run_login_server(first_opts)?;
@@ -294,6 +564,7 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         open_browser: false,
         force_state: Some("cancel_state_2".to_string()),
         forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
     };
 
     let second_server = run_login_server(second_opts)?;

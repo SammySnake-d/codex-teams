@@ -1,4 +1,6 @@
 use crate::config::NetworkMode;
+use crate::connect_policy::TargetCheckedTcpConnector;
+use crate::network_policy::BlockDecisionAuditEventArgs;
 use crate::network_policy::NetworkDecision;
 use crate::network_policy::NetworkDecisionSource;
 use crate::network_policy::NetworkPolicyDecider;
@@ -6,9 +8,11 @@ use crate::network_policy::NetworkPolicyDecision;
 use crate::network_policy::NetworkPolicyRequest;
 use crate::network_policy::NetworkPolicyRequestArgs;
 use crate::network_policy::NetworkProtocol;
+use crate::network_policy::emit_block_decision_audit_event;
 use crate::network_policy::evaluate_host_policy;
 use crate::policy::normalize_host;
 use crate::reasons::REASON_METHOD_NOT_ALLOWED;
+use crate::reasons::REASON_MITM_REQUIRED;
 use crate::reasons::REASON_PROXY_DISABLED;
 use crate::responses::PolicyDecisionDetails;
 use crate::responses::blocked_message_with_policy;
@@ -32,12 +36,12 @@ use rama_socks5::server::udp::RelayRequest;
 use rama_socks5::server::udp::RelayResponse;
 use rama_tcp::TcpStream;
 use rama_tcp::client::Request as TcpRequest;
-use rama_tcp::client::service::TcpConnector;
 use rama_tcp::server::TcpListener;
 use std::io;
 use std::net::SocketAddr;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -92,7 +96,7 @@ async fn run_socks5_with_listener(
         }
     }
 
-    let tcp_connector = TcpConnector::default();
+    let tcp_connector = TargetCheckedTcpConnector::new(state.clone());
     let policy_tcp_connector = service_fn({
         let policy_decider = policy_decider.clone();
         move |req: TcpRequest| {
@@ -129,7 +133,7 @@ async fn run_socks5_with_listener(
 
 async fn handle_socks5_tcp(
     req: TcpRequest,
-    tcp_connector: TcpConnector,
+    tcp_connector: TargetCheckedTcpConnector,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
 ) -> Result<EstablishedClientConnection<TcpStream, TcpRequest>, BoxError> {
     let app_state = req
@@ -152,6 +156,15 @@ async fn handle_socks5_tcp(
     match app_state.enabled().await {
         Ok(true) => {}
         Ok(false) => {
+            emit_socks_block_decision_audit_event(
+                &app_state,
+                NetworkDecisionSource::ProxyState,
+                REASON_PROXY_DISABLED,
+                NetworkProtocol::Socks5Tcp,
+                host.as_str(),
+                port,
+                client.as_deref(),
+            );
             let details = PolicyDecisionDetails {
                 decision: NetworkPolicyDecision::Deny,
                 reason: REASON_PROXY_DISABLED,
@@ -168,7 +181,6 @@ async fn handle_socks5_tcp(
                     method: None,
                     mode: None,
                     protocol: "socks5".to_string(),
-                    attempt_id: None,
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -186,6 +198,15 @@ async fn handle_socks5_tcp(
 
     match app_state.network_mode().await {
         Ok(NetworkMode::Limited) => {
+            emit_socks_block_decision_audit_event(
+                &app_state,
+                NetworkDecisionSource::ModeGuard,
+                REASON_METHOD_NOT_ALLOWED,
+                NetworkProtocol::Socks5Tcp,
+                host.as_str(),
+                port,
+                client.as_deref(),
+            );
             let details = PolicyDecisionDetails {
                 decision: NetworkPolicyDecision::Deny,
                 reason: REASON_METHOD_NOT_ALLOWED,
@@ -202,7 +223,6 @@ async fn handle_socks5_tcp(
                     method: None,
                     mode: Some(NetworkMode::Limited),
                     protocol: "socks5".to_string(),
-                    attempt_id: None,
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -221,6 +241,51 @@ async fn handle_socks5_tcp(
         }
     }
 
+    match app_state.host_has_mitm_hooks(&host).await {
+        Ok(true) => {
+            emit_socks_block_decision_audit_event(
+                &app_state,
+                NetworkDecisionSource::ModeGuard,
+                REASON_MITM_REQUIRED,
+                NetworkProtocol::Socks5Tcp,
+                host.as_str(),
+                port,
+                client.as_deref(),
+            );
+            let details = PolicyDecisionDetails {
+                decision: NetworkPolicyDecision::Deny,
+                reason: REASON_MITM_REQUIRED,
+                source: NetworkDecisionSource::ModeGuard,
+                protocol: NetworkProtocol::Socks5Tcp,
+                host: &host,
+                port,
+            };
+            let _ = app_state
+                .record_blocked(BlockedRequest::new(BlockedRequestArgs {
+                    host: host.clone(),
+                    reason: REASON_MITM_REQUIRED.to_string(),
+                    client: client.clone(),
+                    method: None,
+                    mode: Some(NetworkMode::Full),
+                    protocol: "socks5".to_string(),
+                    decision: Some(details.decision.as_str().to_string()),
+                    source: Some(details.source.as_str().to_string()),
+                    port: Some(port),
+                }))
+                .await;
+            let client = client.as_deref().unwrap_or_default();
+            warn!(
+                "SOCKS blocked; MITM required to enforce HTTPS policy (client={client}, host={host}, mode=full)"
+            );
+            return Err(policy_denied_error(REASON_MITM_REQUIRED, &details).into());
+        }
+        Ok(false) => {}
+        Err(err) => {
+            error!("failed to inspect MITM hooks for {host}: {err}");
+            return Err(io::Error::other("proxy error").into());
+        }
+    }
+
     let request = NetworkPolicyRequest::new(NetworkPolicyRequestArgs {
         protocol: NetworkProtocol::Socks5Tcp,
         host: host.clone(),
@@ -229,7 +294,6 @@ async fn handle_socks5_tcp(
         method: None,
         command: None,
         exec_policy_hint: None,
-        attempt_id: None,
     });
 
     match evaluate_host_policy(&app_state, policy_decider.as_ref(), &request).await {
@@ -254,7 +318,6 @@ async fn handle_socks5_tcp(
                     method: None,
                     mode: None,
                     protocol: "socks5".to_string(),
-                    attempt_id: None,
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -274,7 +337,20 @@ async fn handle_socks5_tcp(
         }
     }
 
-    tcp_connector.serve(req).await
+    info!("SOCKS upstream dial started (host={host}, port={port})");
+    let connect_started_at = Instant::now();
+    let result = tcp_connector.serve(req).await;
+    match &result {
+        Ok(_) => info!(
+            "SOCKS upstream dial established (host={host}, port={port}, elapsed_ms={})",
+            connect_started_at.elapsed().as_millis()
+        ),
+        Err(_) => warn!(
+            "SOCKS upstream dial failed (host={host}, port={port}, elapsed_ms={})",
+            connect_started_at.elapsed().as_millis()
+        ),
+    }
+    result
 }
 
 async fn inspect_socks5_udp(
@@ -302,6 +378,15 @@ async fn inspect_socks5_udp(
     match state.enabled().await {
         Ok(true) => {}
         Ok(false) => {
+            emit_socks_block_decision_audit_event(
+                &state,
+                NetworkDecisionSource::ProxyState,
+                REASON_PROXY_DISABLED,
+                NetworkProtocol::Socks5Udp,
+                host.as_str(),
+                port,
+                client.as_deref(),
+            );
             let details = PolicyDecisionDetails {
                 decision: NetworkPolicyDecision::Deny,
                 reason: REASON_PROXY_DISABLED,
@@ -318,7 +403,6 @@ async fn inspect_socks5_udp(
                     method: None,
                     mode: None,
                     protocol: "socks5-udp".to_string(),
-                    attempt_id: None,
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -336,6 +420,15 @@ async fn inspect_socks5_udp(
 
     match state.network_mode().await {
         Ok(NetworkMode::Limited) => {
+            emit_socks_block_decision_audit_event(
+                &state,
+                NetworkDecisionSource::ModeGuard,
+                REASON_METHOD_NOT_ALLOWED,
+                NetworkProtocol::Socks5Udp,
+                host.as_str(),
+                port,
+                client.as_deref(),
+            );
             let details = PolicyDecisionDetails {
                 decision: NetworkPolicyDecision::Deny,
                 reason: REASON_METHOD_NOT_ALLOWED,
@@ -352,7 +445,6 @@ async fn inspect_socks5_udp(
                     method: None,
                     mode: Some(NetworkMode::Limited),
                     protocol: "socks5-udp".to_string(),
-                    attempt_id: None,
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -375,7 +467,6 @@ async fn inspect_socks5_udp(
         method: None,
         command: None,
         exec_policy_hint: None,
-        attempt_id: None,
     });
 
     match evaluate_host_policy(&state, policy_decider.as_ref(), &request).await {
@@ -400,7 +491,6 @@ async fn inspect_socks5_udp(
                     method: None,
                     mode: None,
                     protocol: "socks5-udp".to_string(),
-                    attempt_id: None,
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -421,9 +511,227 @@ async fn inspect_socks5_udp(
     }
 }
 
+fn emit_socks_block_decision_audit_event(
+    state: &NetworkProxyState,
+    source: NetworkDecisionSource,
+    reason: &str,
+    protocol: NetworkProtocol,
+    host: &str,
+    port: u16,
+    client_addr: Option<&str>,
+) {
+    emit_block_decision_audit_event(
+        state,
+        BlockDecisionAuditEventArgs {
+            source,
+            reason,
+            protocol,
+            server_address: host,
+            server_port: port,
+            method: None,
+            client_addr,
+        },
+    );
+}
+
 fn policy_denied_error(reason: &str, details: &PolicyDecisionDetails<'_>) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         blocked_message_with_policy(reason, details),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NetworkMode;
+    use crate::config::NetworkProxyConfig;
+    use crate::config::NetworkProxySettings;
+    use crate::mitm_hook::MitmHookConfig;
+    use crate::mitm_hook::MitmHookMatchConfig;
+    use crate::network_policy::test_support::POLICY_DECISION_EVENT_NAME;
+    use crate::network_policy::test_support::capture_events;
+    use crate::network_policy::test_support::find_event_by_name;
+    use crate::runtime::ConfigReloader;
+    use crate::runtime::ConfigState;
+    use crate::runtime::network_proxy_state_for_policy;
+    use crate::state::NetworkProxyConstraints;
+    use crate::state::build_config_state;
+    use async_trait::async_trait;
+    use pretty_assertions::assert_eq;
+    use rama_core::extensions::Extensions;
+    use rama_core::extensions::ExtensionsMut;
+    use rama_net::address::HostWithPort;
+    use rama_net::address::SocketAddress;
+    use rama_socks5::server::udp::RelayDirection;
+    use std::net::IpAddr;
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct StaticReloader {
+        state: ConfigState,
+    }
+
+    #[async_trait]
+    impl ConfigReloader for StaticReloader {
+        async fn maybe_reload(&self) -> anyhow::Result<Option<ConfigState>> {
+            Ok(None)
+        }
+
+        async fn reload_now(&self) -> anyhow::Result<ConfigState> {
+            Ok(self.state.clone())
+        }
+
+        fn source_label(&self) -> String {
+            "static test reloader".to_string()
+        }
+    }
+
+    fn state_for_settings(network: NetworkProxySettings) -> Arc<NetworkProxyState> {
+        let config = NetworkProxyConfig { network };
+        let state = build_config_state(config, NetworkProxyConstraints::default()).unwrap();
+        let reloader = Arc::new(StaticReloader {
+            state: state.clone(),
+        });
+        Arc::new(NetworkProxyState::with_reloader(state, reloader))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_socks5_tcp_emits_block_decision_for_proxy_disabled() {
+        let state = state_for_settings(NetworkProxySettings {
+            enabled: false,
+            mode: NetworkMode::Full,
+            ..NetworkProxySettings::default()
+        });
+        let mut request =
+            TcpRequest::new(HostWithPort::try_from("example.com:443").expect("valid authority"));
+        request.extensions_mut().insert(state.clone());
+
+        let (result, events) = capture_events(|| async {
+            handle_socks5_tcp(
+                request,
+                TargetCheckedTcpConnector::new(state.clone()),
+                /*policy_decider*/ None,
+            )
+            .await
+        })
+        .await;
+        assert!(result.is_err(), "proxy-disabled request should be denied");
+
+        let event = find_event_by_name(&events, POLICY_DECISION_EVENT_NAME)
+            .expect("expected policy decision event");
+        assert_eq!(event.field("network.policy.scope"), Some("non_domain"));
+        assert_eq!(event.field("network.policy.decision"), Some("deny"));
+        assert_eq!(event.field("network.policy.source"), Some("proxy_state"));
+        assert_eq!(
+            event.field("network.policy.reason"),
+            Some(REASON_PROXY_DISABLED)
+        );
+        assert_eq!(
+            event.field("network.transport.protocol"),
+            Some("socks5_tcp")
+        );
+        assert_eq!(event.field("server.address"), Some("example.com"));
+        assert_eq!(event.field("server.port"), Some("443"));
+        assert_eq!(event.field("http.request.method"), Some("none"));
+        assert_eq!(event.field("client.address"), Some("unknown"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_socks5_tcp_blocks_hooked_host_in_full_mode() {
+        let state = Arc::new(network_proxy_state_for_policy(NetworkProxySettings {
+            enabled: true,
+            mode: NetworkMode::Full,
+            mitm: true,
+            mitm_hooks: vec![MitmHookConfig {
+                host: "api.github.com".to_string(),
+                matcher: MitmHookMatchConfig {
+                    methods: vec!["GET".to_string()],
+                    path_prefixes: vec!["/".to_string()],
+                    ..MitmHookMatchConfig::default()
+                },
+                ..MitmHookConfig::default()
+            }],
+            ..NetworkProxySettings::default()
+        }));
+        let mut request =
+            TcpRequest::new(HostWithPort::try_from("api.github.com:443").expect("valid authority"));
+        request.extensions_mut().insert(state.clone());
+
+        let (result, events) = capture_events(|| async {
+            handle_socks5_tcp(
+                request,
+                TargetCheckedTcpConnector::new(state.clone()),
+                /*policy_decider*/ None,
+            )
+            .await
+        })
+        .await;
+        assert!(result.is_err(), "hooked host should require MITM");
+
+        let blocked = state.drain_blocked().await.unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].reason, REASON_MITM_REQUIRED);
+        assert_eq!(blocked[0].host, "api.github.com");
+        assert_eq!(blocked[0].port, Some(443));
+        assert_eq!(blocked[0].protocol, "socks5");
+
+        let event = find_event_by_name(&events, POLICY_DECISION_EVENT_NAME)
+            .expect("expected policy decision event");
+        assert_eq!(event.field("network.policy.scope"), Some("non_domain"));
+        assert_eq!(event.field("network.policy.decision"), Some("deny"));
+        assert_eq!(event.field("network.policy.source"), Some("mode_guard"));
+        assert_eq!(
+            event.field("network.policy.reason"),
+            Some(REASON_MITM_REQUIRED)
+        );
+        assert_eq!(
+            event.field("network.transport.protocol"),
+            Some("socks5_tcp")
+        );
+        assert_eq!(event.field("server.address"), Some("api.github.com"));
+        assert_eq!(event.field("server.port"), Some("443"));
+        assert_eq!(event.field("http.request.method"), Some("none"));
+        assert_eq!(event.field("client.address"), Some("unknown"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspect_socks5_udp_emits_block_decision_for_mode_guard_deny() {
+        let state = state_for_settings(NetworkProxySettings {
+            enabled: true,
+            mode: NetworkMode::Limited,
+            ..NetworkProxySettings::default()
+        });
+        let request = RelayRequest {
+            direction: RelayDirection::South,
+            server_address: SocketAddress::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 53),
+            payload: Default::default(),
+            extensions: Extensions::new(),
+        };
+
+        let (result, events) = capture_events(|| async {
+            inspect_socks5_udp(request, state, /*policy_decider*/ None).await
+        })
+        .await;
+        assert!(result.is_err(), "limited-mode UDP request should be denied");
+
+        let event = find_event_by_name(&events, POLICY_DECISION_EVENT_NAME)
+            .expect("expected policy decision event");
+        assert_eq!(event.field("network.policy.scope"), Some("non_domain"));
+        assert_eq!(event.field("network.policy.decision"), Some("deny"));
+        assert_eq!(event.field("network.policy.source"), Some("mode_guard"));
+        assert_eq!(
+            event.field("network.policy.reason"),
+            Some(REASON_METHOD_NOT_ALLOWED)
+        );
+        assert_eq!(
+            event.field("network.transport.protocol"),
+            Some("socks5_udp")
+        );
+        assert_eq!(event.field("server.address"), Some("93.184.216.34"));
+        assert_eq!(event.field("server.port"), Some("53"));
+        assert_eq!(event.field("http.request.method"), Some("none"));
+        assert_eq!(event.field("client.address"), Some("unknown"));
+    }
 }

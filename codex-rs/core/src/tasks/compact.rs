@@ -2,45 +2,65 @@ use std::sync::Arc;
 
 use super::SessionTask;
 use super::SessionTaskContext;
-use crate::codex::TurnContext;
+use super::emit_compact_metric;
+use crate::session::TurnInput;
+use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
-use async_trait::async_trait;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CompactTask;
 
-#[async_trait]
 impl SessionTask for CompactTask {
     fn kind(&self) -> TaskKind {
         TaskKind::Compact
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.compact"
     }
 
     async fn run(
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
         ctx: Arc<TurnContext>,
-        input: Vec<UserInput>,
+        _input: Vec<TurnInput>,
         _cancellation_token: CancellationToken,
     ) -> Option<String> {
         let session = session.clone_session();
-        if crate::compact::should_use_remote_compact_task(&ctx.provider) {
-            let _ = session.services.otel_manager.counter(
-                "codex.task.compact",
-                1,
-                &[("type", "remote")],
-            );
-            let _ = crate::compact_remote::run_remote_compact_task(session, ctx).await;
+        let _ = if crate::compact::should_use_remote_compact_task(ctx.provider.info()) {
+            if ctx
+                .features
+                .enabled(codex_features::Feature::RemoteCompactionV2)
+            {
+                emit_compact_metric(
+                    &session.services.session_telemetry,
+                    "remote_v2",
+                    /*manual*/ true,
+                );
+                crate::compact_remote_v2::run_remote_compact_task(session.clone(), ctx).await
+            } else {
+                emit_compact_metric(
+                    &session.services.session_telemetry,
+                    "remote",
+                    /*manual*/ true,
+                );
+                crate::compact_remote::run_remote_compact_task(session.clone(), ctx).await
+            }
         } else {
-            let _ = session.services.otel_manager.counter(
-                "codex.task.compact",
-                1,
-                &[("type", "local")],
+            emit_compact_metric(
+                &session.services.session_telemetry,
+                "local",
+                /*manual*/ true,
             );
-            let _ = crate::compact::run_compact_task(session, ctx, input).await;
-        }
-
+            let input = vec![UserInput::Text {
+                text: ctx.compact_prompt().to_string(),
+                // Compaction prompt is synthesized; no UI element ranges to preserve.
+                text_elements: Vec::new(),
+            }];
+            crate::compact::run_compact_task(session.clone(), ctx, input).await
+        };
         None
     }
 }

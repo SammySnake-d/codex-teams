@@ -2,12 +2,41 @@ use std::path::Path;
 
 use anyhow::Result;
 use predicates::str::contains;
+use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     cmd.env("CODEX_HOME", codex_home);
     Ok(cmd)
+}
+
+#[test]
+fn strict_config_rejects_unknown_config_override() -> Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args(["--strict-config", "-c", "foo=bar", "mcp-server"])
+        .assert()
+        .failure()
+        .stderr(contains("unknown configuration field"));
+
+    Ok(())
+}
+
+#[test]
+fn strict_config_is_not_supported_for_cloud_command() -> Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args(["--strict-config", "-c", "foo=bar", "cloud", "list"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "`--strict-config` is not supported for `codex cloud`",
+        ));
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -49,10 +78,42 @@ async fn features_enable_under_development_feature_prints_warning() -> Result<()
     let codex_home = TempDir::new()?;
 
     let mut cmd = codex_command(codex_home.path())?;
-    cmd.args(["features", "enable", "sqlite"])
+    cmd.args(["features", "enable", "runtime_metrics"])
         .assert()
         .success()
-        .stderr(contains("Under-development features enabled: sqlite."));
+        .stderr(contains(
+            "Under-development features enabled: runtime_metrics.",
+        ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn features_list_is_sorted_alphabetically_by_feature_name() -> Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let mut cmd = codex_command(codex_home.path())?;
+    let output = cmd
+        .args(["features", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output)?;
+
+    let actual_names = stdout
+        .lines()
+        .map(|line| {
+            line.split_once("  ")
+                .map(|(name, _)| name.trim_end().to_string())
+                .expect("feature list output should contain aligned columns")
+        })
+        .collect::<Vec<_>>();
+    let mut expected_names = actual_names.clone();
+    expected_names.sort();
+
+    assert_eq!(actual_names, expected_names);
 
     Ok(())
 }

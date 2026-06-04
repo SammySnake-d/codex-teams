@@ -1,5 +1,5 @@
 use anyhow::Result;
-use app_test_support::McpProcess;
+use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
@@ -12,9 +12,11 @@ use codex_app_server_protocol::ThreadRollbackParams;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
@@ -33,7 +35,7 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     // Start a thread.
@@ -55,6 +57,7 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
     let turn1_id = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread.id.clone(),
+            client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: first_text.to_string(),
                 text_elements: Vec::new(),
@@ -76,6 +79,7 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
     let turn2_id = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread.id.clone(),
+            client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: "Second".to_string(),
                 text_elements: Vec::new(),
@@ -106,11 +110,30 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
         mcp.read_stream_until_response_message(RequestId::Integer(rollback_id)),
     )
     .await??;
+    let rollback_result = rollback_resp.result.clone();
     let ThreadRollbackResponse {
         thread: rolled_back_thread,
     } = to_response::<ThreadRollbackResponse>(rollback_resp)?;
 
+    // Wire contract: thread title field is `name`, serialized as null when unset.
+    let thread_json = rollback_result
+        .get("thread")
+        .and_then(Value::as_object)
+        .expect("thread/rollback result.thread must be an object");
+    assert_eq!(rolled_back_thread.name, None);
+    assert_eq!(rolled_back_thread.session_id, thread.session_id);
+    assert_eq!(
+        thread_json.get("name"),
+        Some(&Value::Null),
+        "thread/rollback must serialize `name: null` when unset"
+    );
+    assert_eq!(
+        thread_json.get("sessionId").and_then(Value::as_str),
+        Some(thread.session_id.as_str())
+    );
+
     assert_eq!(rolled_back_thread.turns.len(), 1);
+    assert_eq!(rolled_back_thread.status, ThreadStatus::Idle);
     assert_eq!(rolled_back_thread.turns[0].items.len(), 2);
     match &rolled_back_thread.turns[0].items[0] {
         ThreadItem::UserMessage { content, .. } => {
@@ -140,6 +163,7 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
     let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
 
     assert_eq!(thread.turns.len(), 1);
+    assert_eq!(thread.status, ThreadStatus::Idle);
     assert_eq!(thread.turns[0].items.len(), 2);
     match &thread.turns[0].items[0] {
         ThreadItem::UserMessage { content, .. } => {

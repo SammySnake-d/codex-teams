@@ -1,27 +1,30 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use codex_prompts::render_review_exit_interrupted;
+use codex_prompts::render_review_exit_success;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
-use codex_protocol::protocol::AgentMessageDeltaEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ReviewOutputEvent;
+use codex_protocol::protocol::SubAgentSource;
 use tokio_util::sync::CancellationToken;
 
-use crate::codex::Session;
-use crate::codex::TurnContext;
 use crate::codex_delegate::run_codex_thread_one_shot;
 use crate::config::Constrained;
 use crate::review_format::format_review_findings_block;
 use crate::review_format::render_review_output_text;
+use crate::session::TurnInput;
+use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
+use codex_features::Feature;
 use codex_protocol::user_input::UserInput;
 
 use super::SessionTask;
@@ -36,30 +39,41 @@ impl ReviewTask {
     }
 }
 
-#[async_trait]
 impl SessionTask for ReviewTask {
     fn kind(&self) -> TaskKind {
         TaskKind::Review
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.review"
     }
 
     async fn run(
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
         ctx: Arc<TurnContext>,
-        input: Vec<UserInput>,
+        input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> Option<String> {
-        let _ = session
-            .session
-            .services
-            .otel_manager
-            .counter("codex.task.review", 1, &[]);
+        session.session.services.session_telemetry.counter(
+            "codex.task.review",
+            /*inc*/ 1,
+            &[],
+        );
+
+        let mut user_input = Vec::new();
+        for item in input {
+            match item {
+                TurnInput::UserInput { mut content, .. } => user_input.append(&mut content),
+                TurnInput::ResponseItem(_) => {}
+            }
+        }
 
         // Start sub-codex conversation and get the receiver for events.
         let output = match start_review_conversation(
             session.clone(),
             ctx.clone(),
-            input,
+            user_input,
             cancellation_token.clone(),
         )
         .await
@@ -74,7 +88,7 @@ impl SessionTask for ReviewTask {
     }
 
     async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
-        exit_review_mode(session.clone_session(), None, ctx).await;
+        exit_review_mode(session.clone_session(), /*review_output*/ None, ctx).await;
     }
 }
 
@@ -87,13 +101,16 @@ async fn start_review_conversation(
     let config = ctx.config.clone();
     let mut sub_agent_config = config.as_ref().clone();
     // Carry over review-only feature restrictions so the delegate cannot
-    // re-enable blocked tools (web search, view image).
+    // re-enable blocked tools (web search, collab tools, view image).
     if let Err(err) = sub_agent_config
         .web_search_mode
         .set(WebSearchMode::Disabled)
     {
         panic!("by construction Constrained<WebSearchMode> must always support Disabled: {err}");
     }
+    let _ = sub_agent_config.features.disable(Feature::SpawnCsv);
+    let _ = sub_agent_config.features.disable(Feature::Collab);
+    let _ = sub_agent_config.features.disable(Feature::MultiAgentV2);
 
     // Set explicit review rubric for the sub-agent
     sub_agent_config.base_instructions = Some(crate::REVIEW_PROMPT.to_string());
@@ -112,7 +129,9 @@ async fn start_review_conversation(
         session.clone_session(),
         ctx.clone(),
         cancellation_token,
-        None,
+        SubAgentSource::Review,
+        /*final_output_json_schema*/ None,
+        /*initial_history*/ None,
     )
     .await)
         .ok()
@@ -143,7 +162,6 @@ async fn process_review_events(
                 item: TurnItem::AgentMessage(_),
                 ..
             })
-            | EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { .. })
             | EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent { .. }) => {}
             EventMsg::TurnComplete(task_complete) => {
                 // Parse review output from the last agent message (if present).
@@ -207,15 +225,14 @@ pub(crate) async fn exit_review_mode(
             findings_str.push_str(text);
         }
         if !out.findings.is_empty() {
-            let block = format_review_findings_block(&out.findings, None);
+            let block = format_review_findings_block(&out.findings, /*selection*/ None);
             findings_str.push_str(&format!("\n{block}"));
         }
-        let rendered =
-            crate::client_common::REVIEW_EXIT_SUCCESS_TMPL.replace("{results}", &findings_str);
+        let rendered = render_review_exit_success(&findings_str);
         let assistant_message = render_review_output_text(&out);
         (rendered, assistant_message)
     } else {
-        let rendered = crate::client_common::REVIEW_EXIT_INTERRUPTED_TMPL.to_string();
+        let rendered = render_review_exit_interrupted();
         let assistant_message =
             "Review was interrupted. Please re-run /review and wait for it to complete."
                 .to_string();
@@ -229,7 +246,6 @@ pub(crate) async fn exit_review_mode(
                 id: Some(REVIEW_USER_MESSAGE_ID.to_string()),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: user_message }],
-                end_turn: None,
                 phase: None,
             }],
         )
@@ -250,7 +266,6 @@ pub(crate) async fn exit_review_mode(
                 content: vec![ContentItem::OutputText {
                     text: assistant_message,
                 }],
-                end_turn: None,
                 phase: None,
             },
         )

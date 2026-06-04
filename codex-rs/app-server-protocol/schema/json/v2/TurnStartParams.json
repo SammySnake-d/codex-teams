@@ -5,14 +5,86 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
-    "AskForApproval": {
+    "AdditionalContextEntry": {
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/AdditionalContextKind"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "type": "object"
+    },
+    "AdditionalContextKind": {
       "enum": [
         "untrusted",
-        "on-failure",
-        "on-request",
-        "never"
+        "application"
       ],
       "type": "string"
+    },
+    "ApprovalsReviewer": {
+      "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
+      "enum": [
+        "user",
+        "auto_review",
+        "guardian_subagent"
+      ],
+      "type": "string"
+    },
+    "AskForApproval": {
+      "oneOf": [
+        {
+          "enum": [
+            "untrusted",
+            "on-failure",
+            "on-request",
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "granular": {
+              "properties": {
+                "mcp_elicitations": {
+                  "type": "boolean"
+                },
+                "request_permissions": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "rules": {
+                  "type": "boolean"
+                },
+                "sandbox_approval": {
+                  "type": "boolean"
+                },
+                "skill_approval": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "mcp_elicitations",
+                "rules",
+                "sandbox_approval"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "granular"
+          ],
+          "title": "GranularAskForApproval",
+          "type": "object"
+        }
+      ]
     },
     "ByteRange": {
       "properties": {
@@ -49,6 +121,15 @@
       ],
       "type": "object"
     },
+    "ImageDetail": {
+      "enum": [
+        "auto",
+        "low",
+        "high",
+        "original"
+      ],
+      "type": "string"
+    },
     "ModeKind": {
       "description": "Initial collaboration mode to use when the TUI starts.",
       "enum": [
@@ -71,53 +152,6 @@
         "pragmatic"
       ],
       "type": "string"
-    },
-    "ReadOnlyAccess": {
-      "oneOf": [
-        {
-          "properties": {
-            "includePlatformDefaults": {
-              "default": true,
-              "type": "boolean"
-            },
-            "readableRoots": {
-              "default": [],
-              "items": {
-                "$ref": "#/definitions/AbsolutePathBuf"
-              },
-              "type": "array"
-            },
-            "type": {
-              "enum": [
-                "restricted"
-              ],
-              "title": "RestrictedReadOnlyAccessType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "RestrictedReadOnlyAccess",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "fullAccess"
-              ],
-              "title": "FullAccessReadOnlyAccessType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "FullAccessReadOnlyAccess",
-          "type": "object"
-        }
-      ]
     },
     "ReasoningEffort": {
       "description": "See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning",
@@ -171,15 +205,9 @@
         },
         {
           "properties": {
-            "access": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ReadOnlyAccess"
-                }
-              ],
-              "default": {
-                "type": "fullAccess"
-              }
+            "networkAccess": {
+              "default": false,
+              "type": "boolean"
             },
             "type": {
               "enum": [
@@ -232,16 +260,6 @@
             "networkAccess": {
               "default": false,
               "type": "boolean"
-            },
-            "readOnlyAccess": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ReadOnlyAccess"
-                }
-              ],
-              "default": {
-                "type": "fullAccess"
-              }
             },
             "type": {
               "enum": [
@@ -317,6 +335,21 @@
       ],
       "type": "object"
     },
+    "TurnEnvironmentParams": {
+      "properties": {
+        "cwd": {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        },
+        "environmentId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cwd",
+        "environmentId"
+      ],
+      "type": "object"
+    },
     "UserInput": {
       "oneOf": [
         {
@@ -349,6 +382,17 @@
         },
         {
           "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "type": {
               "enum": [
                 "image"
@@ -369,6 +413,17 @@
         },
         {
           "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "path": {
               "type": "string"
             },
@@ -450,6 +505,23 @@
       ],
       "description": "Override the approval policy for this turn and subsequent turns."
     },
+    "approvalsReviewer": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ApprovalsReviewer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Override where approval requests are routed for review on this turn and subsequent turns."
+    },
+    "clientUserMessageId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "cwd": {
       "description": "Override the working directory for this turn and subsequent turns.",
       "type": [
@@ -505,6 +577,13 @@
         }
       ],
       "description": "Override the sandbox policy for this turn and subsequent turns."
+    },
+    "serviceTier": {
+      "description": "Override the service tier for this turn and subsequent turns.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "summary": {
       "anyOf": [
