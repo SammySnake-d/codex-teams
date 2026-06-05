@@ -506,6 +506,7 @@ impl ChatComposer {
                 status_line_enabled: false,
                 side_conversation_context_label: None,
                 active_agent_label: None,
+                active_team_pills: None,
                 external_editor_key: Some(key_hint::ctrl(KeyCode::Char('g'))),
                 show_transcript_key: Some(key_hint::ctrl(KeyCode::Char('t'))),
                 insert_newline_key: footer_insert_newline_key(
@@ -3428,6 +3429,7 @@ impl ChatComposer {
                 reasoning_up: self.footer.reasoning_up_key,
             },
             active_agent_label: self.footer.active_agent_label.clone(),
+            active_team_pills: self.footer.active_team_pills.clone(),
         }
     }
 
@@ -3933,6 +3935,37 @@ impl ChatComposer {
         self.footer.active_agent_label = active_agent_label;
         true
     }
+
+    /// Replaces the colored Teams roster pills shown next to the active-agent
+    /// label (Phase 6 §B.6). Returns `false` when unchanged so callers can skip
+    /// redraw work. `Span` is not `PartialEq`, so equality is compared on the
+    /// rendered text + colors via a cheap structural fingerprint.
+    pub(crate) fn set_active_team_pills(
+        &mut self,
+        pills: Option<Vec<ratatui::text::Span<'static>>>,
+    ) -> bool {
+        if team_pills_fingerprint(self.footer.active_team_pills.as_deref())
+            == team_pills_fingerprint(pills.as_deref())
+        {
+            return false;
+        }
+        self.footer.active_team_pills = pills;
+        true
+    }
+}
+
+/// Cheap structural fingerprint of the Teams pills used for change detection
+/// (`ratatui::text::Span` is not `PartialEq`). Captures each span's text and
+/// foreground color so a recolor or rename triggers a redraw.
+fn team_pills_fingerprint(
+    pills: Option<&[ratatui::text::Span<'static>]>,
+) -> Option<Vec<(String, Option<ratatui::style::Color>)>> {
+    pills.map(|spans| {
+        spans
+            .iter()
+            .map(|span| (span.content.to_string(), span.style.fg))
+            .collect()
+    })
 }
 
 fn footer_insert_newline_key(

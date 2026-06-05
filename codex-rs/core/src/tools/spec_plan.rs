@@ -22,7 +22,6 @@ use crate::tools::handlers::RequestPluginInstallHandler;
 use crate::tools::handlers::RequestUserInputHandler;
 use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::handlers::ShellCommandHandlerOptions;
-use crate::tools::handlers::TeamHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandler;
 use crate::tools::handlers::UpdateGoalHandler;
@@ -47,6 +46,7 @@ use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHand
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+use crate::tools::handlers::team::TeamHandler;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_image_generation_tool;
@@ -299,13 +299,6 @@ fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
     }
 }
 
-fn team_tools_enabled(turn_context: &TurnContext) -> bool {
-    !matches!(
-        turn_context.multi_agent_version,
-        MultiAgentVersion::Disabled
-    )
-}
-
 fn goal_tools_enabled(turn_context: &TurnContext) -> bool {
     turn_context.goal_tools_enabled()
         && !matches!(
@@ -325,6 +318,16 @@ fn agent_jobs_worker_tools_enabled(turn_context: &TurnContext) -> bool {
             SessionSource::SubAgent(SubAgentSource::Other(label))
                 if label.starts_with("agent_job:")
         )
+}
+
+/// Codex Teams tools are gated behind the (default-off) `teams` feature AND are
+/// exposed only on a lead/top-level session. Any spawned sub-agent (including a
+/// native `multi_agent_v2` thread spawn) carries a `SessionSource::SubAgent`, so
+/// excluding that variant guarantees team tools never enter a sub-agent's tool
+/// set.
+fn team_tools_enabled(turn_context: &TurnContext) -> bool {
+    turn_context.features.get().enabled(Feature::Teams)
+        && !matches!(turn_context.session_source, SessionSource::SubAgent(_))
 }
 
 fn image_generation_tool_enabled(turn_context: &TurnContext) -> bool {
@@ -537,6 +540,7 @@ fn add_tool_sources(context: &CoreToolPlanContext<'_>, planned_tools: &mut Plann
     add_mcp_resource_tools(context, planned_tools);
     add_core_utility_tools(context, planned_tools);
     add_collaboration_tools(context, planned_tools);
+    add_team_tools(context, planned_tools);
     add_mcp_runtime_tools(context, planned_tools);
     add_dynamic_tools(context, planned_tools);
     add_extension_tools(context, planned_tools);
@@ -762,17 +766,25 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
         }
     }
 
-    if team_tools_enabled(turn_context) {
-        for handler in TeamHandler::all() {
-            planned_tools.add(handler);
-        }
-    }
-
     if agent_jobs_tools_enabled(turn_context) {
         planned_tools.add(SpawnAgentsOnCsvHandler);
         if agent_jobs_worker_tools_enabled(turn_context) {
             planned_tools.add(ReportAgentJobResultHandler);
         }
+    }
+}
+
+/// Register the Codex Teams tools (lead/top-level session only, gated behind the
+/// default-off `teams` feature). This is intentionally separate from
+/// `add_collaboration_tools` so the native `multi_agent_v2` sub-agent tool
+/// assembly is never altered: a sub-agent fails [`team_tools_enabled`] and gets
+/// the exact upstream tool set.
+fn add_team_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
+    if !team_tools_enabled(context.turn_context) {
+        return;
+    }
+    for handler in TeamHandler::all() {
+        planned_tools.add(handler);
     }
 }
 

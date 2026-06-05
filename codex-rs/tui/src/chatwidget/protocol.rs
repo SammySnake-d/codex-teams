@@ -215,6 +215,9 @@ impl ChatWidget {
                     self.on_realtime_conversation_sdp(notification.sdp);
                 }
             }
+            ServerNotification::RawResponseItemCompleted(notification) => {
+                self.handle_raw_response_item_for_team_ui(notification.item, from_replay);
+            }
             ServerNotification::ServerRequestResolved(_)
             | ServerNotification::AccountUpdated(_)
             | ServerNotification::AccountRateLimitsUpdated(_)
@@ -222,7 +225,6 @@ impl ChatWidget {
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadUnarchived(_)
-            | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
             | ServerNotification::ProcessOutputDelta(_)
             | ServerNotification::ProcessExited(_)

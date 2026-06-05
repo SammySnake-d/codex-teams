@@ -1706,6 +1706,20 @@ impl BottomPane {
         }
     }
 
+    /// Colored sibling of [`Self::set_active_agent_label`] (Phase 6 §B.6).
+    ///
+    /// Carries pre-styled teammate "pills" (mode symbol + `@name` in the
+    /// teammate color + status) so the footer can render Teams context in
+    /// color while the plain `active_agent_label` String path stays untouched.
+    pub(crate) fn set_active_team_pills(
+        &mut self,
+        pills: Option<Vec<ratatui::text::Span<'static>>>,
+    ) {
+        if self.composer.set_active_team_pills(pills) {
+            self.request_redraw();
+        }
+    }
+
     pub(crate) fn set_side_conversation_context_label(&mut self, label: Option<String>) {
         if self.composer.set_side_conversation_context_label(label) {
             self.request_redraw();

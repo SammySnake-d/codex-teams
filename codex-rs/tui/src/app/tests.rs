@@ -3811,6 +3811,8 @@ async fn make_test_app() -> App {
         pending_startup_thread_start: false,
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
+        lead_inbox_poller: None,
+        teams_dialog: None,
     }
 }
 
@@ -3874,6 +3876,8 @@ async fn make_test_app_with_channels() -> (
             pending_startup_thread_start: false,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            lead_inbox_poller: None,
+            teams_dialog: None,
         },
         rx,
         op_rx,

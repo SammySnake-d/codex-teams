@@ -411,6 +411,10 @@ mod status_controls;
 mod status_surfaces;
 mod streaming;
 use self::status_surfaces::CachedProjectRootName;
+mod team_colors;
+mod team_ui;
+pub(crate) mod teams_dialog;
+use self::team_ui::TeamUiState;
 mod tool_lifecycle;
 mod tool_requests;
 mod transcript;
@@ -566,6 +570,8 @@ pub(crate) struct ChatWidget {
     running_commands: HashMap<String, RunningCommand>,
     collab_agent_metadata: HashMap<ThreadId, AgentMetadata>,
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
+    active_agent_label: Option<String>,
+    team_ui: TeamUiState,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
     skills_initial_state: Option<HashMap<AbsolutePathBuf, bool>>,
@@ -1698,6 +1704,18 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn is_task_running_for_test(&self) -> bool {
         self.bottom_pane.is_task_running()
+    }
+
+    /// Inject a poller-sourced teammate reply as a user turn: submit immediately
+    /// when idle, otherwise queue it so it flushes on the next idle transition
+    /// (port of `useInboxPoller`'s submit-or-queue). Plain text only.
+    pub(crate) fn inject_teammate_reply(&mut self, text: String) {
+        let user_message = UserMessage::from(text);
+        if self.is_user_turn_pending_or_running() {
+            self.queue_user_message(user_message);
+        } else {
+            self.submit_user_message(user_message);
+        }
     }
 
     pub(crate) fn toggle_vim_mode_and_notify(&mut self) {

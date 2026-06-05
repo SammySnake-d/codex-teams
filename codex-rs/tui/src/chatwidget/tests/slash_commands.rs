@@ -1252,25 +1252,6 @@ async fn slash_copy_state_tracks_plan_item_completion() {
 }
 
 #[tokio::test]
-async fn slash_teams_shows_usage_hint() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.dispatch_command(SlashCommand::Teams);
-
-    let cells = drain_insert_history(&mut rx);
-    assert_eq!(cells.len(), 1, "expected one info message");
-    let rendered = lines_to_single_string(&cells[0]);
-    assert!(
-        rendered.contains("Ask Codex to help you create, inspect, message, or stop a team."),
-        "expected Teams usage message, got {rendered:?}"
-    );
-    assert!(
-        rendered.contains("Teams can coordinate multiple Codex agent sessions."),
-        "expected Teams hint, got {rendered:?}"
-    );
-}
-
-#[tokio::test]
 async fn slash_copy_reports_when_no_agent_response_exists() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

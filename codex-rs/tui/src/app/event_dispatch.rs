@@ -44,6 +44,75 @@ impl App {
             AppEvent::RawOutputModeChanged { enabled } => {
                 self.apply_raw_output_mode(tui, enabled, /*notify*/ false);
             }
+            AppEvent::OpenTeammatePane {
+                member_name,
+                agent_thread_id,
+            } => {
+                self.open_teammate_tmux_pane(&member_name, &agent_thread_id);
+            }
+            AppEvent::InjectTeammateReplies { text } => {
+                self.chat_widget.inject_teammate_reply(text);
+            }
+            AppEvent::TeamBecameActive { team } => {
+                if self.lead_inbox_poller.is_none() {
+                    self.lead_inbox_poller = Some(super::lead_inbox_poller::start_lead_inbox_poller(
+                        self.config.codex_home.to_path_buf(),
+                        team,
+                        crate::legacy_core::team_store::TEAM_LEAD_NAME.to_string(),
+                        self.app_event_tx.clone(),
+                    ));
+                }
+            }
+            AppEvent::TeamBecameInactive => {
+                if let Some(poller) = self.lead_inbox_poller.take() {
+                    poller.stop();
+                }
+            }
+            AppEvent::OpenTeamsDialog => {
+                // Construct the dialog for the active lead team and prime its
+                // roster from the on-disk team store before showing it. No
+                // default keybinding sends this event yet (Phase 6 §B.6
+                // follow-up); it is reachable via the AppEvent bus.
+                if let Some(team) = self.chat_widget.active_team_name() {
+                    let mut dialog = crate::chatwidget::teams_dialog::TeamsDialog::open(team);
+                    dialog.refresh(&self.config.codex_home);
+                    self.teams_dialog = Some(Box::new(dialog));
+                    tui.frame_requester().schedule_frame();
+                } else {
+                    self.chat_widget.add_info_message(
+                        "No active Codex team to show.".to_string(),
+                        Some(
+                            "Start a team first; then teammates appear in the Teams dialog."
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+            AppEvent::TeamsDialogAction(action) => {
+                use crate::chatwidget::teams_dialog::TeamsDialogAction;
+                match action {
+                    TeamsDialogAction::ViewTeammateOutput {
+                        pane_id,
+                        backend_type,
+                    } => {
+                        self.focus_teammate_pane(&pane_id, backend_type.as_deref());
+                    }
+                    TeamsDialogAction::ToggleVisibility {
+                        team,
+                        pane_id,
+                        hide,
+                    } => {
+                        self.set_teammate_pane_hidden(&team, &pane_id, hide);
+                        if let Some(dialog) = self.teams_dialog.as_mut() {
+                            dialog.refresh(&self.config.codex_home);
+                        }
+                    }
+                    TeamsDialogAction::Close => {
+                        self.teams_dialog = None;
+                        tui.frame_requester().schedule_frame();
+                    }
+                }
+            }
             AppEvent::ClearUiAndSubmitUserMessage { text } => {
                 self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
                 self.reset_app_ui_state_after_clear();

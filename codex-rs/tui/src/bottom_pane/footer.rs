@@ -84,6 +84,10 @@ pub(crate) struct FooterProps {
     /// When both this label and the configured status line are available, they are rendered on the
     /// same row separated by ` · `.
     pub(crate) active_agent_label: Option<String>,
+    /// Pre-styled Teams roster pills (Phase 6 §B.6). Rendered after
+    /// `active_agent_label`; each span carries its own teammate/mode color so
+    /// the footer shows teammates in color without dimming.
+    pub(crate) active_team_pills: Option<Vec<Span<'static>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -794,6 +798,22 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
             existing.spans.push(active_agent_label.clone().dim());
         } else {
             line = Some(Line::from(active_agent_label.clone()).dim());
+        }
+    }
+
+    // Colored Teams pills render in their own teammate/mode colors (not dimmed),
+    // appended after any plain label (Phase 6 §B.6).
+    if let Some(pills) = props.active_team_pills.as_ref()
+        && !pills.is_empty()
+    {
+        match line.as_mut() {
+            Some(existing) => {
+                existing.spans.push(" · ".dim());
+                existing.spans.extend(pills.iter().cloned());
+            }
+            None => {
+                line = Some(Line::from(pills.clone()));
+            }
         }
     }
 
@@ -1569,6 +1589,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1590,6 +1611,7 @@ mod tests {
                     ..FooterKeyHints::default_bindings()
                 },
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1608,6 +1630,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1626,6 +1649,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1644,6 +1668,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1662,6 +1687,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1680,6 +1706,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1698,6 +1725,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1716,6 +1744,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
             Some(72),
             /*used_tokens*/ None,
@@ -1736,6 +1765,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
             /*percent*/ None,
             Some(123_456),
@@ -1756,6 +1786,7 @@ mod tests {
                 status_line_enabled: false,
                 key_hints: FooterKeyHints::default_bindings(),
                 active_agent_label: None,
+                active_team_pills: None,
             },
         );
 
@@ -1772,6 +1803,7 @@ mod tests {
             status_line_enabled: false,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         snapshot_footer_with_mode_indicator(
@@ -1801,6 +1833,7 @@ mod tests {
             status_line_enabled: false,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         snapshot_footer_with_mode_indicator(
@@ -1823,6 +1856,7 @@ mod tests {
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         snapshot_footer("footer_status_line_overrides_shortcuts", props);
@@ -1840,6 +1874,7 @@ mod tests {
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         snapshot_footer("footer_status_line_yields_to_queue_hint", props);
@@ -1857,6 +1892,7 @@ mod tests {
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         snapshot_footer("footer_status_line_overrides_draft_idle", props);
@@ -1874,6 +1910,7 @@ mod tests {
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         snapshot_footer_with_mode_indicator_and_context(
@@ -1905,6 +1942,7 @@ mod tests {
             status_line_enabled: false,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         snapshot_footer_with_mode_indicator_and_context(
@@ -1928,6 +1966,7 @@ mod tests {
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         // has status line and no collaboration mode
@@ -1954,6 +1993,7 @@ mod tests {
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         snapshot_footer_with_mode_indicator_and_context(
@@ -1977,6 +2017,7 @@ mod tests {
             status_line_enabled: false,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: Some("Robie [explorer]".to_string()),
+            active_team_pills: None,
         };
 
         snapshot_footer("footer_active_agent_label", props);
@@ -1994,6 +2035,7 @@ mod tests {
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: Some("Robie [explorer]".to_string()),
+            active_team_pills: None,
         };
 
         snapshot_footer("footer_status_line_with_active_agent_label", props);
@@ -2017,6 +2059,7 @@ mod tests {
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
+            active_team_pills: None,
         };
 
         let screen = render_footer_with_mode_indicator_and_context(

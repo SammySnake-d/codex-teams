@@ -197,6 +197,13 @@ pub(crate) fn create_team_send_tool() -> ToolSpec {
                 )),
             ),
             (
+                "member_name".to_string(),
+                JsonSchema::string(Some(
+                    "Display name of a split-pane teammate to message via its mailbox; use instead of member_id for teammates spawned into a pane."
+                        .to_string(),
+                )),
+            ),
+            (
                 "sender_member_id".to_string(),
                 JsonSchema::string(Some(
                     "Optional member id to record as sender. Omit for the team lead.".to_string(),

@@ -275,12 +275,6 @@ impl ChatWidget {
             SlashCommand::Agent | SlashCommand::MultiAgents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
-            SlashCommand::Teams => {
-                self.add_info_message(
-                    "Ask Codex to help you create, inspect, message, or stop a team.".to_string(),
-                    Some("Teams can coordinate multiple Codex agent sessions.".to_string()),
-                );
-            }
             SlashCommand::Permissions => {
                 self.open_permissions_popup();
             }
@@ -981,7 +975,6 @@ impl ChatWidget {
             | SlashCommand::Vim
             | SlashCommand::Diff
             | SlashCommand::Rename
-            | SlashCommand::Teams
             | SlashCommand::TestApproval => QueueDrain::Continue,
             SlashCommand::Feedback
             | SlashCommand::New

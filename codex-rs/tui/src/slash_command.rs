@@ -38,7 +38,6 @@ pub enum SlashCommand {
     Plan,
     Goal,
     Agent,
-    Teams,
     Side,
     Btw,
     Copy,
@@ -118,7 +117,6 @@ impl SlashCommand {
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
-            SlashCommand::Teams => "show how to manage Codex Teams",
             SlashCommand::Side | SlashCommand::Btw => {
                 "start a side conversation in an ephemeral fork"
             }
@@ -227,8 +225,7 @@ impl SlashCommand {
             | SlashCommand::Quit
             | SlashCommand::Exit
             | SlashCommand::Side
-            | SlashCommand::Btw
-            | SlashCommand::Teams => true,
+            | SlashCommand::Btw => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
             SlashCommand::Realtime => true,

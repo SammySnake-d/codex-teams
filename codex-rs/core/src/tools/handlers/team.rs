@@ -13,6 +13,9 @@ use crate::team::TeamMessageDeliveryMode;
 use crate::team::TeamMessageTargetFilter;
 use crate::team::TeamTaskStatus;
 use crate::team::UpdateTeamTaskRequest;
+use crate::team_backends::spawn;
+use crate::team_backends::tmux::TmuxBackend;
+use crate::team_store;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -183,6 +186,7 @@ struct TeamSendArgs {
     sender_member_id: Option<String>,
     target: Option<String>,
     member_id: Option<String>,
+    member_name: Option<String>,
     delivery_mode: Option<String>,
     message: Option<String>,
     items: Option<Vec<UserInput>>,
@@ -318,7 +322,7 @@ async fn handle_team_tool(
         TeamTool::ListTeams => list_teams(session, arguments).await,
         TeamTool::TeamStatus => team_status(session, arguments).await,
         TeamTool::TeamSpawnMember => team_spawn_member(session, turn, arguments).await,
-        TeamTool::TeamSend => team_send(session, arguments).await,
+        TeamTool::TeamSend => team_send(session, turn, arguments).await,
         TeamTool::TeamMessageList => team_message_list(session, arguments).await,
         TeamTool::TeamTaskCreate => team_task_create(session, arguments).await,
         TeamTool::TeamTaskUpdate => team_task_update(session, arguments).await,
@@ -399,6 +403,30 @@ async fn team_spawn_member(
             "Agent depth limit reached. Solve the task yourself.".to_string(),
         ));
     }
+
+    // Preferred path: launch a real `codex teammate` PROCESS in a tmux pane
+    // (Claude `handleSpawnSplitPane`). Only possible inside a tmux session; when
+    // the lead is not in tmux, fall back to the in-process thread spawn so
+    // behavior degrades gracefully (Claude `handleSpawnInProcess`).
+    if TmuxBackend::new().is_inside_tmux() {
+        let member = spawn_member_in_pane(
+            session.as_ref(),
+            turn.as_ref(),
+            team_id,
+            name,
+            args.profile,
+            capabilities,
+            permissions,
+            &items,
+        )
+        .await?;
+        return json_output(
+            &TeamSpawnMemberResult { member },
+            Some(true),
+            "team_spawn_member",
+        );
+    }
+
     let config = build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     let session_source = thread_spawn_source(
         session.thread_id,
@@ -436,8 +464,171 @@ async fn team_spawn_member(
     )
 }
 
+/// Look up the live team's display name from the in-memory registry. The caller
+/// has already passed `require_team_lead`, so the team exists.
+async fn registry_team_name(
+    session: &Session,
+    team_id: ThreadId,
+) -> Result<String, FunctionCallError> {
+    session
+        .services
+        .agent_control
+        .team_registry()
+        .list_teams()
+        .await
+        .into_iter()
+        .find(|team| team.id == team_id)
+        .map(|team| team.name)
+        .ok_or_else(|| FunctionCallError::RespondToModel(format!("team {team_id} not found")))
+}
+
+/// Milliseconds since the Unix epoch (Claude `joinedAt: Date.now()`).
+fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Launch a teammate as a separate `codex teammate` process in a tmux pane and
+/// register it on disk (Claude `handleSpawnSplitPane`). Returns a `TeamMember`
+/// record for the tool result; the process coordinates via the on-disk team
+/// store + file mailbox rather than the in-memory registry.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_member_in_pane(
+    session: &Session,
+    turn: &TurnContext,
+    team_id: ThreadId,
+    name: String,
+    profile: Option<String>,
+    capabilities: Vec<String>,
+    permissions: Vec<String>,
+    items: &[UserInput],
+) -> Result<crate::team::TeamMember, FunctionCallError> {
+    // Resolve everything that needs `.await` BEFORE constructing the tmux
+    // backend: `TmuxBackend` holds a `RefCell`, so keeping it alive across an
+    // await point would make this tool future `!Send`.
+    let team_name = registry_team_name(session, team_id).await?;
+    let backend = TmuxBackend::new();
+    let teams_root = turn.config.codex_home.as_path();
+
+    // Existing members → unique name (Claude `generateUniqueTeammateName`) +
+    // round-robin color index.
+    let existing_names: Vec<String> = team_store::read_config(teams_root, &team_name)
+        .ok()
+        .flatten()
+        .map(|cfg| cfg.members.into_iter().map(|member| member.name).collect())
+        .unwrap_or_default();
+    let unique = spawn::unique_teammate_name(&name, &existing_names);
+    let sanitized = spawn::sanitize_agent_name(&unique);
+    let color = spawn::teammate_color(existing_names.len());
+
+    let agent_id = team_store::agent_id(&sanitized, &team_name);
+    let prompt_text = input_preview(items);
+    let parent_session_id = session.thread_id.to_string();
+    let model = turn.config.model.clone();
+    let cwd = turn.config.cwd.as_path();
+    let binary = spawn::teammate_binary().map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to resolve teammate binary: {err}"))
+    })?;
+
+    // Open + style the pane (create_teammate_pane sets the title + border color
+    // internally, so they are not re-set here).
+    let pane = backend.create_teammate_pane(&sanitized, color).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to create teammate pane: {err}"))
+    })?;
+
+    // Identity flags only — NO `--prompt`. The first turn is delivered via the
+    // mailbox below (mirroring Claude), so it is not run twice.
+    let mut flags = vec![
+        "teammate".to_string(),
+        "--agent-id".to_string(),
+        agent_id.clone(),
+        "--agent-name".to_string(),
+        sanitized.clone(),
+        "--team-name".to_string(),
+        team_name.clone(),
+        "--agent-color".to_string(),
+        color.as_name().to_string(),
+        "--parent-session-id".to_string(),
+        parent_session_id,
+    ];
+    if let Some(profile) = profile.as_deref() {
+        flags.push("--agent-type".to_string());
+        flags.push(profile.to_string());
+    }
+
+    let env = spawn::build_inherited_env_vars(teams_root);
+    backend
+        .launch_teammate(
+            &pane.pane_id,
+            pane.used_external_session,
+            cwd,
+            &env,
+            &binary,
+            &flags,
+        )
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("failed to launch teammate process: {err}"))
+        })?;
+
+    // Register the member in the on-disk team config.
+    let member_record = team_store::TeamFileMember {
+        agent_id,
+        name: sanitized.clone(),
+        agent_type: profile.clone(),
+        model,
+        prompt: Some(prompt_text.clone()),
+        color: Some(color.as_name().to_string()),
+        joined_at: unix_millis(),
+        tmux_pane_id: pane.pane_id.clone(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        backend_type: Some("tmux".to_string()),
+        is_active: Some(true),
+        ..Default::default()
+    };
+    let team_for_cfg = team_name.clone();
+    team_store::update_config(teams_root, &team_name, move |cfg| {
+        cfg.name = team_for_cfg.clone();
+        if cfg.lead_agent_id.is_empty() {
+            cfg.lead_agent_id = team_store::agent_id(team_store::TEAM_LEAD_NAME, &team_for_cfg);
+        }
+        cfg.members.push(member_record);
+    })
+    .map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to register teammate in config: {err}"))
+    })?;
+
+    // Deliver the initial prompt via the mailbox (Claude step 9): the teammate's
+    // inbox loop consumes it as its first turn.
+    team_store::write_to_mailbox(
+        teams_root,
+        &team_name,
+        &sanitized,
+        team_store::TeammateMessage {
+            from: team_store::TEAM_LEAD_NAME.to_string(),
+            text: prompt_text,
+            timestamp: team_store::now_timestamp(),
+            read: false,
+            color: None,
+            summary: None,
+        },
+    )
+    .map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to deliver teammate prompt: {err}"))
+    })?;
+
+    Ok(crate::team::TeamMember::process_member(
+        sanitized,
+        profile,
+        capabilities,
+        permissions,
+    ))
+}
+
 async fn team_send(
     session: Arc<Session>,
+    turn: Arc<TurnContext>,
     arguments: String,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: TeamSendArgs = parse_arguments(&arguments)?;
@@ -454,6 +645,24 @@ async fn team_send(
             )));
         }
     };
+
+    // Split-pane PROCESS teammates (P3b) live only in the on-disk team store, not
+    // in the in-memory registry, so they are addressed by NAME and delivered via
+    // the file mailbox their process polls (lead -> process member).
+    if matches!(args.target.as_deref(), Some("member") | None) {
+        if let Some(member_name) = args.member_name.clone() {
+            return team_send_to_pane_member(
+                session.as_ref(),
+                turn.as_ref(),
+                team_id,
+                &member_name,
+                args.message,
+                args.items,
+            )
+            .await;
+        }
+    }
+
     let target = match args.target.as_deref() {
         Some("lead") => {
             if args.member_id.is_some() {
@@ -499,6 +708,68 @@ async fn team_send(
     )
     .await?;
     json_output(&TeamSendResult { message }, Some(true), "team_send")
+}
+
+#[derive(Serialize)]
+struct MailboxSendResult {
+    delivered: bool,
+    target: String,
+    via: &'static str,
+}
+
+/// Deliver a lead-originated message to a split-pane PROCESS teammate via its
+/// on-disk inbox (the teammate's run-loop polls it). Process members are not in
+/// the in-memory registry, so they are addressed by name, not ThreadId.
+async fn team_send_to_pane_member(
+    session: &Session,
+    turn: &TurnContext,
+    team_id: ThreadId,
+    member_name: &str,
+    message: Option<String>,
+    items: Option<Vec<UserInput>>,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    let team_name = registry_team_name(session, team_id).await?;
+    let teams_root = turn.config.codex_home.as_path();
+    let sanitized = crate::team_backends::spawn::sanitize_agent_name(member_name);
+
+    let known = team_store::read_config(teams_root, &team_name)
+        .ok()
+        .flatten()
+        .is_some_and(|cfg| cfg.members.iter().any(|member| member.name == sanitized));
+    if !known {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "no teammate named '{member_name}' in team '{team_name}'"
+        )));
+    }
+
+    let items = parse_team_input(message, items)?;
+    let content = input_preview(&items);
+    team_store::write_to_mailbox(
+        teams_root,
+        &team_name,
+        &sanitized,
+        team_store::TeammateMessage {
+            from: team_store::TEAM_LEAD_NAME.to_string(),
+            text: content,
+            timestamp: team_store::now_timestamp(),
+            read: false,
+            color: None,
+            summary: None,
+        },
+    )
+    .map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to deliver to teammate mailbox: {err}"))
+    })?;
+
+    json_output(
+        &MailboxSendResult {
+            delivered: true,
+            target: sanitized,
+            via: "mailbox",
+        },
+        Some(true),
+        "team_send",
+    )
 }
 
 async fn team_message_list(
@@ -750,6 +1021,11 @@ fn parse_team_input(
     message: Option<String>,
     items: Option<Vec<UserInput>>,
 ) -> Result<Vec<UserInput>, FunctionCallError> {
+    let items = if message.is_some() && matches!(items.as_ref(), Some(items) if items.is_empty()) {
+        None
+    } else {
+        items
+    };
     match (message, items) {
         (Some(_), Some(_)) => Err(FunctionCallError::RespondToModel(
             "Provide either message or items, but not both".to_string(),
@@ -1064,8 +1340,9 @@ mod tests {
     }
 
     #[test]
-    fn team_input_requires_exactly_one_input_source() {
+    fn team_input_requires_one_non_empty_input_source() {
         assert!(parse_team_input(Some("hi".to_string()), None).is_ok());
+        assert!(parse_team_input(Some("hi".to_string()), Some(Vec::new())).is_ok());
         assert!(
             parse_team_input(
                 None,
@@ -1077,7 +1354,17 @@ mod tests {
             .is_ok()
         );
         assert!(parse_team_input(None, None).is_err());
-        assert!(parse_team_input(Some("hi".to_string()), Some(Vec::new())).is_err());
+        assert!(parse_team_input(None, Some(Vec::new())).is_err());
+        assert!(
+            parse_team_input(
+                Some("hi".to_string()),
+                Some(vec![UserInput::Text {
+                    text: "hi".to_string(),
+                    text_elements: Vec::new(),
+                }]),
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

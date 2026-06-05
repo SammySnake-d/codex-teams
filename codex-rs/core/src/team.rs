@@ -80,6 +80,36 @@ pub(crate) struct TeamMember {
     pub(crate) last_activity_at: i64,
 }
 
+impl TeamMember {
+    /// Build a record for an out-of-process (pane) teammate that has no
+    /// in-process agent thread (Claude split-pane spawn). `agent_thread_id` is a
+    /// fresh placeholder shared with `id`, and `agent_status` starts at its
+    /// default (`PendingInit`) until the teammate process self-reports
+    /// (Phase 4). Such members are tracked on disk via `team_store`, not in this
+    /// in-memory registry.
+    pub(crate) fn process_member(
+        name: String,
+        profile: Option<String>,
+        capabilities: Vec<String>,
+        permissions: Vec<String>,
+    ) -> Self {
+        let id = ThreadId::new();
+        let at = unix_timestamp();
+        Self {
+            id,
+            name,
+            agent_thread_id: id,
+            profile,
+            capabilities,
+            permissions,
+            status: TeamMemberStatus::Active,
+            agent_status: AgentStatus::default(),
+            created_at: at,
+            last_activity_at: at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub(crate) struct TeamMessage {
     pub(crate) id: ThreadId,

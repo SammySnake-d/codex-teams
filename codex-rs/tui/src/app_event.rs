@@ -141,6 +141,36 @@ pub(crate) enum AppEvent {
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
 
+    /// Open a detached external pane (e.g. a tmux split) that tails a freshly
+    /// spawned teammate's rollout transcript, making the live teammate visible
+    /// beside the lead session. Best-effort and live-only: ignored when the TUI is
+    /// not running inside a supported multiplexer or when the rollout is not found.
+    OpenTeammatePane {
+        member_name: String,
+        agent_thread_id: String,
+    },
+
+    /// Lead inbox poll found teammate replies / idle notifications; inject them
+    /// as a new user turn on the active (lead) thread. `text` is the joined
+    /// `<teammate-message …>` payload.
+    InjectTeammateReplies { text: String },
+
+    /// A Codex team became active (created); start the lead inbox poller.
+    TeamBecameActive { team: String },
+
+    /// The active Codex team stopped; cancel the lead inbox poller.
+    TeamBecameInactive,
+
+    /// Open the Teams dialog overlay (Phase 6 §B.6). No default keybinding is
+    /// wired yet — `ctrl+t` is the transcript toggle, so binding a distinct key
+    /// (or a `/teams` slash command) is a follow-up. The dispatch + overlay are
+    /// fully wired, so a future keybind only needs to send this event.
+    #[allow(dead_code)]
+    OpenTeamsDialog,
+
+    /// Side-effects requested by the Teams dialog (focus / hide-show a pane).
+    TeamsDialogAction(crate::chatwidget::teams_dialog::TeamsDialogAction),
+
     /// Fork the current thread into a transient side conversation.
     StartSide {
         parent_thread_id: ThreadId,

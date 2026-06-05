@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use ratatui::text::Line;
+use ratatui::text::Span;
 
 use crate::bottom_pane::footer::CollaborationModeIndicator;
 use crate::bottom_pane::footer::FooterMode;
@@ -30,6 +31,9 @@ pub(super) struct FooterState {
     pub(super) status_line_enabled: bool,
     pub(super) side_conversation_context_label: Option<String>,
     pub(super) active_agent_label: Option<String>,
+    /// Pre-styled Teams roster pills shown next to `active_agent_label`
+    /// (Phase 6 §B.6). Each span carries its own teammate/mode color.
+    pub(super) active_team_pills: Option<Vec<Span<'static>>>,
     pub(super) external_editor_key: Option<KeyBinding>,
     pub(super) show_transcript_key: Option<KeyBinding>,
     pub(super) insert_newline_key: Option<KeyBinding>,

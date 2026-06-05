@@ -79,6 +79,13 @@ impl ChatWidget {
     /// `ChatWidget` stays a pass-through here so `App` remains the owner of "which thread is the
     /// user actually looking at?" and the footer stack remains a pure renderer of that decision.
     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
+        // Additive (Teams, gated): remember the native active-agent label so the
+        // team-footer combiner (`sync_footer_context_label`, only ever reached
+        // through the team_ui observer) can prepend it to the teammate roster.
+        // The upstream forward below is left untouched, so non-team sessions
+        // (where `sync_footer_context_label` is never called) keep the exact
+        // upstream footer behavior.
+        self.active_agent_label = active_agent_label.clone();
         self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 

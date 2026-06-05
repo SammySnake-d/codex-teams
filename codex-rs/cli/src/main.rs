@@ -54,6 +54,7 @@ mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
 mod state_db_recovery;
+mod teammate;
 #[cfg(not(windows))]
 mod wsl_paths;
 
@@ -196,6 +197,10 @@ enum Subcommand {
     /// Internal: relay stdio to a Unix domain socket.
     #[clap(hide = true, name = "stdio-to-uds")]
     StdioToUds(StdioToUdsCommand),
+
+    /// Internal: run this process as a team member driven by its on-disk inbox.
+    #[clap(hide = true)]
+    Teammate(crate::teammate::TeammateCommand),
 
     /// [EXPERIMENTAL] Run the standalone exec-server service.
     ExecServer(ExecServerCommand),
@@ -1483,6 +1488,14 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             let socket_path = cmd.socket_path;
             codex_stdio_to_uds::run(socket_path.as_path()).await?;
         }
+        Some(Subcommand::Teammate(teammate_cli)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "teammate",
+            )?;
+            crate::teammate::run_main(teammate_cli, arg0_paths.clone()).await?;
+        }
         Some(Subcommand::ExecServer(cmd)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2020,6 +2033,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Apply(_)) => Some("apply"),
         Some(Subcommand::ResponsesApiProxy(_)) => Some("responses-api-proxy"),
         Some(Subcommand::StdioToUds(_)) => Some("stdio-to-uds"),
+        Some(Subcommand::Teammate(_)) => Some("teammate"),
         Some(Subcommand::Features(_)) => Some("features"),
     }
 }

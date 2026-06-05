@@ -136,6 +136,11 @@ pub enum Feature {
     MultiAgentV2,
     /// Enable CSV-backed agent job tools.
     SpawnCsv,
+    /// Enable Codex Teams: the multi-process team coordination tools
+    /// (`create_team`, `team_spawn_member`, `team_send`, ...). Exposed only on a
+    /// lead/top-level session and never added to a `multi_agent_v2` subagent's
+    /// tool set.
+    Teams,
     /// Enable apps.
     Apps,
     /// Enable MCP apps.
@@ -960,6 +965,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::SpawnCsv,
         key: "enable_fanout",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::Teams,
+        key: "teams",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

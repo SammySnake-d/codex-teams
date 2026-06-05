@@ -97,7 +97,6 @@ pub(crate) use skills::manager;
 pub(crate) use skills::maybe_emit_implicit_skill_invocation;
 pub(crate) use skills::skills_load_input_from_config;
 mod stream_events_utils;
-mod team;
 pub mod test_support;
 mod unified_exec;
 pub mod windows_sandbox;
@@ -169,6 +168,13 @@ pub use rollout::rollout_date_parts;
 mod function_tool;
 mod state;
 mod tasks;
+// Codex Teams substrate (gated behind the `teams` feature; declared here so the
+// orphaned team modules compile as part of the crate). Wiring into a session's
+// tool set happens only for a lead/top-level session — see `tools::spec_plan`.
+mod team;
+mod team_backends;
+pub mod team_coord;
+pub mod team_store;
 mod user_shell_command;
 pub mod util;
 

@@ -204,6 +204,7 @@ mod config_persistence;
 mod event_dispatch;
 mod history_ui;
 mod input;
+mod lead_inbox_poller;
 mod loaded_threads;
 mod pending_interactive_replay;
 mod pets;
@@ -214,6 +215,7 @@ mod resize_reflow;
 mod session_lifecycle;
 mod side;
 mod startup_prompts;
+mod teammate_panes;
 mod thread_events;
 mod thread_goal_actions;
 mod thread_routing;
@@ -558,6 +560,12 @@ pub(crate) struct App {
     // Serialize hook enablement writes per hook so stale completions cannot
     // persist an older toggle after a newer one.
     pending_hook_enabled_writes: HashMap<String, Option<bool>>,
+    /// Lead-side inbox poller (Phase 4b); `Some` while a team is active.
+    lead_inbox_poller: Option<lead_inbox_poller::LeadInboxPoller>,
+    /// Active Teams dialog overlay (Phase 6 §B.6); `Some` while open. Receives
+    /// key events before the chat widget and renders on top of the composer.
+    /// Boxed so the (already large) `App` struct does not grow on the stack.
+    teams_dialog: Option<Box<crate::chatwidget::teams_dialog::TeamsDialog>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1033,6 +1041,8 @@ See the Codex keymap documentation for supported actions and examples."
             pending_startup_thread_start,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            lead_inbox_poller: None,
+            teams_dialog: None,
         };
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);
@@ -1241,6 +1251,22 @@ See the Codex keymap documentation for supported actions and examples."
 
         if self.overlay.is_some() {
             let _ = self.handle_backtrack_overlay_event(tui, event).await?;
+        } else if self.teams_dialog.is_some() {
+            // The Teams dialog overlay (Phase 6 §B.6) captures key input while it
+            // is open; everything else (Draw/Resize/Paste) falls through to the
+            // chat widget so the composer keeps rendering beneath it. Reached only
+            // when a team is active and the (currently unbound) OpenTeamsDialog
+            // event has opened the overlay, so non-team sessions never enter here.
+            match event {
+                TuiEvent::Key(key_event) => {
+                    self.handle_teams_dialog_key(tui, key_event);
+                }
+                TuiEvent::Paste(_) => {}
+                TuiEvent::Draw | TuiEvent::Resize => {
+                    self.chat_widget.pre_draw_tick();
+                    self.render_chat_widget_frame(tui, terminal_resize_reflow_enabled)?;
+                }
+            }
         } else {
             match event {
                 TuiEvent::Key(key_event) => {
@@ -1333,6 +1359,9 @@ See the Codex keymap documentation for supported actions and examples."
                     frame.set_cursor_style(self.chat_widget.cursor_style(area));
                     frame.set_cursor_position((x, y));
                 }
+                if let Some(dialog) = self.teams_dialog.as_ref() {
+                    dialog.render(area, frame.buffer);
+                }
             })?;
         } else {
             tui.draw(desired_height, |frame| {
@@ -1343,9 +1372,31 @@ See the Codex keymap documentation for supported actions and examples."
                     frame.set_cursor_style(self.chat_widget.cursor_style(area));
                     frame.set_cursor_position((x, y));
                 }
+                if let Some(dialog) = self.teams_dialog.as_ref() {
+                    dialog.render(area, frame.buffer);
+                }
             })?;
         }
         Ok(rendered_area)
+    }
+
+    /// Route a key press to the open Teams dialog (Phase 6 §B.6). The dialog
+    /// refreshes its roster from the team store on each key (Claude's
+    /// `useInterval`) and any side-effect it returns is dispatched through the
+    /// AppEvent bus so the tmux/exec work happens in the normal handler.
+    fn handle_teams_dialog_key(
+        &mut self,
+        tui: &mut tui::Tui,
+        key_event: crossterm::event::KeyEvent,
+    ) {
+        let Some(dialog) = self.teams_dialog.as_mut() else {
+            return;
+        };
+        dialog.refresh(&self.config.codex_home);
+        if let Some(action) = dialog.handle_key(key_event) {
+            self.app_event_tx.send(AppEvent::TeamsDialogAction(action));
+        }
+        tui.frame_requester().schedule_frame();
     }
 }
 
