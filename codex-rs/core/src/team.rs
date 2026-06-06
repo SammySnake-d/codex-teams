@@ -12,9 +12,36 @@ use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tokio::sync::RwLock;
+
+/// Identity of THIS process when it was launched as a spawned `codex teammate`
+/// (set once at teammate startup via [`set_teammate_identity`]). It is `None` in
+/// a normal lead / standalone session. Team tools running inside a teammate
+/// process use it to route messages across the process boundary through the
+/// on-disk file mailbox (Claude's model) instead of the in-memory registry,
+/// which is empty in a teammate process (it never ran `create_team`).
+#[derive(Debug, Clone)]
+pub struct TeammateIdentity {
+    pub(crate) team: String,
+    pub(crate) agent_name: String,
+}
+
+static TEAMMATE_IDENTITY: OnceLock<TeammateIdentity> = OnceLock::new();
+
+/// Record that this process is running as a teammate. Called once by the hidden
+/// `codex teammate` entrypoint before its inbox loop starts; later calls are
+/// ignored (the identity is fixed for the process lifetime).
+pub fn set_teammate_identity(team: String, agent_name: String) {
+    let _ = TEAMMATE_IDENTITY.set(TeammateIdentity { team, agent_name });
+}
+
+/// The teammate identity for this process, if it is a spawned teammate.
+pub(crate) fn teammate_identity() -> Option<&'static TeammateIdentity> {
+    TEAMMATE_IDENTITY.get()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,13 +114,20 @@ impl TeamMember {
     /// default (`PendingInit`) until the teammate process self-reports
     /// (Phase 4). Such members are tracked on disk via `team_store`, not in this
     /// in-memory registry.
-    pub(crate) fn process_member(
+    /// Build a record for an out-of-process (split-pane) teammate using a
+    /// caller-provided `id`, so the spawn handler can reference the same id in
+    /// the on-disk member record and in the `Codex Teams context:` envelope
+    /// before returning it to the model. Such members are tracked on disk via
+    /// `team_store`, not in this in-memory registry; `agent_thread_id` mirrors
+    /// `id` as a placeholder and `agent_status` starts at its default
+    /// (`PendingInit`) until the teammate process self-reports.
+    pub(crate) fn process_member_with_id(
+        id: ThreadId,
         name: String,
         profile: Option<String>,
         capabilities: Vec<String>,
         permissions: Vec<String>,
     ) -> Self {
-        let id = ThreadId::new();
         let at = unix_timestamp();
         Self {
             id,
@@ -1216,6 +1250,77 @@ fn validate_member_exists(team: &Team, member_id: Option<ThreadId>) -> CodexResu
         }
     }
     Ok(())
+}
+
+/// Build the `Codex Teams context:` spawn envelope for an out-of-process (pane)
+/// teammate's FIRST mailbox turn. Mirrors the in-process spawn envelope in
+/// [`TeamRegistry::spawn_member`] so a teammate sees the same context markers
+/// (`- team_id:` / `- member_id:` lines) regardless of spawn path; the on-disk
+/// delivery path (split-pane process) would otherwise strip them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn team_context_envelope(
+    team_id: ThreadId,
+    team_name: &str,
+    lead_thread_id: ThreadId,
+    member_id: ThreadId,
+    member_name: &str,
+    profile: Option<&str>,
+    capabilities: &[String],
+    permissions: &[String],
+) -> String {
+    let profile_label = profile.unwrap_or("none");
+    let capabilities_label = if capabilities.is_empty() {
+        "none".to_string()
+    } else {
+        capabilities.join(", ")
+    };
+    let permissions_label = if permissions.is_empty() {
+        "none".to_string()
+    } else {
+        permissions.join(", ")
+    };
+    format!(
+        "Codex Teams context:\n\
+         - team_id: {team_id}\n\
+         - team_name: {team_name}\n\
+         - lead_thread_id: {lead_thread_id}\n\
+         - member_id: {member_id}\n\
+         - member_name: {member_name}\n\
+         - profile: {profile_label}\n\
+         - capabilities: {capabilities_label}\n\
+         - permissions: {permissions_label}\n\
+         - live_session_only: true\n\
+         \n\
+         You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
+         Treat the spawn prompt/items after this context as your assigned task boundary.\n\
+         Use generic Teams tools when available: team_status, team_send, team_task_list, team_task_update, team_task_claim, and team_event_list.\n\
+         When sending as this teammate, set sender_member_id to your member_id."
+    )
+}
+
+/// Build the `Codex Teams message:` routing envelope for a lead -> pane-member
+/// mailbox delivery. Mirrors [`wrap_team_message_items`] so a teammate process
+/// sees the same message markers regardless of delivery path.
+pub(crate) fn team_message_envelope(
+    team_id: ThreadId,
+    message_id: ThreadId,
+    sender_label: &str,
+    target_member_label: &str,
+    delivery_mode_label: &str,
+    content: &str,
+) -> String {
+    format!(
+        "Codex Teams message:\n\
+         - team_id: {team_id}\n\
+         - message_id: {message_id}\n\
+         - sender: {sender_label}\n\
+         - target_member_id: {target_member_label}\n\
+         - delivery_mode: {delivery_mode_label}\n\
+         \n\
+         Treat the following item(s) as a routed Teams message, not inherited conversation history.\n\
+         To reply, use team_send with this team_id and set sender_member_id to your member_id.\n\
+         Message preview:\n{content}"
+    )
 }
 
 fn wrap_team_message_items(

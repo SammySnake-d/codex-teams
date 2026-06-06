@@ -51,6 +51,12 @@ pub struct TeamFile {
 pub struct TeamFileMember {
     pub agent_id: String,
     pub name: String,
+    /// Registry-style `ThreadId` (string) returned to the model when this member
+    /// was spawned. Split-pane PROCESS members live only on disk (never in the
+    /// in-memory registry), so the lead resolves a `team_send` `member_id` back
+    /// to a mailbox recipient through this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

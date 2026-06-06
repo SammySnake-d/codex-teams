@@ -85,11 +85,25 @@ pub struct TeammateCommand {
 }
 
 /// Build a headless embedded session for this teammate and run its inbox loop.
-pub async fn run_main(cmd: TeammateCommand, arg0_paths: Arg0DispatchPaths) -> Result<()> {
+pub async fn run_main(mut cmd: TeammateCommand, arg0_paths: Arg0DispatchPaths) -> Result<()> {
+    // A teammate is by definition a Codex Teams session; force-enable the
+    // (default-off) `teams` feature so its tool set includes the team tools
+    // (team_send, etc.). The lead's global `--enable teams` flag is parsed but
+    // NOT folded into this subcommand's own `-c` overrides, so set it directly.
+    cmd.config_overrides
+        .raw_overrides
+        .push("features.teams=true".to_string());
+
     let cli_kv_overrides = cmd
         .config_overrides
         .parse_overrides()
         .map_err(anyhow::Error::msg)?;
+
+    // Mark this process as a Codex Teams teammate so core team tools route
+    // cross-process via the on-disk file mailbox (a teammate's in-memory team
+    // registry is empty — it never ran `create_team`, so the registry-backed
+    // `team_send`/`team_message_list` path cannot resolve the team here).
+    codex_core::set_teammate_identity(cmd.team_name.clone(), cmd.agent_name.clone());
 
     // Headless harness overrides: never block on approvals; thread arg0 paths
     // through so the teammate can find its own binary / sandbox helper.

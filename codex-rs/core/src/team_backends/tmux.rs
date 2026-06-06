@@ -693,13 +693,14 @@ fn pick_split(teammate_panes: &[String]) -> (bool, String) {
 }
 
 /// Build the single shell line Claude's `spawnTeammateInPane` sends to the pane:
-/// `cd <q(cwd)> && env <K=q(V) …> <q(bin)> <flags joined by space>`.
+/// `cd <q(cwd)> && env <K=q(V) …> <q(bin)> <q(flag) …>`.
 ///
-/// `cwd`, `bin`, and each env VALUE are quoted with [`shlex::try_quote`]; the
-/// teammate flags are already tokenized (e.g. `--agent-id`, `name@team`, …) and
-/// joined with single spaces. A quoting failure (interior NUL) is surfaced as an
-/// `io::Error`.
-fn build_launch_line(
+/// `cwd`, `bin`, each env VALUE, AND each teammate flag token are quoted with
+/// [`shlex::try_quote`] — flag VALUES can contain spaces (e.g. a team name like
+/// `local tmux teams smoke`), so they must be quoted or the pane shell would
+/// split them into stray positional arguments. A quoting failure (interior NUL)
+/// is surfaced as an `io::Error`.
+pub(crate) fn build_launch_line(
     cwd: &Path,
     env: &[(String, String)],
     bin: &Path,
@@ -721,8 +722,11 @@ fn build_launch_line(
     line.push(' ');
     line.push_str(&bin_q);
     for flag in teammate_flags {
+        let flag_q = shlex::try_quote(flag).map_err(|e| {
+            io::Error::other(format!("failed to quote teammate flag {flag:?}: {e:?}"))
+        })?;
         line.push(' ');
-        line.push_str(flag);
+        line.push_str(&flag_q);
     }
     Ok(line)
 }

@@ -1418,6 +1418,12 @@ fn thread_start_params_from_config(
         ephemeral: Some(config.ephemeral),
         session_start_source,
         thread_source: Some(ThreadSource::User),
+        // Codex Teams footer pills + the lead inbox poller observe team tool
+        // call/output items via `rawResponseItem/completed`, which the app-server
+        // only forwards when the connection opted into raw events. Enable it ONLY
+        // when the (default-off) `teams` feature is on, so non-teams and sub-agent
+        // sessions keep the exact upstream notification stream.
+        experimental_raw_events: config.features.enabled(codex_features::Feature::Teams),
         ..ThreadStartParams::default()
     }
 }

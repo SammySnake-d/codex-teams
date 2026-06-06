@@ -13,6 +13,7 @@ use crate::team::TeamMessageDeliveryMode;
 use crate::team::TeamMessageTargetFilter;
 use crate::team::TeamTaskStatus;
 use crate::team::UpdateTeamTaskRequest;
+use crate::team_backends::iterm::{self, ITermBackend};
 use crate::team_backends::spawn;
 use crate::team_backends::tmux::TmuxBackend;
 use crate::team_store;
@@ -323,7 +324,7 @@ async fn handle_team_tool(
         TeamTool::TeamStatus => team_status(session, arguments).await,
         TeamTool::TeamSpawnMember => team_spawn_member(session, turn, arguments).await,
         TeamTool::TeamSend => team_send(session, turn, arguments).await,
-        TeamTool::TeamMessageList => team_message_list(session, arguments).await,
+        TeamTool::TeamMessageList => team_message_list(session, turn, arguments).await,
         TeamTool::TeamTaskCreate => team_task_create(session, arguments).await,
         TeamTool::TeamTaskUpdate => team_task_update(session, arguments).await,
         TeamTool::TeamTaskClaim => team_task_claim(session, arguments).await,
@@ -410,6 +411,29 @@ async fn team_spawn_member(
     // behavior degrades gracefully (Claude `handleSpawnInProcess`).
     if TmuxBackend::new().is_inside_tmux() {
         let member = spawn_member_in_pane(
+            session.as_ref(),
+            turn.as_ref(),
+            team_id,
+            name,
+            args.profile,
+            capabilities,
+            permissions,
+            &items,
+        )
+        .await?;
+        return json_output(
+            &TeamSpawnMemberResult { member },
+            Some(true),
+            "team_spawn_member",
+        );
+    }
+
+    // Next-best path: an iTerm2 split pane driven by the `it2` Python-API CLI,
+    // when the lead runs in iTerm2 (not tmux). Same real `codex teammate` process
+    // model as the tmux path; only taken when the `it2` CLI can reach the iTerm2
+    // Python API, otherwise we fall through to the in-process spawn below.
+    if iterm::is_in_iterm2() && ITermBackend::new().is_available().await {
+        let member = spawn_member_in_iterm_pane(
             session.as_ref(),
             turn.as_ref(),
             team_id,
@@ -525,6 +549,26 @@ async fn spawn_member_in_pane(
 
     let agent_id = team_store::agent_id(&sanitized, &team_name);
     let prompt_text = input_preview(items);
+    let member_thread_id = ThreadId::new();
+    // A split-pane teammate receives its first turn through the file mailbox, so
+    // the `Codex Teams context:` markers (which the in-process spawn path injects
+    // as a separate item before delivery) must be baked into the mailbox text
+    // here — otherwise the teammate's model never sees the team context.
+    let context = crate::team::team_context_envelope(
+        team_id,
+        &team_name,
+        session.thread_id,
+        member_thread_id,
+        &sanitized,
+        profile.as_deref(),
+        &capabilities,
+        &permissions,
+    );
+    let first_turn_text = if prompt_text.trim().is_empty() {
+        context
+    } else {
+        format!("{context}\n\n{prompt_text}")
+    };
     let parent_session_id = session.thread_id.to_string();
     let model = turn.config.model.clone();
     let cwd = turn.config.cwd.as_path();
@@ -557,6 +601,12 @@ async fn spawn_member_in_pane(
         flags.push("--agent-type".to_string());
         flags.push(profile.to_string());
     }
+    // A `codex teammate` process is by definition a Teams session; enable the
+    // (default-off) `teams` feature so the spawned process exposes the team
+    // tools it needs (`team_send`, etc.). Without this the teammate boots with
+    // teams OFF and cannot reply to the lead.
+    flags.push("--enable".to_string());
+    flags.push("teams".to_string());
 
     let env = spawn::build_inherited_env_vars(teams_root);
     backend
@@ -575,6 +625,7 @@ async fn spawn_member_in_pane(
     // Register the member in the on-disk team config.
     let member_record = team_store::TeamFileMember {
         agent_id,
+        member_id: Some(member_thread_id.to_string()),
         name: sanitized.clone(),
         agent_type: profile.clone(),
         model,
@@ -607,7 +658,7 @@ async fn spawn_member_in_pane(
         &sanitized,
         team_store::TeammateMessage {
             from: team_store::TEAM_LEAD_NAME.to_string(),
-            text: prompt_text,
+            text: first_turn_text,
             timestamp: team_store::now_timestamp(),
             read: false,
             color: None,
@@ -618,7 +669,161 @@ async fn spawn_member_in_pane(
         FunctionCallError::RespondToModel(format!("failed to deliver teammate prompt: {err}"))
     })?;
 
-    Ok(crate::team::TeamMember::process_member(
+    Ok(crate::team::TeamMember::process_member_with_id(
+        member_thread_id,
+        sanitized,
+        profile,
+        capabilities,
+        permissions,
+    ))
+}
+
+/// iTerm2 twin of [`spawn_member_in_pane`]: launch a real `codex teammate`
+/// process in an iTerm2 split pane via the `it2` Python-API CLI (Claude's
+/// `ITermBackend`). The common contract (envelope-wrapped first turn, on-disk
+/// member record + `member_id`, file mailbox delivery, returned process member)
+/// is identical to the tmux path; only pane creation + command delivery differ.
+/// Unlike `TmuxBackend` (which holds a `RefCell`), `ITermBackend` is async/`Send`,
+/// so it may be held across the `.await`s here.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_member_in_iterm_pane(
+    session: &Session,
+    turn: &TurnContext,
+    team_id: ThreadId,
+    name: String,
+    profile: Option<String>,
+    capabilities: Vec<String>,
+    permissions: Vec<String>,
+    items: &[UserInput],
+) -> Result<crate::team::TeamMember, FunctionCallError> {
+    let team_name = registry_team_name(session, team_id).await?;
+    let backend = ITermBackend::new();
+    let teams_root = turn.config.codex_home.as_path();
+
+    let existing_names: Vec<String> = team_store::read_config(teams_root, &team_name)
+        .ok()
+        .flatten()
+        .map(|cfg| cfg.members.into_iter().map(|member| member.name).collect())
+        .unwrap_or_default();
+    let unique = spawn::unique_teammate_name(&name, &existing_names);
+    let sanitized = spawn::sanitize_agent_name(&unique);
+    let color = spawn::teammate_color(existing_names.len());
+
+    let agent_id = team_store::agent_id(&sanitized, &team_name);
+    let prompt_text = input_preview(items);
+    let member_thread_id = ThreadId::new();
+    let context = crate::team::team_context_envelope(
+        team_id,
+        &team_name,
+        session.thread_id,
+        member_thread_id,
+        &sanitized,
+        profile.as_deref(),
+        &capabilities,
+        &permissions,
+    );
+    let first_turn_text = if prompt_text.trim().is_empty() {
+        context
+    } else {
+        format!("{context}\n\n{prompt_text}")
+    };
+    let parent_session_id = session.thread_id.to_string();
+    let model = turn.config.model.clone();
+    let cwd = turn.config.cwd.as_path();
+    let binary = spawn::teammate_binary().map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to resolve teammate binary: {err}"))
+    })?;
+
+    // Create the iTerm2 split pane (first teammate: vertical split off the lead;
+    // later teammates stack downward — handled inside the backend).
+    let pane = backend
+        .create_teammate_pane_in_swarm_view(&sanitized, color.as_name())
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("failed to create iTerm2 pane: {err}"))
+        })?;
+
+    let mut flags = vec![
+        "teammate".to_string(),
+        "--agent-id".to_string(),
+        agent_id.clone(),
+        "--agent-name".to_string(),
+        sanitized.clone(),
+        "--team-name".to_string(),
+        team_name.clone(),
+        "--agent-color".to_string(),
+        color.as_name().to_string(),
+        "--parent-session-id".to_string(),
+        parent_session_id,
+    ];
+    if let Some(profile) = profile.as_deref() {
+        flags.push("--agent-type".to_string());
+        flags.push(profile.to_string());
+    }
+    // Teammates are by definition Teams sessions (see the tmux twin for why).
+    flags.push("--enable".to_string());
+    flags.push("teams".to_string());
+
+    let env = spawn::build_inherited_env_vars(teams_root);
+    // Reuse the tmux launch-line builder so the same shell-quoting applies (flag
+    // values such as a team name with spaces must be quoted).
+    let launch_line = crate::team_backends::tmux::build_launch_line(cwd, &env, &binary, &flags)
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("failed to build teammate launch line: {err}"))
+        })?;
+    backend
+        .send_command_to_pane(&pane.pane_id, &launch_line, /*use_external_session*/ false)
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("failed to launch teammate process: {err}"))
+        })?;
+
+    let member_record = team_store::TeamFileMember {
+        agent_id,
+        member_id: Some(member_thread_id.to_string()),
+        name: sanitized.clone(),
+        agent_type: profile.clone(),
+        model,
+        prompt: Some(prompt_text.clone()),
+        color: Some(color.as_name().to_string()),
+        joined_at: unix_millis(),
+        tmux_pane_id: pane.pane_id.clone(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        backend_type: Some("iterm2".to_string()),
+        is_active: Some(true),
+        ..Default::default()
+    };
+    let team_for_cfg = team_name.clone();
+    team_store::update_config(teams_root, &team_name, move |cfg| {
+        cfg.name = team_for_cfg.clone();
+        if cfg.lead_agent_id.is_empty() {
+            cfg.lead_agent_id = team_store::agent_id(team_store::TEAM_LEAD_NAME, &team_for_cfg);
+        }
+        cfg.members.push(member_record);
+    })
+    .map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to register teammate in config: {err}"))
+    })?;
+
+    team_store::write_to_mailbox(
+        teams_root,
+        &team_name,
+        &sanitized,
+        team_store::TeammateMessage {
+            from: team_store::TEAM_LEAD_NAME.to_string(),
+            text: first_turn_text,
+            timestamp: team_store::now_timestamp(),
+            read: false,
+            color: None,
+            summary: None,
+        },
+    )
+    .map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to deliver teammate prompt: {err}"))
+    })?;
+
+    Ok(crate::team::TeamMember::process_member_with_id(
+        member_thread_id,
         sanitized,
         profile,
         capabilities,
@@ -633,6 +838,16 @@ async fn team_send(
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: TeamSendArgs = parse_arguments(&arguments)?;
     let team_id = id_from_str("team", &args.team_id)?;
+
+    // Teammate-process path: a spawned `codex teammate` has an EMPTY in-memory
+    // registry (it never ran create_team), so the registry-backed delivery below
+    // cannot resolve the team and `authorize_team_sender` would reject it. Route
+    // its sends across the process boundary via the on-disk file mailbox instead
+    // (Claude's cross-process model: reply lands in the lead's inbox).
+    if let Some(identity) = crate::team::teammate_identity() {
+        return teammate_team_send(turn.as_ref(), team_id, identity, args).await;
+    }
+
     let requested_sender_member_id = optional_id_from_str("sender member", args.sender_member_id)?;
     let sender_member_id =
         authorize_team_sender(session.as_ref(), team_id, requested_sender_member_id).await?;
@@ -647,20 +862,31 @@ async fn team_send(
     };
 
     // Split-pane PROCESS teammates (P3b) live only in the on-disk team store, not
-    // in the in-memory registry, so they are addressed by NAME and delivered via
-    // the file mailbox their process polls (lead -> process member).
-    if matches!(args.target.as_deref(), Some("member") | None) {
-        if let Some(member_name) = args.member_name.clone() {
-            return team_send_to_pane_member(
-                session.as_ref(),
-                turn.as_ref(),
-                team_id,
-                &member_name,
-                args.message,
-                args.items,
-            )
-            .await;
-        }
+    // in the in-memory registry, so they are delivered to via the file mailbox
+    // their process polls (lead -> process member). They can be addressed by NAME
+    // or by the spawn-returned member_id (persisted on disk); the in-memory
+    // registry path further down handles in-process (non-tmux) members.
+    if matches!(args.target.as_deref(), Some("member") | None)
+        && let Some((pane_name, pane_member_label)) = resolve_pane_member(
+            session.as_ref(),
+            turn.as_ref(),
+            team_id,
+            args.member_name.as_deref(),
+            args.member_id.as_deref(),
+        )
+        .await?
+    {
+        return team_send_to_pane_member(
+            session.as_ref(),
+            turn.as_ref(),
+            team_id,
+            &pane_name,
+            &pane_member_label,
+            args.delivery_mode.as_deref(),
+            args.message,
+            args.items,
+        )
+        .await;
     }
 
     let target = match args.target.as_deref() {
@@ -725,6 +951,8 @@ async fn team_send_to_pane_member(
     turn: &TurnContext,
     team_id: ThreadId,
     member_name: &str,
+    member_label: &str,
+    delivery_mode: Option<&str>,
     message: Option<String>,
     items: Option<Vec<UserInput>>,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
@@ -744,13 +972,28 @@ async fn team_send_to_pane_member(
 
     let items = parse_team_input(message, items)?;
     let content = input_preview(&items);
+    // Wrap with the `Codex Teams message:` envelope so the teammate's model sees
+    // the same routing markers the in-process delivery path adds; the teammate
+    // runner injects lead messages verbatim, so the markers must be in the text.
+    let delivery_mode_label = match delivery_mode {
+        Some("interrupt") => "interrupt",
+        _ => "queue",
+    };
+    let enveloped = crate::team::team_message_envelope(
+        team_id,
+        ThreadId::new(),
+        &format!("lead:{}", session.thread_id),
+        member_label,
+        delivery_mode_label,
+        &content,
+    );
     team_store::write_to_mailbox(
         teams_root,
         &team_name,
         &sanitized,
         team_store::TeammateMessage {
             from: team_store::TEAM_LEAD_NAME.to_string(),
-            text: content,
+            text: enveloped,
             timestamp: team_store::now_timestamp(),
             read: false,
             color: None,
@@ -772,8 +1015,130 @@ async fn team_send_to_pane_member(
     )
 }
 
+/// Resolve a lead's `team_send` member target to an on-disk (split-pane) teammate
+/// by NAME or by the spawn-returned `member_id` (persisted in the team config).
+/// Returns `(sanitized_name, label_for_envelope)` when a process member matches,
+/// or `None` so the caller falls back to the in-memory registry (in-process
+/// members). Errors only if the live team itself cannot be resolved.
+async fn resolve_pane_member(
+    session: &Session,
+    turn: &TurnContext,
+    team_id: ThreadId,
+    member_name: Option<&str>,
+    member_id: Option<&str>,
+) -> Result<Option<(String, String)>, FunctionCallError> {
+    let team_name = registry_team_name(session, team_id).await?;
+    let teams_root = turn.config.codex_home.as_path();
+    let Some(cfg) = team_store::read_config(teams_root, &team_name).ok().flatten() else {
+        return Ok(None);
+    };
+    if let Some(name) = member_name {
+        let sanitized = crate::team_backends::spawn::sanitize_agent_name(name);
+        if let Some(member) = cfg.members.iter().find(|member| member.name == sanitized) {
+            let label = member.member_id.clone().unwrap_or_else(|| member.name.clone());
+            return Ok(Some((member.name.clone(), label)));
+        }
+    }
+    if let Some(id) = member_id
+        && let Some(member) = cfg
+            .members
+            .iter()
+            .find(|member| member.member_id.as_deref() == Some(id))
+    {
+        return Ok(Some((member.name.clone(), id.to_string())));
+    }
+    Ok(None)
+}
+
+/// Deliver a teammate-originated `team_send` across the process boundary via the
+/// on-disk file mailbox. A spawned `codex teammate` has an empty in-memory team
+/// registry, so the normal registry path cannot run here; the reply is written
+/// to the lead's inbox (`target: "lead"`, the default) or a named peer's inbox
+/// (`target: "member"` + `member_name`). The lead surfaces it via its inbox
+/// poller (TUI) and `team_message_list` (model).
+async fn teammate_team_send(
+    turn: &TurnContext,
+    team_id: ThreadId,
+    identity: &crate::team::TeammateIdentity,
+    args: TeamSendArgs,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    let teams_root = turn.config.codex_home.as_path();
+    let delivery_mode = match args.delivery_mode.as_deref() {
+        Some("interrupt") => TeamMessageDeliveryMode::Interrupt,
+        Some("queue") | None => TeamMessageDeliveryMode::Queue,
+        Some(other) => {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "unsupported team message delivery mode {other}; use queue or interrupt"
+            )));
+        }
+    };
+    let (recipient, target) = match args.target.as_deref() {
+        Some("lead") | None => (
+            team_store::TEAM_LEAD_NAME.to_string(),
+            crate::team::TeamMessageEndpoint::Lead(ThreadId::new()),
+        ),
+        Some("member") => {
+            let name = args.member_name.clone().ok_or_else(|| {
+                FunctionCallError::RespondToModel(
+                    "member_name is required when a teammate sends to a member".to_string(),
+                )
+            })?;
+            (
+                crate::team_backends::spawn::sanitize_agent_name(&name),
+                crate::team::TeamMessageEndpoint::Member(ThreadId::new()),
+            )
+        }
+        Some(other) => {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "unsupported team_send target {other}; use lead or member"
+            )));
+        }
+    };
+    let items = parse_team_input(args.message, args.items)?;
+    let content = input_preview(&items);
+    team_store::write_to_mailbox(
+        teams_root,
+        &identity.team,
+        &recipient,
+        team_store::TeammateMessage {
+            from: identity.agent_name.clone(),
+            text: content.clone(),
+            timestamp: team_store::now_timestamp(),
+            read: false,
+            color: None,
+            summary: None,
+        },
+    )
+    .map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to deliver to {recipient} mailbox: {err}"))
+    })?;
+
+    // Return a registry-shaped message so the teammate's model sees a normal
+    // team_send result (sender id is synthetic — process members are not in any
+    // registry; the lead authoritatively re-stamps ids when it reads its inbox).
+    let sender = match optional_id_from_str("sender member", args.sender_member_id)? {
+        Some(id) => crate::team::TeamMessageEndpoint::Member(id),
+        None => crate::team::TeamMessageEndpoint::Member(ThreadId::new()),
+    };
+    let message = crate::team::TeamMessage {
+        id: ThreadId::new(),
+        team_id,
+        sender,
+        target,
+        target_member_id: None,
+        content,
+        items,
+        submitted_id: None,
+        delivery_mode,
+        delivery_status: crate::team::TeamMessageDeliveryStatus::Submitted,
+        created_at: unix_millis(),
+    };
+    json_output(&TeamSendResult { message }, Some(true), "team_send")
+}
+
 async fn team_message_list(
     session: Arc<Session>,
+    turn: Arc<TurnContext>,
     arguments: String,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: TeamMessageListArgs = parse_arguments(&arguments)?;
@@ -798,7 +1163,7 @@ async fn team_message_list(
         }
     };
     let registry = session.services.agent_control.team_registry();
-    let messages = team_result(
+    let mut messages = team_result(
         session.as_ref(),
         Some(team_id),
         registry
@@ -810,6 +1175,35 @@ async fn team_message_list(
             .await,
     )
     .await?;
+
+    // Cross-process replies from split-pane teammates arrive in the lead's
+    // on-disk inbox (their `team_send` cannot reach this process's in-memory
+    // registry), so surface them here too when the lead asks for lead/all
+    // messages. The TUI separately injects them via its inbox poller.
+    if matches!(args.target.as_deref(), Some("all") | Some("lead") | None)
+        && let Ok(team_name) = registry_team_name(session.as_ref(), team_id).await
+    {
+        let teams_root = turn.config.codex_home.as_path();
+        let inbox =
+            team_store::read_mailbox(teams_root, &team_name, team_store::TEAM_LEAD_NAME)
+                .unwrap_or_default();
+        for entry in inbox {
+            messages.push(crate::team::TeamMessage {
+                id: ThreadId::new(),
+                team_id,
+                sender: crate::team::TeamMessageEndpoint::Member(ThreadId::new()),
+                target: crate::team::TeamMessageEndpoint::Lead(session.thread_id),
+                target_member_id: None,
+                content: entry.text,
+                items: Vec::new(),
+                submitted_id: None,
+                delivery_mode: TeamMessageDeliveryMode::Queue,
+                delivery_status: crate::team::TeamMessageDeliveryStatus::Submitted,
+                created_at: unix_millis(),
+            });
+        }
+    }
+
     json_output(
         &TeamMessageListResult { messages },
         Some(true),

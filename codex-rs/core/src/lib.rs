@@ -175,6 +175,7 @@ mod team;
 mod team_backends;
 pub mod team_coord;
 pub mod team_store;
+pub use team::set_teammate_identity;
 mod user_shell_command;
 pub mod util;
 
