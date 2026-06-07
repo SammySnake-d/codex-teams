@@ -68,6 +68,9 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .as_ref()
         .expect("spawn_agent should use object params");
     assert!(description.contains("Spawns an agent to work on the specified task."));
+    assert!(description.contains("creates ordinary Codex subagents only"));
+    assert!(description.contains("does not create Codex Teams roster entries"));
+    assert!(description.contains("mailboxes, or split-pane teammates"));
     assert!(description.contains("The spawned agent will have the same tools as you"));
     assert!(description.contains("`max_concurrent_threads_per_session = 4`"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
@@ -84,6 +87,19 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(properties.contains_key("fork_turns"));
     assert!(!properties.contains_key("items"));
     assert!(!properties.contains_key("fork_context"));
+    for forbidden_team_field in [
+        "team_id",
+        "team_name",
+        "name",
+        "tmux_pane_id",
+        "backend_type",
+        "use_splitpane",
+    ] {
+        assert!(
+            !properties.contains_key(forbidden_team_field),
+            "native spawn_agent must not grow Teams split-pane field {forbidden_team_field}"
+        );
+    }
     assert_eq!(
         properties.get("agent_type"),
         Some(&JsonSchema::string(Some("role help".to_string())))
@@ -125,11 +141,17 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         panic!("spawn_agent v1 should be a namespace tool");
     };
     assert_eq!(namespace.name, MULTI_AGENT_V1_NAMESPACE);
-    let Some(ResponsesApiNamespaceTool::Function(ResponsesApiTool { parameters, .. })) =
-        namespace.tools.first()
+    let Some(ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+        description,
+        parameters,
+        ..
+    })) = namespace.tools.first()
     else {
         panic!("spawn_agent should be a namespace function tool");
     };
+    assert!(description.contains("creates ordinary Codex subagents only"));
+    assert!(description.contains("does not create Codex Teams roster entries"));
+    assert!(description.contains("mailboxes, or split-pane teammates"));
     assert_eq!(
         parameters.schema_type.clone(),
         Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object))
@@ -141,6 +163,19 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
 
     assert!(properties.contains_key("fork_context"));
     assert!(!properties.contains_key("fork_turns"));
+    for forbidden_team_field in [
+        "team_id",
+        "team_name",
+        "name",
+        "tmux_pane_id",
+        "backend_type",
+        "use_splitpane",
+    ] {
+        assert!(
+            !properties.contains_key(forbidden_team_field),
+            "legacy spawn_agent must not grow Teams split-pane field {forbidden_team_field}"
+        );
+    }
     assert_eq!(
         properties
             .get("model")

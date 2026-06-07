@@ -382,6 +382,12 @@ fn enable_fanout_is_under_development() {
 }
 
 #[test]
+fn teams_is_under_development_and_disabled_by_default() {
+    assert_eq!(Feature::Teams.stage(), Stage::UnderDevelopment);
+    assert_eq!(Feature::Teams.default_enabled(), false);
+}
+
+#[test]
 fn enable_fanout_normalization_enables_multi_agent_one_way() {
     let mut enable_fanout_features = Features::with_defaults();
     enable_fanout_features.enable(Feature::SpawnCsv);

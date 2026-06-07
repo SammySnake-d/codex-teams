@@ -97,7 +97,7 @@ fn function_tool(
 pub(crate) fn create_team_create_tool() -> ToolSpec {
     function_tool(
         "create_team",
-        "Create a live Codex team registry entry before spawning teammates. Use this when the user asks for an agent team or parallel teammates.",
+        "Create a live Codex Teams workspace and team context. This only creates the team registry, task board, and mailbox surface; it does not spawn teammates or open panes. Use it only for the explicit Codex Teams product path: a named team workspace, Teams roster, Teams task board, Teams mailbox, split-pane teammate sessions, or managing an existing Codex team.",
         BTreeMap::from([(
             "name".to_string(),
             JsonSchema::string(Some("Human-readable team name.".to_string())),
@@ -130,7 +130,7 @@ pub(crate) fn create_team_status_tool() -> ToolSpec {
 pub(crate) fn create_team_spawn_member_tool() -> ToolSpec {
     function_tool(
         "team_spawn_member",
-        "Team-lead-only tool. Spawn one teammate in an existing team using the existing Codex agent lifecycle, with generic Teams context prepended to the spawn prompt.",
+        "Team-lead-only tool. Spawn one named Teams teammate inside an existing Codex team. This is the Teams product path: it requires a team_id from create_team, records the member in Teams state, requires a tmux/iTerm split-pane backend, and launches a codex teammate process.",
         BTreeMap::from([
             (
                 "team_id".to_string(),
@@ -173,6 +173,10 @@ pub(crate) fn create_team_spawn_member_tool() -> ToolSpec {
         Some(vec!["team_id".to_string(), "name".to_string()]),
     )
 }
+
+#[cfg(test)]
+#[path = "team_spec_tests.rs"]
+mod tests;
 
 pub(crate) fn create_team_send_tool() -> ToolSpec {
     function_tool(

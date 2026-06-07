@@ -1012,6 +1012,102 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
+async fn teams_tools_are_lead_only_and_do_not_replace_spawn_agent() {
+    let team_tools = [
+        "create_team",
+        "list_teams",
+        "team_status",
+        "team_spawn_member",
+        "team_send",
+        "team_message_list",
+        "team_task_create",
+        "team_task_update",
+        "team_task_claim",
+        "team_task_list",
+        "team_event_list",
+        "team_member_stop",
+        "team_stop",
+    ];
+
+    let lead = probe(|turn| {
+        set_features(turn, &[Feature::MultiAgentV2, Feature::Teams]);
+    })
+    .await;
+    lead.assert_visible_contains(&["spawn_agent"]);
+    lead.assert_visible_contains(&team_tools);
+    lead.assert_registered_contains(&["spawn_agent"]);
+    lead.assert_registered_contains(&team_tools);
+
+    let spawned_subagent = probe(|turn| {
+        set_features(turn, &[Feature::MultiAgentV2, Feature::Teams]);
+        turn.session_source =
+            SessionSource::SubAgent(SubAgentSource::Other("implementation_lane".to_string()));
+    })
+    .await;
+    spawned_subagent.assert_visible_contains(&["spawn_agent"]);
+    spawned_subagent.assert_visible_lacks(&team_tools);
+    spawned_subagent.assert_registered_contains(&["spawn_agent"]);
+    spawned_subagent.assert_registered_lacks(&team_tools);
+}
+
+#[tokio::test]
+async fn teams_tools_defer_when_tool_search_available() {
+    let team_tools = [
+        "create_team",
+        "list_teams",
+        "team_status",
+        "team_spawn_member",
+        "team_send",
+        "team_message_list",
+        "team_task_create",
+        "team_task_update",
+        "team_task_claim",
+        "team_task_list",
+        "team_event_list",
+        "team_member_stop",
+        "team_stop",
+    ];
+
+    let lead = probe(|turn| {
+        turn.model_info.supports_search_tool = true;
+        set_features(turn, &[Feature::MultiAgentV2, Feature::Teams]);
+    })
+    .await;
+    lead.assert_visible_contains(&["spawn_agent", "tool_search"]);
+    lead.assert_visible_lacks(&team_tools);
+    lead.assert_registered_contains(&["spawn_agent"]);
+    lead.assert_registered_contains(&team_tools);
+    for tool_name in team_tools {
+        assert_eq!(lead.exposure(tool_name), ToolExposure::Deferred);
+    }
+
+    let ToolSpec::ToolSearch { description, .. } = lead.visible_spec("tool_search") else {
+        panic!("expected visible tool_search spec");
+    };
+    assert!(
+        description
+            .contains("- Codex Teams tools: Create and manage explicit Codex Teams workspaces")
+    );
+    let teams_source_line = description
+        .lines()
+        .find(|line| line.starts_with("- Codex Teams tools:"))
+        .expect("tool_search should list the Codex Teams source");
+    for forbidden_trigger in [
+        "spawn_agent",
+        "subagent",
+        "sub-agent",
+        "ordinary delegation",
+        "parallel delegation",
+        "parallel agent work",
+    ] {
+        assert!(
+            !teams_source_line.contains(forbidden_trigger),
+            "Teams tool_search source must not match ordinary agent trigger {forbidden_trigger:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn tool_mode_selector_overrides_feature_flags() {
     let direct = probe(|turn| {
         set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);

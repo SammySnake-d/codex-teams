@@ -321,13 +321,23 @@ fn agent_jobs_worker_tools_enabled(turn_context: &TurnContext) -> bool {
 }
 
 /// Codex Teams tools are gated behind the (default-off) `teams` feature AND are
-/// exposed only on a lead/top-level session. Any spawned sub-agent (including a
-/// native `multi_agent_v2` thread spawn) carries a `SessionSource::SubAgent`, so
-/// excluding that variant guarantees team tools never enter a sub-agent's tool
-/// set.
+/// available only on a lead/top-level session or inside an explicit `codex
+/// teammate` process. Native spawned sub-agents carry a `SessionSource::SubAgent`,
+/// so excluding that variant keeps the ordinary subagent tool set separate.
 fn team_tools_enabled(turn_context: &TurnContext) -> bool {
     turn_context.features.get().enabled(Feature::Teams)
         && !matches!(turn_context.session_source, SessionSource::SubAgent(_))
+}
+
+fn team_tools_exposure(turn_context: &TurnContext) -> ToolExposure {
+    if crate::team::teammate_identity().is_some() {
+        return ToolExposure::Direct;
+    }
+    if search_tool_enabled(turn_context) && namespace_tools_enabled(turn_context) {
+        ToolExposure::Deferred
+    } else {
+        ToolExposure::Direct
+    }
 }
 
 fn image_generation_tool_enabled(turn_context: &TurnContext) -> bool {
@@ -449,7 +459,7 @@ fn build_code_mode_executors(
 
     let namespace_descriptions = code_mode_namespace_descriptions(&exec_prompt_tool_specs);
     let mut enabled_tools =
-        collect_code_mode_exec_prompt_tool_definitions(exec_prompt_tool_specs.iter());
+        collect_code_mode_exec_prompt_tool_definitions(code_mode_nested_tool_specs.iter());
     enabled_tools
         .sort_by(|left, right| compare_code_mode_tools(left, right, &namespace_descriptions));
 
@@ -783,8 +793,14 @@ fn add_team_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planned
     if !team_tools_enabled(context.turn_context) {
         return;
     }
-    for handler in TeamHandler::all() {
-        planned_tools.add(handler);
+    let exposure = team_tools_exposure(context.turn_context);
+    let handlers = if crate::team::teammate_identity().is_some() {
+        TeamHandler::for_teammate_process().collect::<Vec<_>>()
+    } else {
+        TeamHandler::all().collect::<Vec<_>>()
+    };
+    for handler in handlers {
+        planned_tools.add_with_exposure(handler, exposure);
     }
 }
 
