@@ -946,6 +946,15 @@ mod tests {
         network
     }
 
+    fn network_settings_with_local_binding(
+        allowed_domains: &[&str],
+        denied_domains: &[&str],
+    ) -> NetworkProxySettings {
+        let mut network = network_settings(allowed_domains, denied_domains);
+        network.allow_local_binding = true;
+        network
+    }
+
     #[tokio::test]
     async fn host_blocked_denied_wins_over_allowed() {
         let state =
@@ -962,7 +971,10 @@ mod tests {
 
     #[tokio::test]
     async fn host_blocked_requires_allowlist_match() {
-        let state = network_proxy_state_for_policy(network_settings(&["example.com"], &[]));
+        let state = network_proxy_state_for_policy(network_settings_with_local_binding(
+            &["example.com"],
+            &[],
+        ));
 
         assert_eq!(
             state
@@ -981,7 +993,10 @@ mod tests {
 
     #[tokio::test]
     async fn add_allowed_domain_removes_matching_deny_entry() {
-        let state = network_proxy_state_for_policy(network_settings(&[], &["example.com"]));
+        let state = network_proxy_state_for_policy(network_settings_with_local_binding(
+            &[],
+            &["example.com"],
+        ));
 
         state.add_allowed_domain("ExAmPlE.CoM").await.unwrap();
 
@@ -1216,7 +1231,10 @@ mod tests {
 
     #[tokio::test]
     async fn host_blocked_subdomain_wildcards_exclude_apex() {
-        let state = network_proxy_state_for_policy(network_settings(&["*.openai.com"], &[]));
+        let state = network_proxy_state_for_policy(network_settings_with_local_binding(
+            &["*.openai.com"],
+            &[],
+        ));
 
         assert_eq!(
             state
@@ -1233,7 +1251,10 @@ mod tests {
 
     #[tokio::test]
     async fn host_blocked_global_wildcard_allowlist_allows_public_hosts_except_denylist() {
-        let state = network_proxy_state_for_policy(network_settings(&["*"], &["evil.example"]));
+        let state = network_proxy_state_for_policy(network_settings_with_local_binding(
+            &["*"],
+            &["evil.example"],
+        ));
 
         assert_eq!(
             state

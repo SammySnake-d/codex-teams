@@ -1060,6 +1060,7 @@ mod tests {
     async fn http_connect_accept_blocks_in_limited_mode() {
         let policy = {
             let mut policy = NetworkProxySettings::default();
+            policy.allow_local_binding = true;
             policy.set_allowed_domains(vec!["example.com".to_string()]);
             policy
         };
@@ -1113,6 +1114,7 @@ mod tests {
     #[tokio::test]
     async fn http_connect_accept_blocks_hooked_host_in_full_mode_without_mitm_state() {
         let mut policy = NetworkProxySettings {
+            allow_local_binding: true,
             mitm: true,
             mitm_hooks: vec![crate::mitm_hook::MitmHookConfig {
                 host: "api.github.com".to_string(),

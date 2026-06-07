@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::fs::{self};
+use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -7,6 +8,7 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -21,6 +23,7 @@ use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
 use serde::Serialize;
+use serde_json::Value;
 use tiny_http::Header;
 use tiny_http::Method;
 use tiny_http::Request;
@@ -56,6 +59,10 @@ pub struct Args {
     /// Directory where request/response dumps should be written as JSON.
     #[arg(long, value_name = "DIR")]
     pub dump_dir: Option<PathBuf>,
+
+    /// Serve a deterministic no-secret Responses API mock for the local Teams smoke test.
+    #[arg(long)]
+    pub mock_teams_smoke: bool,
 }
 
 #[derive(Serialize)]
@@ -69,8 +76,218 @@ struct ForwardConfig {
     host_header: HeaderValue,
 }
 
+#[derive(Default)]
+struct MockTeamsSmokeState {
+    team_id: Option<String>,
+    member_id: Option<String>,
+    next_response: u64,
+    message_list_checks: u64,
+    member_to_lead_completed: bool,
+}
+
+impl MockTeamsSmokeState {
+    fn next_sse_response(&mut self, body: &Value) -> Result<Vec<u8>> {
+        if let Some(output) = function_output_text(body, "mock-status") {
+            let verdict = if self.member_to_lead_completed {
+                "TEAMS_SMOKE_PASS"
+            } else {
+                "TEAMS_SMOKE_FAIL"
+            };
+            return self.assistant_response(&format!(
+                "{verdict} team_id={} member_id={} member_to_lead_completed={} status_output_bytes={}",
+                self.team_id.as_deref().unwrap_or("unknown"),
+                self.member_id.as_deref().unwrap_or("unknown"),
+                self.member_to_lead_completed,
+                output.len()
+            ));
+        }
+
+        if function_output_text(body, "mock-event-list").is_some() {
+            return self.function_call_response(
+                "mock-status",
+                "team_status",
+                serde_json::json!({
+                    "team_id": self.required_team_id()?,
+                }),
+            );
+        }
+
+        if let Some(output) = latest_function_output_text_with_prefix(body, "mock-message-list-") {
+            if contains_member_to_lead_message(&output) {
+                self.member_to_lead_completed = true;
+            }
+            if !self.member_to_lead_completed && self.message_list_checks < 60 {
+                return self.message_list_response();
+            }
+            return self.function_call_response(
+                "mock-event-list",
+                "team_event_list",
+                serde_json::json!({
+                    "team_id": self.required_team_id()?,
+                }),
+            );
+        }
+
+        if function_output_text(body, "mock-lead-to-member").is_some() {
+            return self.message_list_response();
+        }
+
+        if let Some(output) = function_output_text(body, "mock-spawn-member") {
+            self.member_id = parse_json_path_string(&output, &["member", "id"]);
+            return self.function_call_response(
+                "mock-lead-to-member",
+                "team_send",
+                serde_json::json!({
+                    "team_id": self.required_team_id()?,
+                    "target": "member",
+                    "member_id": self.required_member_id()?,
+                    "delivery_mode": "queue",
+                    "message": "Lead-to-member smoke message from local mock Responses provider.",
+                }),
+            );
+        }
+
+        if let Some(output) = function_output_text(body, "mock-create-team") {
+            self.team_id = parse_json_path_string(&output, &["team", "id"]);
+            return self.function_call_response(
+                "mock-spawn-member",
+                "team_spawn_member",
+                serde_json::json!({
+                    "team_id": self.required_team_id()?,
+                    "name": "mock-member",
+                    "profile": "No-secret local Teams smoke teammate",
+                    "capabilities": ["teams-smoke"],
+                    "permissions": ["team_send"],
+                    "message": "Send one acknowledgement to the team lead with team_send, then stop.",
+                }),
+            );
+        }
+
+        if let Some(output) = function_output_text(body, "mock-member-to-lead") {
+            self.member_to_lead_completed = member_to_lead_send_succeeded(&output);
+            return self.assistant_response(&format!(
+                "TEAMS_SMOKE_MEMBER_DONE member_to_lead_sent={}",
+                self.member_to_lead_completed
+            ));
+        }
+
+        let texts = collect_text_values(body);
+        if contains_text(&texts, "Codex Teams message:") {
+            self.record_member_context(&texts);
+            return self.function_call_response(
+                "mock-member-to-lead",
+                "team_send",
+                serde_json::json!({
+                    "team_id": self.required_team_id()?,
+                    "target": "lead",
+                    "sender_member_id": self.required_member_id()?,
+                    "message": "Member-to-lead smoke acknowledgement from local mock Responses provider.",
+                }),
+            );
+        }
+
+        if contains_text(&texts, "Codex Teams context:") {
+            self.record_member_context(&texts);
+            return self
+                .assistant_response("TEAMS_SMOKE_MEMBER_READY waiting_for_lead_message=true");
+        }
+
+        self.function_call_response(
+            "mock-create-team",
+            "create_team",
+            serde_json::json!({
+                "name": "local tmux teams smoke",
+            }),
+        )
+    }
+
+    fn message_list_response(&mut self) -> Result<Vec<u8>> {
+        self.message_list_checks += 1;
+        let call_id = format!("mock-message-list-{}", self.message_list_checks);
+        self.function_call_response(
+            &call_id,
+            "team_message_list",
+            serde_json::json!({
+                "team_id": self.required_team_id()?,
+                "target": "all",
+            }),
+        )
+    }
+
+    fn function_call_response(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        arguments: Value,
+    ) -> Result<Vec<u8>> {
+        let response_id = self.next_response_id();
+        let arguments = serde_json::to_string(&arguments)?;
+        Ok(sse(vec![
+            event_response_created(&response_id),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                }
+            }),
+            event_response_completed(&response_id),
+        ]))
+    }
+
+    fn assistant_response(&mut self, text: &str) -> Result<Vec<u8>> {
+        let response_id = self.next_response_id();
+        let message_id = format!("msg-{}", self.next_response);
+        Ok(sse(vec![
+            event_response_created(&response_id),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": message_id,
+                    "content": [{"type": "output_text", "text": text}],
+                }
+            }),
+            event_response_completed(&response_id),
+        ]))
+    }
+
+    fn next_response_id(&mut self) -> String {
+        self.next_response += 1;
+        format!("mock-resp-{}", self.next_response)
+    }
+
+    fn required_team_id(&self) -> Result<&str> {
+        self.team_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("mock Teams smoke is missing team_id"))
+    }
+
+    fn required_member_id(&self) -> Result<&str> {
+        self.member_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("mock Teams smoke is missing member_id"))
+    }
+
+    fn record_member_context(&mut self, texts: &[String]) {
+        if let Some(team_id) = first_context_value(texts, "team_id") {
+            self.team_id = Some(team_id);
+        }
+        if let Some(member_id) = first_context_value(texts, "member_id") {
+            self.member_id = Some(member_id);
+        }
+    }
+}
+
 /// Entry point for the library main, for parity with other crates.
 pub fn run_main(args: Args) -> Result<()> {
+    if args.mock_teams_smoke {
+        return run_mock_teams_smoke(args);
+    }
+
     let auth_header = read_auth_header_from_stdin()?;
 
     let upstream_url = Url::parse(&args.upstream_url).context("parsing --upstream-url")?;
@@ -135,6 +352,102 @@ pub fn run_main(args: Args) -> Result<()> {
     Err(anyhow!("server stopped unexpectedly"))
 }
 
+fn run_mock_teams_smoke(args: Args) -> Result<()> {
+    let dump_dir = args
+        .dump_dir
+        .map(ExchangeDumper::new)
+        .transpose()
+        .context("creating --dump-dir")?
+        .map(Arc::new);
+    let state = Arc::new(Mutex::new(MockTeamsSmokeState::default()));
+
+    let (listener, bound_addr) = bind_listener(args.port)?;
+    if let Some(path) = args.server_info.as_ref() {
+        write_server_info(path, bound_addr.port())?;
+    }
+    let server = Server::from_listener(listener, None)
+        .map_err(|err| anyhow!("creating HTTP server: {err}"))?;
+
+    eprintln!("responses-api-proxy mock Teams smoke listening on {bound_addr}");
+
+    let http_shutdown = args.http_shutdown;
+    for request in server.incoming_requests() {
+        let dump_dir = dump_dir.clone();
+        let state = state.clone();
+        std::thread::spawn(move || {
+            if http_shutdown && request.method() == &Method::Get && request.url() == "/shutdown" {
+                let _ = request.respond(Response::new_empty(StatusCode(200)));
+                std::process::exit(0);
+            }
+
+            if let Err(e) = mock_teams_smoke_request(state, dump_dir.as_deref(), request) {
+                eprintln!("mock Teams smoke error: {e}");
+            }
+        });
+    }
+
+    Err(anyhow!("server stopped unexpectedly"))
+}
+
+fn mock_teams_smoke_request(
+    state: Arc<Mutex<MockTeamsSmokeState>>,
+    dump_dir: Option<&ExchangeDumper>,
+    mut req: Request,
+) -> Result<()> {
+    let method = req.method().clone();
+    let url_path = req.url().to_string();
+
+    let mut body = Vec::new();
+    req.as_reader().read_to_end(&mut body)?;
+    let exchange_dump = dump_dir.and_then(|dump_dir| {
+        dump_dir
+            .dump_request(&method, &url_path, req.headers(), &body)
+            .map_err(|err| {
+                eprintln!("responses-api-proxy failed to dump mock request: {err}");
+                err
+            })
+            .ok()
+    });
+
+    if method == Method::Get && url_path.starts_with("/v1/models") {
+        let body = mock_models_body()?;
+        respond_with_body(
+            req,
+            StatusCode(200),
+            "application/json",
+            body,
+            exchange_dump,
+        )?;
+        return Ok(());
+    }
+
+    if method == Method::Post && url_path == "/v1/responses" {
+        let body_json: Value = serde_json::from_slice(&body)
+            .context("parsing mock Teams smoke /v1/responses request body")?;
+        if should_pause_for_member_reply(&state, &body_json) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let response = state.lock().unwrap().next_sse_response(&body_json)?;
+        respond_with_body(
+            req,
+            StatusCode(200),
+            "text/event-stream",
+            response,
+            exchange_dump,
+        )?;
+        return Ok(());
+    }
+
+    respond_with_body(
+        req,
+        StatusCode(403),
+        "text/plain; charset=utf-8",
+        b"mock Teams smoke only serves GET /v1/models and POST /v1/responses\n".to_vec(),
+        exchange_dump,
+    )?;
+    Ok(())
+}
+
 fn bind_listener(port: Option<u16>) -> Result<(TcpListener, SocketAddr)> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0)));
     let listener = TcpListener::bind(addr).with_context(|| format!("failed to bind {addr}"))?;
@@ -158,6 +471,278 @@ fn write_server_info(path: &Path, port: u16) -> Result<()> {
     let mut f = File::create(path)?;
     f.write_all(data.as_bytes())?;
     Ok(())
+}
+
+fn respond_with_body(
+    req: Request,
+    status: StatusCode,
+    content_type: &str,
+    body: Vec<u8>,
+    exchange_dump: Option<dump::ExchangeDump>,
+) -> Result<()> {
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_str(content_type).context("constructing mock Content-Type header")?,
+    );
+    let tiny_header = Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes())
+        .map_err(|_| anyhow!("constructing tiny_http Content-Type header"))?;
+    let content_length = body.len();
+    let response_body: Box<dyn Read + Send> = if let Some(exchange_dump) = exchange_dump {
+        Box::new(exchange_dump.tee_response_body(status.0, &response_headers, Cursor::new(body)))
+    } else {
+        Box::new(Cursor::new(body))
+    };
+    let response = Response::new(
+        status,
+        vec![tiny_header],
+        response_body,
+        Some(content_length),
+        None,
+    );
+    let _ = req.respond(response);
+    Ok(())
+}
+
+fn mock_models_body() -> Result<Vec<u8>> {
+    serde_json::to_vec(&serde_json::json!({
+        "models": [{
+            "slug": "teams-smoke-model",
+            "display_name": "Teams Smoke Model",
+            "description": "Local no-secret model for Codex Teams smoke validation",
+            "default_reasoning_level": "none",
+            "supported_reasoning_levels": [],
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": true,
+            "priority": 0,
+            "additional_speed_tiers": [],
+            "service_tiers": [],
+            "default_service_tier": null,
+            "availability_nux": null,
+            "upgrade": null,
+            "base_instructions": "Local Teams smoke model.",
+            "supports_reasoning_summaries": false,
+            "default_reasoning_summary": "none",
+            "support_verbosity": false,
+            "default_verbosity": null,
+            "apply_patch_tool_type": null,
+            "web_search_tool_type": "text",
+            "truncation_policy": {"mode": "bytes", "limit": 100000},
+            "supports_parallel_tool_calls": false,
+            "supports_image_detail_original": false,
+            "context_window": 100000,
+            "max_context_window": 100000,
+            "auto_compact_token_limit": 90000,
+            "effective_context_window_percent": 95,
+            "experimental_supported_tools": [],
+            "input_modalities": ["text"],
+            "supports_search_tool": false,
+            "auto_review_model_override": null,
+            "tool_mode": null,
+            "multi_agent_version": null,
+        }]
+    }))
+    .context("serializing mock models response")
+}
+
+fn sse(events: Vec<Value>) -> Vec<u8> {
+    let mut out = String::new();
+    for event in events {
+        let kind = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
+        out.push_str("event: ");
+        out.push_str(kind);
+        out.push('\n');
+        out.push_str("data: ");
+        out.push_str(&event.to_string());
+        out.push_str("\n\n");
+    }
+    out.into_bytes()
+}
+
+fn event_response_created(id: &str) -> Value {
+    serde_json::json!({
+        "type": "response.created",
+        "response": {"id": id},
+    })
+}
+
+fn event_response_completed(id: &str) -> Value {
+    serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "id": id,
+            "usage": {
+                "input_tokens": 0,
+                "input_tokens_details": null,
+                "output_tokens": 0,
+                "output_tokens_details": null,
+                "total_tokens": 0,
+            },
+        },
+    })
+}
+
+fn function_output_text(body: &Value, call_id: &str) -> Option<String> {
+    body.get("input")?
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|item| {
+            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                && item.get("call_id").and_then(Value::as_str) == Some(call_id)
+        })
+        .and_then(output_item_text)
+}
+
+fn latest_function_output_text_with_prefix(body: &Value, call_id_prefix: &str) -> Option<String> {
+    body.get("input")?
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|item| {
+            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                && item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|call_id| call_id.starts_with(call_id_prefix))
+        })
+        .and_then(output_item_text)
+}
+
+fn output_item_text(item: &Value) -> Option<String> {
+    let output = item.get("output")?;
+    match output {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => items.iter().find_map(|item| {
+            if item.get("type").and_then(Value::as_str) == Some("input_text") {
+                item.get("text").and_then(Value::as_str).map(str::to_string)
+            } else {
+                None
+            }
+        }),
+        Value::Object(obj) => obj
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
+}
+
+fn parse_json_path_string(text: &str, path: &[&str]) -> Option<String> {
+    let mut value = serde_json::from_str::<Value>(text).ok()?;
+    for key in path {
+        value = value.get(*key)?.clone();
+    }
+    value.as_str().map(str::to_string)
+}
+
+fn collect_text_values(value: &Value) -> Vec<String> {
+    let mut texts = Vec::new();
+    collect_text_values_inner(value, &mut texts);
+    texts
+}
+
+fn collect_text_values_inner(value: &Value, texts: &mut Vec<String>) {
+    match value {
+        Value::String(text) => texts.push(text.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_text_values_inner(item, texts);
+            }
+        }
+        Value::Object(obj) => {
+            for value in obj.values() {
+                collect_text_values_inner(value, texts);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn contains_text(texts: &[String], needle: &str) -> bool {
+    texts.iter().any(|text| text.contains(needle))
+}
+
+fn first_context_value(texts: &[String], key: &str) -> Option<String> {
+    let prefix = format!("- {key}: ");
+    texts.iter().find_map(|text| {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix).map(str::to_string))
+    })
+}
+
+fn should_pause_for_member_reply(state: &Arc<Mutex<MockTeamsSmokeState>>, body: &Value) -> bool {
+    if !latest_function_output_call_id_starts_with(body, "mock-message-list-") {
+        return false;
+    }
+
+    !state.lock().unwrap().member_to_lead_completed
+}
+
+fn latest_function_output_call_id_starts_with(body: &Value, call_id_prefix: &str) -> bool {
+    body.get("input")
+        .and_then(Value::as_array)
+        .and_then(|input| {
+            input.iter().rev().find_map(|item| {
+                if item.get("type").and_then(Value::as_str) == Some("function_call_output") {
+                    item.get("call_id").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            })
+        })
+        .is_some_and(|call_id| call_id.starts_with(call_id_prefix))
+}
+
+fn member_to_lead_send_succeeded(output: &str) -> bool {
+    serde_json::from_str::<Value>(output)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("message")
+                .is_some_and(member_to_lead_message_matches)
+        })
+}
+
+fn member_to_lead_message_matches(message: &Value) -> bool {
+    let content_matches = message
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| content.contains("Member-to-lead smoke acknowledgement"));
+    let target_matches = message
+        .get("target")
+        .and_then(Value::as_object)
+        .is_some_and(|target| target.contains_key("lead"));
+    content_matches && target_matches
+}
+
+fn contains_member_to_lead_message(output: &str) -> bool {
+    serde_json::from_str::<Value>(output)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("messages")
+                .and_then(Value::as_array)
+                .is_some_and(|messages| {
+                    messages.iter().any(|message| {
+                        let content_matches = message
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|content| {
+                                content.contains("Member-to-lead smoke acknowledgement")
+                            });
+                        let target_matches = message
+                            .get("target")
+                            .and_then(Value::as_object)
+                            .is_some_and(|target| target.contains_key("lead"));
+                        content_matches && target_matches
+                    })
+                })
+        })
 }
 
 fn forward_request(

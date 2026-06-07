@@ -54,6 +54,7 @@ fn policy_ctx(
 async fn mitm_policy_blocks_disallowed_method_and_records_telemetry() {
     let app_state = Arc::new(network_proxy_state_for_policy({
         let mut network = NetworkProxySettings::default();
+        network.allow_local_binding = true;
         network.set_allowed_domains(vec!["example.com".to_string()]);
         network
     }));
@@ -162,6 +163,7 @@ async fn mitm_policy_allows_matching_hooked_write_in_full_mode() {
     hook.actions.inject_request_headers[0].secret_file =
         Some(secret_file.path().display().to_string());
     let mut network = NetworkProxySettings {
+        allow_local_binding: true,
         mitm: true,
         mitm_hooks: vec![hook],
         mode: NetworkMode::Full,
@@ -196,6 +198,7 @@ async fn mitm_policy_blocks_matching_hooked_write_in_limited_mode() {
     let mut hook = github_write_hook();
     hook.actions.inject_request_headers.clear();
     let mut network = NetworkProxySettings {
+        allow_local_binding: true,
         mitm: true,
         mitm_hooks: vec![hook],
         mode: NetworkMode::Limited,
@@ -244,6 +247,7 @@ async fn mitm_policy_blocks_hook_miss_for_hooked_host_and_records_telemetry_in_f
     hook.actions.inject_request_headers[0].secret_file =
         Some(secret_file.path().display().to_string());
     let mut network = NetworkProxySettings {
+        allow_local_binding: true,
         mitm: true,
         mitm_hooks: vec![hook],
         mode: NetworkMode::Full,
