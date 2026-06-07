@@ -571,6 +571,8 @@ pub(crate) struct ChatWidget {
     collab_agent_metadata: HashMap<ThreadId, AgentMetadata>,
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
     active_agent_label: Option<String>,
+    team_footer_label: Option<String>,
+    team_footer_spans: Option<Vec<ratatui::text::Span<'static>>>,
     team_ui: TeamUiState,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
@@ -1706,15 +1708,27 @@ impl ChatWidget {
         self.bottom_pane.is_task_running()
     }
 
-    /// Inject a poller-sourced teammate reply as a user turn: submit immediately
-    /// when idle, otherwise queue it so it flushes on the next idle transition
-    /// (port of `useInboxPoller`'s submit-or-queue). Plain text only.
+    /// Inject a lead-inbox teammate reply as this process's own user turn.
+    /// Mailbox text is model input, even if it starts with `!`, so it must not
+    /// trigger the interactive TUI shell-command shortcut.
     pub(crate) fn inject_teammate_reply(&mut self, text: String) {
         let user_message = UserMessage::from(text);
         if self.is_user_turn_pending_or_running() {
-            self.queue_user_message(user_message);
+            self.queue_user_message_with_options(user_message, QueuedInputAction::PlainNoShell);
         } else {
-            self.submit_user_message(user_message);
+            let _ = self.submit_user_message_as_plain_user_turn(user_message);
+        }
+    }
+
+    /// Inject a teammate-mode mailbox message as this process's own user turn.
+    /// Mailbox text is model input, even if it starts with `!`, so it must not
+    /// trigger the interactive TUI shell-command shortcut.
+    pub(crate) fn inject_teammate_inbox_message(&mut self, text: String) {
+        let user_message = UserMessage::from(text);
+        if self.is_user_turn_pending_or_running() {
+            self.queue_user_message_with_options(user_message, QueuedInputAction::PlainNoShell);
+        } else {
+            let _ = self.submit_user_message_as_plain_user_turn(user_message);
         }
     }
 

@@ -1,0 +1,5 @@
+---
+source: tui/src/bottom_pane/footer.rs
+expression: terminal.backend()
+---
+"  Teams: Rocket · @main · @alice                             100% context left  "

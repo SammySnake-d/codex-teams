@@ -186,6 +186,11 @@ impl App {
             .agent_navigation
             .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id);
         self.chat_widget.set_active_agent_label(label);
+        self.chat_widget.set_team_footer_context(
+            self.team_roster_navigation.footer_label(),
+            self.team_roster_navigation
+                .footer_spans(self.current_displayed_thread_id(), self.primary_thread_id),
+        );
         self.sync_side_thread_ui();
     }
 
@@ -1491,11 +1496,107 @@ impl App {
             // thread, so unrelated shutdowns cannot consume this marker.
             self.pending_shutdown_exit_thread_id = None;
         }
+        let completed_teammate_turn_message = completed_teammate_turn_message(&event);
         self.handle_thread_event_now(event);
+        if let Some(last_agent_message) = completed_teammate_turn_message
+            && let Some(poller) = &self.teammate_inbox_poller
+        {
+            let _ = poller.notify_idle(last_agent_message.as_deref());
+        }
         if self.backtrack_render_pending {
             tui.frame_requester().schedule_frame();
         }
         Ok(())
+    }
+}
+
+fn completed_teammate_turn_message(event: &ThreadBufferedEvent) -> Option<Option<String>> {
+    match event {
+        ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(notification))
+            if notification.turn.status == TurnStatus::Completed =>
+        {
+            Some(last_agent_message_from_turn(&notification.turn))
+        }
+        _ => None,
+    }
+}
+
+fn last_agent_message_from_turn(turn: &Turn) -> Option<String> {
+    turn.items.iter().rev().find_map(|item| match item {
+        ThreadItem::AgentMessage { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod teammate_idle_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn turn_completed_event(status: TurnStatus, items: Vec<ThreadItem>) -> ThreadBufferedEvent {
+        ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
+            codex_app_server_protocol::TurnCompletedNotification {
+                thread_id: ThreadId::new().to_string(),
+                turn: Turn {
+                    id: "turn-1".to_string(),
+                    items_view: codex_app_server_protocol::TurnItemsView::Full,
+                    items,
+                    status,
+                    error: None,
+                    started_at: Some(0),
+                    completed_at: Some(1),
+                    duration_ms: Some(1),
+                },
+            },
+        ))
+    }
+
+    #[test]
+    fn completed_teammate_turn_message_returns_summary_for_completed_turn() {
+        let event = turn_completed_event(
+            TurnStatus::Completed,
+            vec![
+                ThreadItem::AgentMessage {
+                    id: "a1".to_string(),
+                    text: "first".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                },
+                ThreadItem::AgentMessage {
+                    id: "a2".to_string(),
+                    text: "last".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                },
+            ],
+        );
+
+        assert_eq!(
+            completed_teammate_turn_message(&event),
+            Some(Some("last".to_string()))
+        );
+    }
+
+    #[test]
+    fn completed_teammate_turn_message_keeps_completed_turn_without_summary() {
+        let event = turn_completed_event(TurnStatus::Completed, Vec::new());
+
+        assert_eq!(completed_teammate_turn_message(&event), Some(None));
+    }
+
+    #[test]
+    fn completed_teammate_turn_message_ignores_non_completed_turn() {
+        let event = turn_completed_event(
+            TurnStatus::Failed,
+            vec![ThreadItem::AgentMessage {
+                id: "a1".to_string(),
+                text: "failed".to_string(),
+                phase: None,
+                memory_citation: None,
+            }],
+        );
+
+        assert_eq!(completed_teammate_turn_message(&event), None);
     }
 }
 

@@ -33,6 +33,13 @@ impl AppEventSender {
     /// Send an event to the app event channel. If it fails, we swallow the
     /// error and log it.
     pub(crate) fn send(&self, event: AppEvent) {
+        let _ = self.send_checked(event);
+    }
+
+    /// Send an event to the app event channel and report whether it was
+    /// accepted. This is useful for mailbox consumers that must not mark a
+    /// message read unless the TUI actually received the injected turn.
+    pub(crate) fn send_checked(&self, event: AppEvent) -> bool {
         // Record inbound events for high-fidelity session replay.
         // Avoid double-logging Ops; those are logged at the point of submission.
         if !matches!(event, AppEvent::CodexOp(_)) {
@@ -40,7 +47,9 @@ impl AppEventSender {
         }
         if let Err(e) = self.app_event_tx.send(event) {
             tracing::error!("failed to send event: {e}");
+            return false;
         }
+        true
     }
 
     pub(crate) fn interrupt(&self) {

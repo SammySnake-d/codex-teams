@@ -1,10 +1,11 @@
-//! Teams UI integration coverage: footer/status visibility and the external-pane
-//! trigger.
+//! Teams UI integration coverage: footer/status visibility and Teams-only roster
+//! registration.
 //!
 //! These drive the real `ChatWidget` through the shared harness so the assertions
 //! exercise the same code paths a live session does.
 
 use super::*;
+use codex_protocol::ThreadId;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 
@@ -70,7 +71,12 @@ fn drain_all(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
     while rx.try_recv().is_ok() {}
 }
 
-fn seed_team_with_member(chat: &mut ChatWidget) {
+fn alice_thread_id() -> ThreadId {
+    ThreadId::from_string("00000000-0000-0000-0000-0000000000a1").expect("valid thread")
+}
+
+fn seed_team_with_pane_member(chat: &mut ChatWidget) {
+    let alice_thread_id = alice_thread_id();
     feed_raw(chat, call("create_team", "c1", "{}"));
     feed_raw(
         chat,
@@ -79,43 +85,301 @@ fn seed_team_with_member(chat: &mut ChatWidget) {
             r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
         ),
     );
-    feed_raw(chat, call("team_spawn_member", "c2", r#"{"team_id":"team-1"}"#));
+    feed_raw(
+        chat,
+        call("team_spawn_member", "c2", r#"{"team_id":"team-1"}"#),
+    );
     feed_raw(
         chat,
         output(
             "c2",
-            r#"{"member":{"id":"m1","name":"alice","agent_thread_id":"thr-1","status":"active","agent_status":"running"}}"#,
+            &format!(
+                r#"{{"member":{{"id":"m1","name":"alice","agent_thread_id":"{alice_thread_id}","profile":"researcher","status":"active","agent_status":"running"}},"tmux_pane_id":"%9","backend_type":"tmux"}}"#
+            ),
         ),
     );
 }
 
 #[tokio::test]
-async fn team_tool_output_updates_footer_and_opens_pane() {
+async fn team_tool_output_registers_process_teammate() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let _rollout = configure(&mut chat);
     drain_all(&mut rx);
 
-    seed_team_with_member(&mut chat);
+    seed_team_with_pane_member(&mut chat);
 
-    // Status bar: the team and teammate are visible in the footer label.
-    let footer = chat.team_ui.footer_label().expect("team footer label");
-    assert!(footer.contains("Teams: Rocket"), "footer: {footer}");
-    assert!(footer.contains("@alice"), "footer: {footer}");
-    assert!(footer.contains("ctrl+t teammates"), "footer: {footer}");
+    assert_eq!(chat.team_ui.active_team_name().as_deref(), Some("Rocket"));
 
-    // Split: a live MemberSpawned requests an external teammate pane.
-    let mut opened_pane = false;
+    let mut registered_thread = false;
     while let Ok(ev) = rx.try_recv() {
-        if let AppEvent::OpenTeammatePane {
-            member_name,
-            agent_thread_id,
-        } = ev
-            && member_name == "alice"
-            && agent_thread_id == "thr-1"
-        {
-            opened_pane = true;
-            break;
+        match ev {
+            AppEvent::RegisterTeammateThread {
+                member_name,
+                agent_thread_id,
+                agent_role,
+                tmux_pane_id,
+                backend_type,
+            } if member_name == "alice"
+                && agent_thread_id == alice_thread_id()
+                && agent_role.as_deref() == Some("researcher")
+                && tmux_pane_id.as_deref() == Some("%9")
+                && backend_type.as_deref() == Some("tmux") =>
+            {
+                registered_thread = true;
+            }
+            _ => {}
         }
     }
-    assert!(opened_pane, "expected an OpenTeammatePane event for alice");
+    assert!(
+        registered_thread,
+        "expected a RegisterTeammateThread event for alice"
+    );
+}
+
+#[tokio::test]
+async fn process_team_spawn_registers_existing_pane() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _rollout = configure(&mut chat);
+    drain_all(&mut rx);
+
+    feed_raw(&mut chat, call("create_team", "c1", "{}"));
+    feed_raw(
+        &mut chat,
+        output(
+            "c1",
+            r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
+        ),
+    );
+    drain_all(&mut rx);
+
+    feed_raw(
+        &mut chat,
+        call("team_spawn_member", "c2", r#"{"team_id":"team-1"}"#),
+    );
+    feed_raw(
+        &mut chat,
+        output(
+            "c2",
+            &format!(
+                r#"{{"member":{{"id":"m1","name":"alice","agent_thread_id":"{}","profile":"researcher","status":"active","agent_status":"running"}},"tmux_pane_id":"%9","backend_type":"tmux"}}"#,
+                alice_thread_id()
+            ),
+        ),
+    );
+
+    let mut registered_existing_pane = false;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AppEvent::RegisterTeammateThread {
+                member_name,
+                agent_thread_id,
+                tmux_pane_id,
+                backend_type,
+                ..
+            } if member_name == "alice"
+                && agent_thread_id == alice_thread_id()
+                && tmux_pane_id.as_deref() == Some("%9")
+                && backend_type.as_deref() == Some("tmux") =>
+            {
+                registered_existing_pane = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        registered_existing_pane,
+        "expected pane metadata to reach Teams roster registration"
+    );
+}
+
+#[tokio::test]
+async fn team_spawn_member_without_pane_metadata_does_not_register_teammate() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _rollout = configure(&mut chat);
+    drain_all(&mut rx);
+
+    feed_raw(&mut chat, call("create_team", "c1", "{}"));
+    feed_raw(
+        &mut chat,
+        output(
+            "c1",
+            r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
+        ),
+    );
+    drain_all(&mut rx);
+
+    feed_raw(
+        &mut chat,
+        call("team_spawn_member", "c2", r#"{"team_id":"team-1"}"#),
+    );
+    feed_raw(
+        &mut chat,
+        output(
+            "c2",
+            &format!(
+                r#"{{"member":{{"id":"m1","name":"alice","agent_thread_id":"{}","profile":"researcher","status":"active","agent_status":"running"}}}}"#,
+                alice_thread_id()
+            ),
+        ),
+    );
+
+    assert_eq!(chat.team_ui.active_team_name().as_deref(), Some("Rocket"));
+    while let Ok(ev) = rx.try_recv() {
+        assert!(
+            !matches!(ev, AppEvent::RegisterTeammateThread { .. }),
+            "team_spawn_member without pane metadata must not affect Teams navigation: {ev:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn spawn_agent_output_does_not_update_teams_roster() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _rollout = configure(&mut chat);
+    drain_all(&mut rx);
+
+    feed_raw(
+        &mut chat,
+        call(
+            "spawn_agent",
+            "spawn-1",
+            r#"{"task_name":"audit","message":"Inspect the code"}"#,
+        ),
+    );
+    feed_raw(
+        &mut chat,
+        output(
+            "spawn-1",
+            r#"{"agent_id":"agent-1","status":"running","task_name":"audit"}"#,
+        ),
+    );
+
+    assert_eq!(chat.team_ui.active_team_name(), None);
+    while let Ok(ev) = rx.try_recv() {
+        assert!(
+            !matches!(ev, AppEvent::RegisterTeammateThread { .. }),
+            "spawn_agent must not affect Teams UI or teammate navigation: {ev:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn namespaced_team_spawn_member_output_does_not_update_teams_roster() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _rollout = configure(&mut chat);
+    drain_all(&mut rx);
+
+    feed_raw(&mut chat, call("create_team", "c1", "{}"));
+    feed_raw(
+        &mut chat,
+        output(
+            "c1",
+            r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
+        ),
+    );
+    drain_all(&mut rx);
+
+    feed_raw(
+        &mut chat,
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "team_spawn_member".to_string(),
+            namespace: Some("mcp".to_string()),
+            arguments: r#"{"team_id":"team-1"}"#.to_string(),
+            call_id: "mcp-spawn-1".to_string(),
+        },
+    );
+    feed_raw(
+        &mut chat,
+        output(
+            "mcp-spawn-1",
+            &format!(
+                r#"{{"member":{{"id":"m1","name":"alice","agent_thread_id":"{}","profile":"researcher"}},"tmux_pane_id":"%9","backend_type":"tmux"}}"#,
+                alice_thread_id()
+            ),
+        ),
+    );
+
+    assert_eq!(chat.team_ui.active_team_name().as_deref(), Some("Rocket"));
+    while let Ok(ev) = rx.try_recv() {
+        assert!(
+            !matches!(ev, AppEvent::RegisterTeammateThread { .. }),
+            "namespaced team-shaped output must not affect Teams navigation: {ev:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn spawn_agent_team_shaped_output_does_not_update_teams_roster() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _rollout = configure(&mut chat);
+    drain_all(&mut rx);
+
+    feed_raw(
+        &mut chat,
+        call(
+            "spawn_agent",
+            "spawn-1",
+            r#"{"task_name":"audit","message":"Inspect the code"}"#,
+        ),
+    );
+    feed_raw(
+        &mut chat,
+        output(
+            "spawn-1",
+            &format!(
+                r#"{{"member":{{"id":"m1","name":"alice","agent_thread_id":"{}","profile":"researcher"}},"tmux_pane_id":"%9","backend_type":"tmux"}}"#,
+                alice_thread_id()
+            ),
+        ),
+    );
+
+    assert_eq!(chat.team_ui.active_team_name(), None);
+    while let Ok(ev) = rx.try_recv() {
+        assert!(
+            !matches!(ev, AppEvent::RegisterTeammateThread { .. }),
+            "team-shaped spawn_agent output must not affect Teams navigation: {ev:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn team_spawn_member_output_with_wrong_team_id_does_not_register_teammate() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _rollout = configure(&mut chat);
+    drain_all(&mut rx);
+
+    feed_raw(&mut chat, call("create_team", "c1", "{}"));
+    feed_raw(
+        &mut chat,
+        output(
+            "c1",
+            r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
+        ),
+    );
+    drain_all(&mut rx);
+
+    feed_raw(
+        &mut chat,
+        call("team_spawn_member", "c2", r#"{"team_id":"other-team"}"#),
+    );
+    feed_raw(
+        &mut chat,
+        output(
+            "c2",
+            &format!(
+                r#"{{"member":{{"id":"m1","name":"alice","agent_thread_id":"{}","profile":"researcher"}},"tmux_pane_id":"%9","backend_type":"tmux"}}"#,
+                alice_thread_id()
+            ),
+        ),
+    );
+
+    assert_eq!(chat.team_ui.active_team_name().as_deref(), Some("Rocket"));
+    while let Ok(ev) = rx.try_recv() {
+        assert!(
+            !matches!(ev, AppEvent::RegisterTeammateThread { .. }),
+            "mismatched team_spawn_member output must not affect Teams navigation: {ev:?}"
+        );
+    }
 }

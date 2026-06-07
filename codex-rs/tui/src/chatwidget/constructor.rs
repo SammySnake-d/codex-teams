@@ -139,6 +139,8 @@ impl ChatWidget {
             collab_agent_metadata: HashMap::new(),
             pending_collab_spawn_requests: HashMap::new(),
             active_agent_label: None,
+            team_footer_label: None,
+            team_footer_spans: None,
             team_ui: TeamUiState::default(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,

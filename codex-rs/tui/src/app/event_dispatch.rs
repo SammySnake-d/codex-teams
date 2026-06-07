@@ -44,29 +44,46 @@ impl App {
             AppEvent::RawOutputModeChanged { enabled } => {
                 self.apply_raw_output_mode(tui, enabled, /*notify*/ false);
             }
-            AppEvent::OpenTeammatePane {
+            AppEvent::RegisterTeammateThread {
                 member_name,
                 agent_thread_id,
+                agent_role,
+                tmux_pane_id,
+                backend_type,
             } => {
-                self.open_teammate_tmux_pane(&member_name, &agent_thread_id);
+                self.register_teammate_thread(
+                    agent_thread_id,
+                    member_name,
+                    agent_role,
+                    tmux_pane_id,
+                    backend_type,
+                );
             }
             AppEvent::InjectTeammateReplies { text } => {
                 self.chat_widget.inject_teammate_reply(text);
             }
+            AppEvent::InjectTeammateInboxMessage { text } => {
+                self.chat_widget.inject_teammate_inbox_message(text);
+            }
             AppEvent::TeamBecameActive { team } => {
+                self.team_roster_navigation.set_active_team(team.clone());
+                self.sync_active_agent_label();
                 if self.lead_inbox_poller.is_none() {
-                    self.lead_inbox_poller = Some(super::lead_inbox_poller::start_lead_inbox_poller(
-                        self.config.codex_home.to_path_buf(),
-                        team,
-                        crate::legacy_core::team_store::TEAM_LEAD_NAME.to_string(),
-                        self.app_event_tx.clone(),
-                    ));
+                    self.lead_inbox_poller =
+                        Some(super::lead_inbox_poller::start_lead_inbox_poller(
+                            self.config.codex_home.to_path_buf(),
+                            team,
+                            crate::legacy_core::team_store::TEAM_LEAD_NAME.to_string(),
+                            self.app_event_tx.clone(),
+                        ));
                 }
             }
             AppEvent::TeamBecameInactive => {
                 if let Some(poller) = self.lead_inbox_poller.take() {
                     poller.stop();
                 }
+                self.team_roster_navigation.clear();
+                self.sync_active_agent_label();
             }
             AppEvent::OpenTeamsDialog => {
                 // Construct the dialog for the active lead team and prime its

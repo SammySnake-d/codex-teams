@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use serde_json::Value;
 
@@ -17,10 +18,6 @@ pub(super) struct TeamUiState {
     pending_calls: HashMap<String, PendingTeamCall>,
     active_team: Option<TeamUiSummary>,
     routed_message_count: usize,
-    /// Stable per-teammate color assignment (Phase 6 §B.2). Mirrors Claude's
-    /// `teammateColorAssignments`: round-robin in first-seen order, cleared on
-    /// `TeamStop`.
-    colors: crate::chatwidget::team_colors::TeammateColors,
 }
 
 #[derive(Clone, Debug)]
@@ -53,14 +50,8 @@ pub(super) struct TeamMemberUiSummary {
     id: String,
     name: String,
     agent_thread_id: String,
-    status: String,
-    agent_status: String,
-    /// Assigned (or persisted) teammate color name; one of `team_colors::AGENT_COLORS`.
-    color: Option<&'static str>,
-    /// Permission mode if surfaced by the team tool output; `None` → `default`.
-    mode: Option<String>,
-    /// Mirrors `hidden_pane_ids`; surfaced by the team tool output when present.
-    is_hidden: bool,
+    /// Agent/profile label for thread navigation, for example `researcher`.
+    agent_role: Option<String>,
 }
 
 #[derive(Debug)]
@@ -71,6 +62,9 @@ pub(super) enum TeamUiEvent {
     MemberSpawned {
         name: String,
         agent_thread_id: String,
+        agent_role: Option<String>,
+        tmux_pane_id: String,
+        backend_type: Option<String>,
     },
     MessageSent,
     TeamStopped {
@@ -80,52 +74,19 @@ pub(super) enum TeamUiEvent {
 }
 
 impl TeamUiState {
-    pub(super) fn footer_label(&self) -> Option<String> {
-        let team = self.active_team.as_ref()?;
-        if team.status == "stopped" {
-            return Some(format!("Teams: {} stopped", team.name));
-        }
-
-        let teammate_count = team.members.len();
-        let mut member_labels = team
-            .members
-            .iter()
-            .take(3)
-            .map(|member| format!("@{} {}", member.name, member.status_label()))
-            .collect::<Vec<_>>();
-        if team.members.len() > member_labels.len() {
-            member_labels.push(format!(
-                "+{} more",
-                team.members.len() - member_labels.len()
-            ));
-        }
-
-        let teammate_word = if teammate_count == 1 {
-            "1 teammate".to_string()
-        } else {
-            format!("{teammate_count} teammates")
-        };
-
-        let mut parts = vec![format!("Teams: {}", team.name)];
-        if !member_labels.is_empty() {
-            parts.push(member_labels.join(", "));
-        }
-        parts.push(teammate_word);
-        parts.push("ctrl+t teammates".to_string());
-        Some(parts.join(" · "))
-    }
-
     pub(super) fn observe_response_item(&mut self, item: &ResponseItem) -> Option<TeamUiEvent> {
         match item {
             ResponseItem::FunctionCall {
                 name,
+                namespace,
                 arguments,
                 call_id,
                 ..
             } => {
-                let Some(tool) = TeamToolKind::from_name(name) else {
+                if namespace.is_some() {
                     return None;
-                };
+                }
+                let tool = TeamToolKind::from_name(name)?;
                 let team_id = parse_argument_string(arguments, "team_id");
                 self.pending_calls
                     .insert(call_id.clone(), PendingTeamCall { tool, team_id });
@@ -141,30 +102,6 @@ impl TeamUiState {
         }
     }
 
-    /// Snapshot the live roster as composer-facing `@`-mention candidates.
-    ///
-    /// Stopped teams and stopped members are excluded so the popup never offers a
-    /// teammate that can no longer receive messages. The mention token is derived
-    /// from the member name, falling back to the member id when the name has no
-    /// characters valid in a mention token.
-    /// Snapshot the live roster as composer-facing `@`-mention candidates.
-    ///
-    /// Stopped teams and stopped members are excluded so the popup never offers a
-    /// teammate that can no longer receive messages. The mention token is derived
-    /// from the member name, falling back to the member id when the name has no
-    /// characters valid in a mention token.
-    /// Snapshot the live roster as composer-facing `@`-mention candidates.
-    ///
-    /// Stopped teams and stopped members are excluded so the popup never offers a
-    /// teammate that can no longer receive messages. The mention token is derived
-    /// from the member name, falling back to the member id when the name has no
-    /// characters valid in a mention token.
-    /// Snapshot the live roster as composer-facing `@`-mention candidates.
-    ///
-    /// Stopped teams and stopped members are excluded so the popup never offers a
-    /// teammate that can no longer receive messages. The mention token is derived
-    /// from the member name, falling back to the member id when the name has no
-    /// characters valid in a mention token.
     fn apply_team_tool_output(
         &mut self,
         pending: PendingTeamCall,
@@ -175,37 +112,47 @@ impl TeamUiState {
                 let team = parse_team(value.get("team")?)?;
                 let name = team.name.clone();
                 self.active_team = Some(team);
-                self.assign_member_colors();
                 Some(TeamUiEvent::TeamCreated { name })
             }
             TeamToolKind::ListTeams => {
                 let teams = value.get("teams")?.as_array()?;
-                let team = teams.iter().filter_map(parse_team).last()?;
+                let team = teams.iter().filter_map(parse_team).next_back()?;
                 self.active_team = Some(team);
-                self.assign_member_colors();
                 Some(TeamUiEvent::Updated)
             }
             TeamToolKind::TeamStatus => {
                 let team = parse_team(value.get("snapshot")?.get("team")?)?;
                 self.active_team = Some(team);
-                self.assign_member_colors();
                 Some(TeamUiEvent::Updated)
             }
             TeamToolKind::TeamSpawnMember => {
+                let tmux_pane_id = value
+                    .get("tmux_pane_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|pane_id| !pane_id.is_empty())
+                    .map(ToString::to_string)?;
+                let backend_type = value
+                    .get("backend_type")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|backend_type| !backend_type.is_empty())
+                    .map(ToString::to_string);
                 let member = parse_member(value.get("member")?)?;
                 let name = member.name.clone();
                 let agent_thread_id = member.agent_thread_id.clone();
-                if let Some(team) = self
+                let agent_role = member.agent_role.clone();
+                let team = self
                     .active_team
                     .as_mut()
-                    .filter(|team| pending.team_id.as_deref() == Some(team.id.as_str()))
-                {
-                    upsert_member(&mut team.members, member);
-                }
-                self.assign_member_colors();
+                    .filter(|team| pending.team_id.as_deref() == Some(team.id.as_str()))?;
+                upsert_member(&mut team.members, member);
                 Some(TeamUiEvent::MemberSpawned {
                     name,
                     agent_thread_id,
+                    agent_role,
+                    tmux_pane_id,
+                    backend_type,
                 })
             }
             TeamToolKind::TeamSend => {
@@ -219,29 +166,10 @@ impl TeamUiState {
                 let name = team.name.clone();
                 self.active_team = Some(team);
                 if stopped {
-                    // Mirror Claude's `clearTeammateColors` on team teardown so a
-                    // fresh team restarts the round-robin palette from the top.
-                    self.colors.clear();
                     Some(TeamUiEvent::TeamStopped { name })
                 } else {
-                    self.assign_member_colors();
                     Some(TeamUiEvent::Updated)
                 }
-            }
-        }
-    }
-
-    /// Fill a stable color for every member of the active team that does not
-    /// already carry a persisted one (Phase 6 §B.2). Colors are assigned by
-    /// member id in first-seen order so they match the on-disk
-    /// `TeamFileMember.color` the lead persists.
-    fn assign_member_colors(&mut self) {
-        let Some(team) = self.active_team.as_mut() else {
-            return;
-        };
-        for member in &mut team.members {
-            if member.color.is_none() {
-                member.color = Some(self.colors.assign(&member.id));
             }
         }
     }
@@ -252,51 +180,6 @@ impl TeamUiState {
             .as_ref()
             .filter(|team| team.status != "stopped")
             .map(|team| team.name.clone())
-    }
-
-    /// Styled footer roster (Phase 6 §B.2). Each pill = mode symbol (in its mode
-    /// color) + `@name` (in the teammate color) + a status suffix, joined by
-    /// ` · `. Returns `None` when there is no active team (the plain
-    /// [`Self::footer_label`] path still drives the textual footer).
-    pub(super) fn footer_spans(&self) -> Option<Vec<ratatui::text::Span<'static>>> {
-        use ratatui::style::Style;
-        use ratatui::text::Span;
-
-        let team = self.active_team.as_ref()?;
-        if team.status == "stopped" || team.members.is_empty() {
-            return None;
-        }
-
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        for (index, member) in team.members.iter().take(3).enumerate() {
-            if index > 0 {
-                spans.push(Span::raw(" · "));
-            }
-            let mode = member.mode.as_deref().unwrap_or("default");
-            let (mode_symbol, mode_color) =
-                crate::chatwidget::team_colors::mode_symbol_and_color(mode);
-            if !mode_symbol.is_empty() {
-                spans.push(Span::styled(
-                    format!("{mode_symbol} "),
-                    Style::default().fg(mode_color),
-                ));
-            }
-            if member.is_hidden {
-                spans.push(Span::raw("[hidden] "));
-            }
-            let name_color = crate::chatwidget::team_colors::agent_color_to_tui(
-                member.color.unwrap_or(member.name.as_str()),
-            );
-            spans.push(Span::styled(
-                format!("@{}", member.name),
-                Style::default().fg(name_color),
-            ));
-            spans.push(Span::raw(format!(" {}", member.status_label())));
-        }
-        if team.members.len() > 3 {
-            spans.push(Span::raw(format!(" · +{} more", team.members.len() - 3)));
-        }
-        Some(spans)
     }
 }
 
@@ -321,9 +204,9 @@ impl ChatWidget {
         let Some(event) = self.team_ui.observe_response_item(&item) else {
             return;
         };
-        // Footer pills must reflect the latest roster on both live events and
-        // replay (e.g. after `codex resume` rebuilds team state).
-        self.sync_footer_context_label();
+        // The observer updates active team metadata and emits live side effects.
+        // Footer roster pills are owned by App-level Teams navigation state so
+        // generic subagents and raw tool summaries cannot become roster items.
         // Transcript notices and external panes are live-only side effects: replaying
         // historical tool output must not re-announce teams or re-open teammate panes.
         if from_replay {
@@ -344,25 +227,39 @@ impl ChatWidget {
             TeamUiEvent::MemberSpawned {
                 name,
                 agent_thread_id,
+                agent_role,
+                tmux_pane_id,
+                backend_type,
             } => {
                 self.add_info_message(
                     format!("Teammate @{name} started"),
                     Some(format!(
-                        "Agent thread {agent_thread_id}; use ctrl+t to switch teammates or @{name} to message them."
+                        "Agent thread {agent_thread_id}; use Shift+Up/Down then Enter to switch, Esc to return to lead, or @{name} to message them."
                     )),
                 );
-                self.app_event_tx.send(AppEvent::OpenTeammatePane {
-                    member_name: name,
-                    agent_thread_id,
-                });
+                match ThreadId::from_string(&agent_thread_id) {
+                    Ok(agent_thread_id) => {
+                        self.app_event_tx.send(AppEvent::RegisterTeammateThread {
+                            member_name: name,
+                            agent_thread_id,
+                            agent_role,
+                            tmux_pane_id: Some(tmux_pane_id),
+                            backend_type,
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            agent_thread_id,
+                            error = %err,
+                            "ignoring teammate with invalid thread id during agent navigation registration"
+                        );
+                    }
+                }
             }
             TeamUiEvent::MessageSent => {
                 self.add_info_message(
                     "Teams message routed".to_string(),
-                    Some(
-                        "The teammate footer is updated from the live team tool output."
-                            .to_string(),
-                    ),
+                    Some("The Teams roster is updated from teammate spawn events.".to_string()),
                 );
             }
             TeamUiEvent::TeamStopped { name } => {
@@ -373,13 +270,23 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn set_team_footer_context(
+        &mut self,
+        team_label: Option<String>,
+        team_spans: Option<Vec<ratatui::text::Span<'static>>>,
+    ) {
+        self.team_footer_label = team_label;
+        self.team_footer_spans = team_spans;
+        self.sync_footer_context_label();
+    }
+
     pub(super) fn sync_footer_context_label(&mut self) {
         let mut labels = Vec::new();
         if let Some(active_agent_label) = self.active_agent_label.as_ref() {
             labels.push(active_agent_label.clone());
         }
-        if let Some(team_label) = self.team_ui.footer_label() {
-            labels.push(team_label);
+        if let Some(team_label) = self.team_footer_label.as_ref() {
+            labels.push(team_label.clone());
         }
         let combined = (!labels.is_empty()).then(|| labels.join(" · "));
         self.bottom_pane.set_active_agent_label(combined);
@@ -387,23 +294,7 @@ impl ChatWidget {
         // the plain `footer_label` String path above is left untouched so the
         // textual footer keeps working when spans are unavailable.
         self.bottom_pane
-            .set_active_team_pills(self.team_ui.footer_spans());
-    }
-}
-
-impl TeamMemberUiSummary {
-    pub(super) fn status_label(&self) -> &'static str {
-        if self.status == "stopped" {
-            return "stopped";
-        }
-        match self.agent_status.as_str() {
-            "pending_init" => "starting",
-            "running" => "running",
-            "interrupted" | "completed" => "idle",
-            "shutdown" | "not_found" => "stopped",
-            "errored" => "error",
-            _ => "active",
-        }
+            .set_active_team_pills(self.team_footer_spans.clone());
     }
 }
 
@@ -446,49 +337,14 @@ fn parse_member(value: &Value) -> Option<TeamMemberUiSummary> {
         id: value.get("id")?.as_str()?.to_string(),
         name: value.get("name")?.as_str()?.to_string(),
         agent_thread_id: value.get("agent_thread_id")?.as_str()?.to_string(),
-        status: value
-            .get("status")
+        agent_role: value
+            .get("profile")
+            .or_else(|| value.get("agent_type"))
             .and_then(Value::as_str)
-            .unwrap_or("active")
-            .to_string(),
-        agent_status: normalized_agent_status(value.get("agent_status")),
-        // Persisted color name (TeamFileMember.color) when the tool output carries
-        // it; otherwise left None so the round-robin assigner fills it in.
-        color: value
-            .get("color")
-            .and_then(Value::as_str)
-            .and_then(canonical_color_name),
-        mode: value
-            .get("mode")
-            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|role| !role.is_empty())
             .map(ToString::to_string),
-        is_hidden: value
-            .get("is_hidden")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
     })
-}
-
-/// Map a free-form color string back to one of the static `AGENT_COLORS` names so
-/// `TeamMemberUiSummary.color` can stay `&'static str` (matching the assigner).
-/// Unknown names are dropped, falling through to the round-robin assignment.
-fn canonical_color_name(name: &str) -> Option<&'static str> {
-    crate::chatwidget::team_colors::AGENT_COLORS
-        .iter()
-        .copied()
-        .find(|candidate| *candidate == name)
-}
-
-fn normalized_agent_status(value: Option<&Value>) -> String {
-    match value {
-        Some(Value::String(status)) => status.clone(),
-        Some(Value::Object(map)) => map
-            .keys()
-            .next()
-            .cloned()
-            .unwrap_or_else(|| "active".to_string()),
-        _ => "active".to_string(),
-    }
 }
 
 fn parse_argument_string(arguments: &str, key: &str) -> Option<String> {
@@ -530,133 +386,91 @@ mod tests {
     }
 
     #[test]
-    fn footer_tracks_team_tool_output() {
+    fn active_team_metadata_tracks_team_tool_output() {
         let mut state = TeamUiState::default();
-        assert!(state.footer_label().is_none());
+        assert_eq!(state.active_team_name(), None);
 
-        // create_team makes the team visible in the footer even before any teammates.
         state.observe_response_item(&call("create_team", "c1", "{}"));
         let created = state.observe_response_item(&output(
             "c1",
             r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
         ));
         assert!(matches!(created, Some(TeamUiEvent::TeamCreated { .. })));
-        assert!(
-            state
-                .footer_label()
-                .is_some_and(|label| label.contains("Teams: Rocket"))
-        );
+        assert_eq!(state.active_team_name(), Some("Rocket".to_string()));
 
-        // team_spawn_member adds the teammate to the footer.
-        state.observe_response_item(&call(
-            "team_spawn_member",
-            "c2",
-            r#"{"team_id":"team-1"}"#,
-        ));
+        state.observe_response_item(&call("team_spawn_member", "c2", r#"{"team_id":"team-1"}"#));
         let spawned = state.observe_response_item(&output(
             "c2",
-            r#"{"member":{"id":"m1","name":"alice","agent_thread_id":"thr-1","status":"active","agent_status":"running"}}"#,
+            r#"{"member":{"id":"m1","name":"alice","agent_thread_id":"thr-1","profile":"researcher","status":"active","agent_status":"running"},"tmux_pane_id":"%9","backend_type":"tmux"}"#,
         ));
         assert!(matches!(
             spawned,
-            Some(TeamUiEvent::MemberSpawned { .. })
-        ));
-
-        let footer = state.footer_label().expect("footer label after spawn");
-        assert!(footer.contains("Teams: Rocket"), "footer was {footer}");
-        assert!(footer.contains("@alice running"), "footer was {footer}");
-        assert!(footer.contains("1 teammate"), "footer was {footer}");
-        assert!(footer.contains("ctrl+t teammates"), "footer was {footer}");
-
-        // Stopping the team shows a stopped footer.
-        state.observe_response_item(&call("team_stop", "c3", r#"{"team_id":"team-1"}"#));
-        state.observe_response_item(&output(
-            "c3",
-            r#"{"snapshot":{"team":{"id":"team-1","name":"Rocket","status":"stopped","members":[]}}}"#,
+            Some(TeamUiEvent::MemberSpawned {
+                name,
+                agent_thread_id,
+                agent_role,
+                tmux_pane_id,
+                backend_type,
+            }) if name == "alice"
+                && agent_thread_id == "thr-1"
+                && agent_role.as_deref() == Some("researcher")
+                && tmux_pane_id == "%9"
+                && backend_type.as_deref() == Some("tmux")
         ));
         assert_eq!(
-            state.footer_label().as_deref(),
-            Some("Teams: Rocket stopped")
+            state.active_team.as_ref().map(|team| team.members.len()),
+            Some(1)
         );
-    }
+        assert_eq!(state.active_team_name(), Some("Rocket".to_string()));
 
-    #[test]
-    fn footer_spans_carry_color_after_member_spawned() {
-        use ratatui::style::Color;
-
-        let mut state = TeamUiState::default();
-        // No team yet → no colored pills.
-        assert!(state.footer_spans().is_none());
-
-        state.observe_response_item(&call("create_team", "c1", "{}"));
-        state.observe_response_item(&output(
-            "c1",
-            r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
-        ));
-        // A team with no members still renders no pills (only the plain label).
-        assert!(state.footer_spans().is_none());
-
-        state.observe_response_item(&call(
-            "team_spawn_member",
-            "c2",
-            r#"{"team_id":"team-1"}"#,
-        ));
-        state.observe_response_item(&output(
-            "c2",
-            r#"{"member":{"id":"m1","name":"alice","agent_thread_id":"thr-1","status":"active","agent_status":"running"}}"#,
-        ));
-
-        let spans = state.footer_spans().expect("colored pills after spawn");
-        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
-        assert!(text.contains("@alice"), "spans were {text}");
-        // The first assigned color is `red` (AGENT_COLORS[0]) → ratatui Red, and
-        // it must actually be applied to the @name span (the whole point of the
-        // colored-pill path).
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.content.contains("@alice") && span.style.fg == Some(Color::Red)),
-            "expected @alice pill in red, spans were {spans:?}"
-        );
-
-        // Stopping the team clears the colored pills and resets the palette.
         state.observe_response_item(&call("team_stop", "c3", r#"{"team_id":"team-1"}"#));
         state.observe_response_item(&output(
             "c3",
             r#"{"snapshot":{"team":{"id":"team-1","name":"Rocket","status":"stopped","members":[]}}}"#,
         ));
-        assert!(state.footer_spans().is_none());
+        assert_eq!(state.active_team_name(), None);
     }
 
     #[test]
-    fn footer_spans_use_persisted_color_when_present() {
-        use ratatui::style::Color;
-
+    fn namespaced_team_shaped_tool_output_is_ignored() {
         let mut state = TeamUiState::default();
-        state.observe_response_item(&call("create_team", "c1", "{}"));
-        state.observe_response_item(&output(
+
+        state.observe_response_item(&ResponseItem::FunctionCall {
+            id: None,
+            name: "create_team".to_string(),
+            namespace: Some("mcp".to_string()),
+            arguments: "{}".to_string(),
+            call_id: "c1".to_string(),
+        });
+        let created = state.observe_response_item(&output(
             "c1",
             r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
         ));
-        state.observe_response_item(&call(
-            "team_spawn_member",
-            "c2",
-            r#"{"team_id":"team-1"}"#,
+
+        assert!(created.is_none());
+        assert_eq!(state.active_team_name(), None);
+    }
+
+    #[test]
+    fn team_spawn_member_without_pane_metadata_is_ignored() {
+        let mut state = TeamUiState::default();
+
+        state.observe_response_item(&call("create_team", "c1", "{}"));
+        let _ = state.observe_response_item(&output(
+            "c1",
+            r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
         ));
-        // The tool output carries a persisted color ("cyan"); it must win over
-        // the round-robin assignment.
-        state.observe_response_item(&output(
+        state.observe_response_item(&call("team_spawn_member", "c2", r#"{"team_id":"team-1"}"#));
+        let spawned = state.observe_response_item(&output(
             "c2",
-            r#"{"member":{"id":"m1","name":"alice","agent_thread_id":"thr-1","status":"active","agent_status":"running","color":"cyan"}}"#,
+            r#"{"member":{"id":"m1","name":"alice","agent_thread_id":"thr-1","profile":"researcher","status":"active","agent_status":"running"}}"#,
         ));
 
-        let spans = state.footer_spans().expect("colored pills after spawn");
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.content.contains("@alice") && span.style.fg == Some(Color::Cyan)),
-            "expected @alice pill in cyan (persisted), spans were {spans:?}"
+        assert!(spawned.is_none());
+        assert_eq!(
+            state.active_team.as_ref().map(|team| team.members.len()),
+            Some(0)
         );
+        assert_eq!(state.active_team_name(), Some("Rocket".to_string()));
     }
 }
-

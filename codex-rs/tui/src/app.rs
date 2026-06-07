@@ -31,6 +31,7 @@ use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ExternalEditorState;
 use crate::chatwidget::ReplayKind;
 use crate::chatwidget::ThreadInputState;
+use crate::collaboration_modes;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::split_command_string;
@@ -215,6 +216,7 @@ mod resize_reflow;
 mod session_lifecycle;
 mod side;
 mod startup_prompts;
+mod team_roster_navigation;
 mod teammate_panes;
 mod thread_events;
 mod thread_goal_actions;
@@ -232,6 +234,9 @@ use self::side::SideParentStatus;
 use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
 use self::startup_prompts::*;
+use self::team_roster_navigation::SelectedTeamRosterTarget;
+use self::team_roster_navigation::TeamRosterDirection;
+use self::team_roster_navigation::TeamRosterNavigationState;
 use self::thread_events::*;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
@@ -544,6 +549,7 @@ pub(crate) struct App {
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
+    team_roster_navigation: TeamRosterNavigationState,
     side_threads: HashMap<ThreadId, SideThreadState>,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
@@ -562,6 +568,9 @@ pub(crate) struct App {
     pending_hook_enabled_writes: HashMap<String, Option<bool>>,
     /// Lead-side inbox poller (Phase 4b); `Some` while a team is active.
     lead_inbox_poller: Option<lead_inbox_poller::LeadInboxPoller>,
+    /// Teammate-side inbox poller; `Some` when this TUI was launched as a team
+    /// member process and is consuming its own mailbox.
+    teammate_inbox_poller: Option<lead_inbox_poller::TeammateInboxPoller>,
     /// Active Teams dialog overlay (Phase 6 §B.6); `Some` while open. Receives
     /// key events before the chat widget and renders on top of the composer.
     /// Boxed so the (already large) `App` struct does not grow on the stack.
@@ -732,6 +741,7 @@ impl App {
         is_first_run: bool,
         entered_trust_nux: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
+        plan_mode_required: bool,
         app_server_target: AppServerTarget,
         state_db: Option<StateDbHandle>,
         environment_manager: Arc<EnvironmentManager>,
@@ -974,6 +984,12 @@ impl App {
             }
         };
         chat_widget.remote_connection = remote_connection;
+        if plan_mode_required
+            && let Some(plan_mask) =
+                collaboration_modes::plan_mask(chat_widget.model_catalog().as_ref())
+        {
+            chat_widget.set_collaboration_mask(plan_mask);
+        }
         let thread_and_widget_ms = thread_and_widget_started_at.elapsed().as_millis();
         if let Some(message) = external_agent_config_migration_message {
             chat_widget.add_info_message(message, /*hint*/ None);
@@ -1030,6 +1046,7 @@ See the Codex keymap documentation for supported actions and examples."
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            team_roster_navigation: TeamRosterNavigationState::default(),
             side_threads: HashMap::new(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -1042,8 +1059,17 @@ See the Codex keymap documentation for supported actions and examples."
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
             lead_inbox_poller: None,
+            teammate_inbox_poller: None,
             teams_dialog: None,
         };
+        if let Some((team, agent_name)) = crate::legacy_core::teammate_identity_parts() {
+            app.teammate_inbox_poller = Some(lead_inbox_poller::start_teammate_inbox_poller(
+                app.config.codex_home.to_path_buf(),
+                team,
+                agent_name,
+                app.app_event_tx.clone(),
+            ));
+        }
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);
         }

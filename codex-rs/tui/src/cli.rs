@@ -54,6 +54,35 @@ pub struct Cli {
     #[clap(skip)]
     pub fork_show_all: bool,
 
+    // Internal teammate-mode identity, set by the top-level `codex teammate`
+    // wrapper when the lead spawns a teammate into a tmux/iTerm2 pane. When
+    // `team_name`+`agent_name` are present the TUI boots in teammate mode (reads
+    // its inbox, injects lead messages as turns in its OWN session). Not exposed
+    // as public flags on the base `codex` command.
+    #[clap(skip)]
+    pub team_name: Option<String>,
+
+    #[clap(skip)]
+    pub agent_id: Option<String>,
+
+    #[clap(skip)]
+    pub agent_name: Option<String>,
+
+    #[clap(skip)]
+    pub agent_color: Option<String>,
+
+    #[clap(skip)]
+    pub parent_session_id: Option<String>,
+
+    #[clap(skip)]
+    pub agent_type: Option<String>,
+
+    #[clap(skip)]
+    pub plan_mode_required: bool,
+
+    #[clap(skip)]
+    pub teammate_mode: Option<String>,
+
     #[clap(flatten)]
     pub shared: TuiSharedCliOptions,
 

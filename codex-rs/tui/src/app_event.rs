@@ -141,22 +141,39 @@ pub(crate) enum AppEvent {
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
 
-    /// Open a detached external pane (e.g. a tmux split) that tails a freshly
-    /// spawned teammate's rollout transcript, making the live teammate visible
-    /// beside the lead session. Best-effort and live-only: ignored when the TUI is
-    /// not running inside a supported multiplexer or when the rollout is not found.
-    OpenTeammatePane {
+    /// Register a spawned Teams teammate with the Teams-only footer roster.
+    ///
+    /// Pane-backed teammate processes stay out of the generic `/agent` picker
+    /// because their returned id is a Teams member handle, not necessarily the
+    /// real app-server thread id of the independently launched TUI. Missing pane
+    /// metadata is ignored by the app layer; native `spawn_agent` output must not
+    /// send this event.
+    RegisterTeammateThread {
         member_name: String,
-        agent_thread_id: String,
+        agent_thread_id: ThreadId,
+        agent_role: Option<String>,
+        tmux_pane_id: Option<String>,
+        backend_type: Option<String>,
     },
 
-    /// Lead inbox poll found teammate replies / idle notifications; inject them
-    /// as a new user turn on the active (lead) thread. `text` is the joined
+    /// Lead inbox poll found explicit teammate replies; inject them as this
+    /// process's own user turn. Idle lifecycle notifications are consumed by the
+    /// poller and do not reach this event. `text` is the joined
     /// `<teammate-message …>` payload.
-    InjectTeammateReplies { text: String },
+    InjectTeammateReplies {
+        text: String,
+    },
+
+    /// Teammate-mode inbox poll found a lead/peer/shutdown message for this
+    /// teammate process; inject it as this TUI's own user turn.
+    InjectTeammateInboxMessage {
+        text: String,
+    },
 
     /// A Codex team became active (created); start the lead inbox poller.
-    TeamBecameActive { team: String },
+    TeamBecameActive {
+        team: String,
+    },
 
     /// The active Codex team stopped; cancel the lead inbox poller.
     TeamBecameInactive,

@@ -116,6 +116,16 @@ impl ChatWidget {
                     );
                     break;
                 }
+                QueuedInputAction::PlainNoShell => {
+                    submitted_follow_up = self
+                        .submit_user_message_with_history_and_shell_escape_policy(
+                            queued_message.into_user_message(),
+                            history_record,
+                            ShellEscapePolicy::Disallow,
+                        )
+                        .0;
+                    break;
+                }
                 QueuedInputAction::ParseSlash => {
                     let drain = self.submit_queued_slash_prompt(queued_message.into_user_message());
                     if drain == QueueDrain::Stop {

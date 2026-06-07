@@ -292,7 +292,9 @@ impl TeamsDialog {
 
     fn detail_lines(&self, team: &str, member_name: &str) -> Vec<Line<'static>> {
         let Some(row) = self.teammates.iter().find(|row| row.name == member_name) else {
-            return vec![Line::from(format!("@{member_name} is no longer in {team}.").dim_span())];
+            return vec![Line::from(
+                format!("@{member_name} is no longer in {team}.").dim_span(),
+            )];
         };
 
         let mut lines = vec![
@@ -391,9 +393,8 @@ impl TeamsDialog {
                 base_style.fg(mode_color),
             ));
         }
-        let name_color = super::team_colors::agent_color_to_tui(
-            row.color.as_deref().unwrap_or(&row.name),
-        );
+        let name_color =
+            super::team_colors::agent_color_to_tui(row.color.as_deref().unwrap_or(&row.name));
         spans.push(Span::styled(
             format!("@{}", row.name),
             base_style.fg(name_color),
@@ -403,7 +404,10 @@ impl TeamsDialog {
 
 fn detail_field(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label}: "), Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(
+            format!("{label}: "),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
         Span::raw(value.to_string()),
     ])
 }
@@ -574,7 +578,10 @@ mod tests {
 
         // Esc from detail pops back to the list (consumed, no action).
         assert!(dialog.handle_key(press(KeyCode::Esc)).is_none());
-        assert!(matches!(dialog.level, TeamsDialogLevel::TeammateList { .. }));
+        assert!(matches!(
+            dialog.level,
+            TeamsDialogLevel::TeammateList { .. }
+        ));
 
         // Esc / q from the list closes.
         assert!(matches!(
@@ -593,7 +600,10 @@ mod tests {
 
         let text = rendered_text(&dialog);
         assert!(text.contains("[idle]"), "missing [idle] pill in:\n{text}");
-        assert!(text.contains("[hidden]"), "missing [hidden] pill in:\n{text}");
+        assert!(
+            text.contains("[hidden]"),
+            "missing [hidden] pill in:\n{text}"
+        );
         assert!(text.contains("@alice"), "missing @alice in:\n{text}");
         assert!(text.contains("@bob"), "missing @bob in:\n{text}");
     }

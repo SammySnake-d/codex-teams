@@ -51,6 +51,7 @@ pub(super) async fn make_test_app() -> App {
         thread_event_channels: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
+        team_roster_navigation: TeamRosterNavigationState::default(),
         side_threads: HashMap::new(),
         active_thread_id: None,
         active_thread_rx: None,
@@ -63,6 +64,7 @@ pub(super) async fn make_test_app() -> App {
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
         lead_inbox_poller: None,
+        teammate_inbox_poller: None,
         teams_dialog: None,
     }
 }

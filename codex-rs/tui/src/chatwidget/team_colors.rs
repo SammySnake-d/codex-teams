@@ -1,10 +1,10 @@
 //! Port of Claude's agentColorManager.ts + teammateLayoutManager.ts color logic.
 //!
-//! Provides the round-robin teammate palette (`AGENT_COLORS`), stable per-id
-//! color assignment (`TeammateColors`, mirroring `assignTeammateColor`), the
-//! `AGENT_COLOR_TO_THEME_COLOR` → ratatui mapping (`agent_color_to_tui`), and
-//! the `PERMISSION_MODE_CONFIG` symbol/color table (`mode_symbol_and_color`).
+//! Provides the `AGENT_COLOR_TO_THEME_COLOR` → ratatui mapping
+//! (`agent_color_to_tui`) and the `PERMISSION_MODE_CONFIG` symbol/color table
+//! (`mode_symbol_and_color`) used by the Teams dialog.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
 use ratatui::style::Color;
@@ -13,17 +13,21 @@ use ratatui::style::Color;
 ///
 /// The order is load-bearing: it is the index used by `TeammateColors::assign`
 /// to hand out colors in first-seen order.
-pub(crate) const AGENT_COLORS: [&str; 8] =
-    ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
+#[cfg(test)]
+const AGENT_COLORS: [&str; 8] = [
+    "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
+];
 
 /// Deterministic per-team color assignment. Mirrors `assignTeammateColor`:
 /// stable per `teammate_id`, round-robin by first-seen order.
+#[cfg(test)]
 #[derive(Default)]
-pub(crate) struct TeammateColors {
+struct TeammateColors {
     assignments: HashMap<String, &'static str>,
     next_index: usize,
 }
 
+#[cfg(test)]
 impl TeammateColors {
     /// Assign (or return the existing) color for `teammate_id`.
     ///
@@ -57,8 +61,8 @@ impl TeammateColors {
     }
 }
 
-/// `AGENT_COLOR_TO_THEME_COLOR` → ratatui. Unknown names fall back to
-/// `Color::White`.
+/// `AGENT_COLOR_TO_THEME_COLOR` → ratatui. Codex TUI keeps this on ANSI colors so
+/// it renders consistently across terminal themes.
 pub(crate) fn agent_color_to_tui(name: &str) -> Color {
     match name {
         "red" => Color::Red,
@@ -66,8 +70,8 @@ pub(crate) fn agent_color_to_tui(name: &str) -> Color {
         "green" => Color::Green,
         "yellow" => Color::Yellow,
         "purple" => Color::Magenta,
-        "orange" => Color::Rgb(255, 165, 0),
-        "pink" => Color::Rgb(255, 105, 180),
+        "orange" => Color::Yellow,
+        "pink" => Color::Magenta,
         "cyan" => Color::Cyan,
         _ => Color::White,
     }
@@ -139,8 +143,8 @@ mod tests {
         assert_eq!(agent_color_to_tui("green"), Color::Green);
         assert_eq!(agent_color_to_tui("yellow"), Color::Yellow);
         assert_eq!(agent_color_to_tui("purple"), Color::Magenta);
-        assert_eq!(agent_color_to_tui("orange"), Color::Rgb(255, 165, 0));
-        assert_eq!(agent_color_to_tui("pink"), Color::Rgb(255, 105, 180));
+        assert_eq!(agent_color_to_tui("orange"), Color::Yellow);
+        assert_eq!(agent_color_to_tui("pink"), Color::Magenta);
         assert_eq!(agent_color_to_tui("cyan"), Color::Cyan);
         // Every palette name must map to something other than the White fallback.
         for name in AGENT_COLORS {

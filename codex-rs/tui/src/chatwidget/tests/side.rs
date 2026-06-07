@@ -248,6 +248,124 @@ async fn submit_user_message_as_plain_user_turn_does_not_run_shell_commands() {
 }
 
 #[tokio::test]
+async fn teammate_inbox_injection_does_not_run_shell_commands() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.inject_teammate_inbox_message("!echo hello".to_string());
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => assert_eq!(
+            items,
+            vec![UserInput::Text {
+                text: "!echo hello".to_string(),
+                text_elements: Vec::new(),
+            }]
+        ),
+        other => {
+            panic!("expected Op::UserTurn for teammate inbox shell-like input, got {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn lead_teammate_reply_submits_plain_user_turn() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.inject_teammate_reply(
+        "<teammate-message teammate_id=\"alice\">\nexplicit update\n</teammate-message>"
+            .to_string(),
+    );
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => assert_eq!(
+            items,
+            vec![UserInput::Text {
+                text:
+                    "<teammate-message teammate_id=\"alice\">\nexplicit update\n</teammate-message>"
+                        .to_string(),
+                text_elements: Vec::new(),
+            }]
+        ),
+        other => panic!("expected Op::UserTurn for teammate reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn queued_lead_teammate_reply_submits_after_running_turn() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    handle_turn_started(&mut chat, "turn-1");
+
+    chat.inject_teammate_reply(
+        "<teammate-message teammate_id=\"alice\">\nexplicit update\n</teammate-message>"
+            .to_string(),
+    );
+
+    assert_eq!(
+        chat.input_queue
+            .queued_user_messages
+            .front()
+            .unwrap()
+            .action,
+        QueuedInputAction::PlainNoShell
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    handle_turn_completed(&mut chat, "turn-1", None);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => assert_eq!(
+            items,
+            vec![UserInput::Text {
+                text:
+                    "<teammate-message teammate_id=\"alice\">\nexplicit update\n</teammate-message>"
+                        .to_string(),
+                text_elements: Vec::new(),
+            }]
+        ),
+        other => panic!("expected queued Op::UserTurn for teammate reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn queued_teammate_inbox_injection_does_not_run_shell_commands() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    handle_turn_started(&mut chat, "turn-1");
+
+    chat.inject_teammate_inbox_message("!echo hello".to_string());
+
+    assert_eq!(
+        chat.input_queue
+            .queued_user_messages
+            .front()
+            .unwrap()
+            .action,
+        QueuedInputAction::PlainNoShell
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    handle_turn_completed(&mut chat, "turn-1", None);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => assert_eq!(
+            items,
+            vec![UserInput::Text {
+                text: "!echo hello".to_string(),
+                text_elements: Vec::new(),
+            }]
+        ),
+        other => {
+            panic!(
+                "expected queued Op::UserTurn for teammate inbox shell-like input, got {other:?}"
+            )
+        }
+    }
+}
+
+#[tokio::test]
 async fn slash_side_without_args_starts_empty_side_conversation() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let parent_thread_id = ThreadId::new();

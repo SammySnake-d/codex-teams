@@ -8,6 +8,17 @@ use super::*;
 const SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE: &str =
     "Editing previous prompts is unavailable in side conversations.";
 
+#[derive(Debug, Eq, PartialEq)]
+enum TeamRosterKeyAction {
+    Redraw,
+    SwitchThread(ThreadId),
+    FocusPane {
+        pane_id: String,
+        backend_type: Option<String>,
+    },
+    Consumed,
+}
+
 impl App {
     pub(super) async fn launch_external_editor(&mut self, tui: &mut tui::Tui) {
         let editor_cmd = match external_editor::resolve_editor_command() {
@@ -103,6 +114,12 @@ impl App {
         // editing behavior for moving across words inside a draft.
         let allow_agent_word_motion_fallback = !self.enhanced_keys_supported
             && self.chat_widget.composer_text_with_pending().is_empty();
+        if self
+            .handle_team_roster_navigation_key(tui, app_server, key_event)
+            .await
+        {
+            return;
+        }
         if self.overlay.is_none()
             && self.chat_widget.no_modal_or_popup_active()
             // Alt+Left/Right are also natural word-motion keys in the composer. Keep agent
@@ -256,6 +273,86 @@ impl App {
         };
     }
 
+    async fn handle_team_roster_navigation_key(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        key_event: KeyEvent,
+    ) -> bool {
+        if self.overlay.is_some()
+            || !self.chat_widget.no_modal_or_popup_active()
+            || !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        {
+            return false;
+        }
+
+        let should_handle_vim_insert_escape = matches!(key_event.code, KeyCode::Esc)
+            && self.chat_widget.should_handle_vim_insert_escape(key_event);
+        if let Some(action) = apply_team_roster_navigation_key(
+            &mut self.team_roster_navigation,
+            key_event,
+            self.primary_thread_id,
+            should_handle_vim_insert_escape,
+        ) {
+            match action {
+                TeamRosterKeyAction::Redraw => {
+                    self.sync_active_agent_label();
+                }
+                TeamRosterKeyAction::SwitchThread(thread_id) => {
+                    if self.current_displayed_thread_id() != Some(thread_id) {
+                        let _ = self
+                            .select_agent_thread_and_discard_side(tui, app_server, thread_id)
+                            .await;
+                    } else {
+                        self.sync_active_agent_label();
+                    }
+                }
+                TeamRosterKeyAction::FocusPane {
+                    pane_id,
+                    backend_type,
+                } => {
+                    self.focus_teammate_pane(&pane_id, backend_type.as_deref());
+                    self.sync_active_agent_label();
+                }
+                TeamRosterKeyAction::Consumed => {
+                    return true;
+                }
+            }
+            tui.frame_requester().schedule_frame();
+            return true;
+        }
+
+        if matches!(key_event.code, KeyCode::Esc) && !should_handle_vim_insert_escape {
+            let current_thread_id = self.current_displayed_thread_id();
+            if !self
+                .team_roster_navigation
+                .is_teammate_thread(current_thread_id)
+            {
+                return false;
+            }
+            let Some(current_thread_id) = current_thread_id else {
+                return false;
+            };
+            if self
+                .active_turn_id_for_thread(current_thread_id)
+                .await
+                .is_some()
+            {
+                return false;
+            }
+            let Some(primary_thread_id) = self.primary_thread_id else {
+                return false;
+            };
+            let _ = self
+                .select_agent_thread_and_discard_side(tui, app_server, primary_thread_id)
+                .await;
+            tui.frame_requester().schedule_frame();
+            return true;
+        }
+
+        false
+    }
+
     pub(super) fn should_handle_backtrack_esc(&self, key_event: KeyEvent) -> bool {
         !self.chat_widget.side_conversation_active()
             && self.chat_widget.is_normal_backtrack_mode()
@@ -285,9 +382,102 @@ impl App {
     }
 }
 
+fn apply_team_roster_navigation_key(
+    navigation: &mut TeamRosterNavigationState,
+    key_event: KeyEvent,
+    primary_thread_id: Option<ThreadId>,
+    should_handle_vim_insert_escape: bool,
+) -> Option<TeamRosterKeyAction> {
+    if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return None;
+    }
+
+    let is_shift = key_event.modifiers.contains(KeyModifiers::SHIFT);
+    match key_event.code {
+        KeyCode::Up if is_shift && navigation.step_selection(TeamRosterDirection::Previous) => {
+            Some(TeamRosterKeyAction::Redraw)
+        }
+        KeyCode::Down if is_shift && navigation.step_selection(TeamRosterDirection::Next) => {
+            Some(TeamRosterKeyAction::Redraw)
+        }
+        KeyCode::Enter => {
+            let target = navigation.selected_target(primary_thread_id)?;
+            navigation.clear_selection();
+            Some(match target {
+                SelectedTeamRosterTarget::Thread(thread_id) => {
+                    TeamRosterKeyAction::SwitchThread(thread_id)
+                }
+                SelectedTeamRosterTarget::Pane {
+                    pane_id,
+                    backend_type,
+                } => TeamRosterKeyAction::FocusPane {
+                    pane_id,
+                    backend_type,
+                },
+                SelectedTeamRosterTarget::Hide => {
+                    navigation.collapse_roster();
+                    TeamRosterKeyAction::Redraw
+                }
+            })
+        }
+        KeyCode::Char('f') if navigation.selected_footer_index().is_some() => {
+            let target = navigation.selected_target(primary_thread_id)?;
+            Some(match target {
+                SelectedTeamRosterTarget::Thread(thread_id)
+                    if Some(thread_id) != primary_thread_id =>
+                {
+                    navigation.clear_selection();
+                    TeamRosterKeyAction::SwitchThread(thread_id)
+                }
+                SelectedTeamRosterTarget::Pane {
+                    pane_id,
+                    backend_type,
+                } => {
+                    navigation.clear_selection();
+                    TeamRosterKeyAction::FocusPane {
+                        pane_id,
+                        backend_type,
+                    }
+                }
+                SelectedTeamRosterTarget::Thread(_) | SelectedTeamRosterTarget::Hide => {
+                    TeamRosterKeyAction::Consumed
+                }
+            })
+        }
+        KeyCode::Esc => {
+            if should_handle_vim_insert_escape {
+                return None;
+            }
+            if navigation.selected_footer_index().is_some() {
+                navigation.clear_selection();
+                return Some(TeamRosterKeyAction::Redraw);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::make_test_app;
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn thread_id(suffix: u128) -> ThreadId {
+        ThreadId::from_string(&format!("00000000-0000-0000-0000-{suffix:012}"))
+            .expect("valid thread id")
+    }
+
+    fn roster_with_two_members() -> (TeamRosterNavigationState, ThreadId, ThreadId, ThreadId) {
+        let mut navigation = TeamRosterNavigationState::default();
+        let main_thread_id = thread_id(1);
+        let bob_thread_id = thread_id(2);
+        let alice_thread_id = thread_id(3);
+        navigation.register_member(bob_thread_id, "bob".to_string(), None, None);
+        navigation.register_member(alice_thread_id, "alice".to_string(), None, None);
+        (navigation, main_thread_id, alice_thread_id, bob_thread_id)
+    }
 
     #[tokio::test]
     async fn app_keymap_shortcuts_are_disabled_while_keymap_view_is_active() {
@@ -298,5 +488,136 @@ mod tests {
         app.chat_widget.open_keymap_debug(&keymap);
 
         assert!(!app.app_keymap_shortcuts_available());
+    }
+
+    #[test]
+    fn team_roster_shift_down_selects_main_footer_target() {
+        let (mut navigation, main_thread_id, _, _) = roster_with_two_members();
+
+        let action = apply_team_roster_navigation_key(
+            &mut navigation,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+            Some(main_thread_id),
+            /*should_handle_vim_insert_escape*/ false,
+        );
+
+        assert_eq!(action, Some(TeamRosterKeyAction::Redraw));
+        assert_eq!(navigation.selected_footer_index(), Some(0));
+        assert_eq!(
+            navigation.selected_target(Some(main_thread_id)),
+            Some(SelectedTeamRosterTarget::Thread(main_thread_id))
+        );
+    }
+
+    #[test]
+    fn team_roster_shift_up_wraps_from_main_to_hide() {
+        let (mut navigation, main_thread_id, _, _) = roster_with_two_members();
+
+        assert_eq!(
+            apply_team_roster_navigation_key(
+                &mut navigation,
+                KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+                Some(main_thread_id),
+                /*should_handle_vim_insert_escape*/ false,
+            ),
+            Some(TeamRosterKeyAction::Redraw)
+        );
+        assert_eq!(navigation.selected_footer_index(), Some(0));
+
+        assert_eq!(
+            apply_team_roster_navigation_key(
+                &mut navigation,
+                KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+                Some(main_thread_id),
+                /*should_handle_vim_insert_escape*/ false,
+            ),
+            Some(TeamRosterKeyAction::Redraw)
+        );
+        assert_eq!(
+            navigation.selected_target(Some(main_thread_id)),
+            Some(SelectedTeamRosterTarget::Hide)
+        );
+    }
+
+    #[test]
+    fn team_roster_enter_on_hide_collapses_roster() {
+        let (mut navigation, main_thread_id, _, _) = roster_with_two_members();
+        for _ in 0..4 {
+            apply_team_roster_navigation_key(
+                &mut navigation,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+                Some(main_thread_id),
+                /*should_handle_vim_insert_escape*/ false,
+            );
+        }
+        assert_eq!(
+            navigation.selected_target(Some(main_thread_id)),
+            Some(SelectedTeamRosterTarget::Hide)
+        );
+
+        let action = apply_team_roster_navigation_key(
+            &mut navigation,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            Some(main_thread_id),
+            /*should_handle_vim_insert_escape*/ false,
+        );
+
+        assert_eq!(action, Some(TeamRosterKeyAction::Redraw));
+        assert_eq!(navigation.selected_footer_index(), None);
+        assert_eq!(
+            navigation.footer_spans(Some(main_thread_id), Some(main_thread_id)),
+            None
+        );
+    }
+
+    #[test]
+    fn team_roster_esc_clears_selection_before_backtrack() {
+        let (mut navigation, main_thread_id, _, _) = roster_with_two_members();
+        apply_team_roster_navigation_key(
+            &mut navigation,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+            Some(main_thread_id),
+            /*should_handle_vim_insert_escape*/ false,
+        );
+
+        let action = apply_team_roster_navigation_key(
+            &mut navigation,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            Some(main_thread_id),
+            /*should_handle_vim_insert_escape*/ false,
+        );
+
+        assert_eq!(action, Some(TeamRosterKeyAction::Redraw));
+        assert_eq!(navigation.selected_footer_index(), None);
+    }
+
+    #[test]
+    fn team_roster_enter_on_teammate_returns_thread_switch_action() {
+        let (mut navigation, main_thread_id, alice_thread_id, _) = roster_with_two_members();
+        apply_team_roster_navigation_key(
+            &mut navigation,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+            Some(main_thread_id),
+            /*should_handle_vim_insert_escape*/ false,
+        );
+        apply_team_roster_navigation_key(
+            &mut navigation,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+            Some(main_thread_id),
+            /*should_handle_vim_insert_escape*/ false,
+        );
+
+        let action = apply_team_roster_navigation_key(
+            &mut navigation,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            Some(main_thread_id),
+            /*should_handle_vim_insert_escape*/ false,
+        );
+
+        assert_eq!(
+            action,
+            Some(TeamRosterKeyAction::SwitchThread(alice_thread_id))
+        );
+        assert_eq!(navigation.selected_footer_index(), None);
     }
 }

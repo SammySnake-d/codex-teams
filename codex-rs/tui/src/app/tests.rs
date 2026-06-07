@@ -21,6 +21,8 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::UserHistoryCell;
 use crate::history_cell::new_session_info;
+use crate::legacy_core::team_store;
+use crate::legacy_core::team_store::TEAM_LEAD_NAME;
 use crate::multi_agents::AgentPickerThreadEntry;
 use assert_matches::assert_matches;
 
@@ -792,6 +794,36 @@ async fn replay_thread_snapshot_in_progress_turn_restores_running_state_without_
 }
 
 #[tokio::test]
+async fn replay_thread_snapshot_does_not_emit_teammate_idle() {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let codex_home = tempdir().expect("tempdir");
+    let team = "Rocket".to_string();
+    let agent_name = "alice".to_string();
+    app.teammate_inbox_poller = Some(lead_inbox_poller::start_teammate_inbox_poller(
+        codex_home.path().to_path_buf(),
+        team.clone(),
+        agent_name,
+        app.app_event_tx.clone(),
+    ));
+
+    app.replay_thread_snapshot(
+        ThreadEventSnapshot {
+            session: None,
+            turns: Vec::new(),
+            events: vec![ThreadBufferedEvent::Notification(
+                turn_completed_notification(ThreadId::new(), "turn-1", TurnStatus::Completed),
+            )],
+            input_state: None,
+        },
+        /*resume_restored_queue*/ false,
+    );
+
+    let messages =
+        team_store::read_mailbox(codex_home.path(), &team, TEAM_LEAD_NAME).expect("read lead");
+    assert!(messages.is_empty());
+}
+
+#[tokio::test]
 async fn replay_thread_snapshot_does_not_submit_queue_before_replay_catches_up() {
     let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
@@ -1166,6 +1198,55 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
             agent_role: None,
             is_closed: false,
         })
+    );
+    assert!(
+        !app.team_roster_navigation
+            .is_teammate_thread(Some(receiver_thread_id))
+    );
+    assert_eq!(app.team_roster_navigation.footer_spans(None, None), None);
+}
+
+#[tokio::test]
+async fn register_teammate_thread_without_pane_metadata_is_ignored() {
+    let mut app = make_test_app().await;
+    let teammate_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
+
+    app.register_teammate_thread(
+        teammate_thread_id,
+        "alice".to_string(),
+        Some("researcher".to_string()),
+        None,
+        None,
+    );
+
+    assert_eq!(app.agent_navigation.get(&teammate_thread_id), None);
+    assert!(
+        !app.team_roster_navigation
+            .is_teammate_thread(Some(teammate_thread_id)),
+        "missing pane metadata must not create a Teams roster entry"
+    );
+    assert_eq!(app.team_roster_navigation.footer_spans(None, None), None);
+}
+
+#[tokio::test]
+async fn process_backed_teammate_stays_out_of_generic_agent_navigation() {
+    let mut app = make_test_app().await;
+    let teammate_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000126").expect("valid thread id");
+
+    app.register_teammate_thread(
+        teammate_thread_id,
+        "alice".to_string(),
+        Some("researcher".to_string()),
+        Some("%9".to_string()),
+        Some("tmux".to_string()),
+    );
+
+    assert_eq!(app.agent_navigation.get(&teammate_thread_id), None);
+    assert!(
+        app.team_roster_navigation
+            .is_teammate_thread(Some(teammate_thread_id))
     );
 }
 
@@ -3800,6 +3881,7 @@ async fn make_test_app() -> App {
         thread_event_channels: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
+        team_roster_navigation: TeamRosterNavigationState::default(),
         side_threads: HashMap::new(),
         active_thread_id: None,
         active_thread_rx: None,
@@ -3812,6 +3894,7 @@ async fn make_test_app() -> App {
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
         lead_inbox_poller: None,
+        teammate_inbox_poller: None,
         teams_dialog: None,
     }
 }
@@ -3865,6 +3948,7 @@ async fn make_test_app_with_channels() -> (
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            team_roster_navigation: TeamRosterNavigationState::default(),
             side_threads: HashMap::new(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -3877,6 +3961,7 @@ async fn make_test_app_with_channels() -> (
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
             lead_inbox_poller: None,
+            teammate_inbox_poller: None,
             teams_dialog: None,
         },
         rx,

@@ -1738,6 +1738,7 @@ async fn run_ratatui_app(
         prompt,
         shared,
         no_alt_screen,
+        plan_mode_required,
         ..
     } = cli;
     let images = shared.into_inner().images;
@@ -1807,6 +1808,7 @@ async fn run_ratatui_app(
         should_show_trust_screen, // Proxy to: is it a first run in this directory?
         should_show_trust_screen_flag, // Preserve the startup-time trust NUX signal before onboarding
         should_prompt_windows_sandbox_nux_at_startup,
+        plan_mode_required,
         app_server_target,
         state_db,
         environment_manager,
