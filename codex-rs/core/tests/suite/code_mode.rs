@@ -93,6 +93,54 @@ fn text_item(items: &[Value], index: usize) -> &str {
         .expect("content item should be input_text")
 }
 
+fn assert_repeated_text_item(items: &[Value], index: usize, byte: u8, expected_len: usize) {
+    let actual = text_item(items, index);
+    assert_eq!(
+        actual.len(),
+        expected_len,
+        "unexpected repeated-output length"
+    );
+    assert!(
+        actual.bytes().all(|actual_byte| actual_byte == byte),
+        "output should contain only byte {byte:?}"
+    );
+}
+
+fn assert_middle_truncated_repeated_text_item(
+    items: &[Value],
+    index: usize,
+    byte: u8,
+    expected_prefix_len: usize,
+    expected_marker: &str,
+    expected_suffix_len: usize,
+) {
+    let actual = text_item(items, index);
+    let body = actual
+        .strip_prefix("Total output lines: 1\n\n")
+        .expect("truncated output should include the total-line header");
+    let (prefix, suffix) = body
+        .split_once(expected_marker)
+        .expect("truncated output should include the expected marker");
+    assert_eq!(
+        prefix.len(),
+        expected_prefix_len,
+        "unexpected truncated-output prefix length"
+    );
+    assert_eq!(
+        suffix.len(),
+        expected_suffix_len,
+        "unexpected truncated-output suffix length"
+    );
+    assert!(
+        prefix.bytes().all(|actual_byte| actual_byte == byte),
+        "prefix should contain only byte {byte:?}"
+    );
+    assert!(
+        suffix.bytes().all(|actual_byte| actual_byte == byte),
+        "suffix should contain only byte {byte:?}"
+    );
+}
+
 fn extract_running_cell_id(text: &str) -> String {
     text.strip_prefix("Script running with cell ID ")
         .and_then(|rest| rest.split('\n').next())
@@ -375,7 +423,11 @@ async fn code_mode_only_restricts_prompt_tools() -> Result<()> {
     let first_body = resp_mock.single_request().body_json();
     assert_eq!(
         tool_names(&first_body),
-        vec!["exec".to_string(), "wait".to_string()]
+        vec![
+            "exec".to_string(),
+            "wait".to_string(),
+            "web_search".to_string(),
+        ]
     );
 
     Ok(())
@@ -457,7 +509,12 @@ if (!tool) {
     let first_body = resp_mock.single_request().body_json();
     assert_eq!(
         tool_names(&first_body),
-        vec!["exec".to_string(), "wait".to_string()]
+        vec![
+            "exec".to_string(),
+            "wait".to_string(),
+            "web_search".to_string(),
+            "image_generation".to_string(),
+        ]
     );
 
     let exec_description = first_body
@@ -479,7 +536,7 @@ if (!tool) {
         })
         .expect("exec description should be present");
     assert!(exec_description.contains("filter `ALL_TOOLS` by `name` and `description`"));
-    assert!(!exec_description.contains("calendar_timezone_option_99"));
+    assert!(exec_description.contains("calendar_timezone_option_99"));
 
     let request = follow_up_mock.single_request();
     let (output, success) = custom_tool_output_body_and_success(&request, "call-1");
@@ -809,12 +866,11 @@ text(result.output);
     )
     .await?;
 
-    assert_eq!(
-        text_item(
-            &custom_tool_output_items(&second_mock.single_request(), "call-1"),
-            /*index*/ 1
-        ),
-        "x".repeat(50_000)
+    assert_repeated_text_item(
+        &custom_tool_output_items(&second_mock.single_request(), "call-1"),
+        /*index*/ 1,
+        b'x',
+        50_000,
     );
 
     Ok(())
@@ -839,16 +895,13 @@ text(result.output);
     )
     .await?;
 
-    assert_eq!(
-        text_item(
-            &custom_tool_output_items(&second_mock.single_request(), "call-1"),
-            /*index*/ 1
-        ),
-        format!(
-            "Total output lines: 1\n\n{}…2500 tokens truncated…{}",
-            "A".repeat(40_000),
-            "A".repeat(40_000)
-        )
+    assert_middle_truncated_repeated_text_item(
+        &custom_tool_output_items(&second_mock.single_request(), "call-1"),
+        /*index*/ 1,
+        b'A',
+        40_000,
+        "…2500 tokens truncated…",
+        40_000,
     );
 
     Ok(())
@@ -876,12 +929,11 @@ text(result.output);
     )
     .await?;
 
-    assert_eq!(
-        text_item(
-            &custom_tool_output_items(&second_mock.single_request(), "call-1"),
-            /*index*/ 1
-        ),
-        "x".repeat(50_000)
+    assert_repeated_text_item(
+        &custom_tool_output_items(&second_mock.single_request(), "call-1"),
+        /*index*/ 1,
+        b'x',
+        50_000,
     );
 
     Ok(())
@@ -905,12 +957,11 @@ text(result.output);
     )
     .await?;
 
-    assert_eq!(
-        text_item(
-            &custom_tool_output_items(&second_mock.single_request(), "call-1"),
-            /*index*/ 1
-        ),
-        "x".repeat(50_000)
+    assert_repeated_text_item(
+        &custom_tool_output_items(&second_mock.single_request(), "call-1"),
+        /*index*/ 1,
+        b'x',
+        50_000,
     );
 
     Ok(())
@@ -937,12 +988,11 @@ text(result.output);
     )
     .await?;
 
-    assert_eq!(
-        text_item(
-            &custom_tool_output_items(&second_mock.single_request(), "call-1"),
-            /*index*/ 1
-        ),
-        "x".repeat(50_000)
+    assert_repeated_text_item(
+        &custom_tool_output_items(&second_mock.single_request(), "call-1"),
+        /*index*/ 1,
+        b'x',
+        50_000,
     );
 
     Ok(())
@@ -2953,7 +3003,7 @@ text(JSON.stringify(tool));
         parsed,
         serde_json::json!({
             "name": "view_image",
-            "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.\n\nexec tool declaration:\n```ts\ndeclare const tools: { view_image(args: {\n  // Local filesystem path to an image file\n  path: string;\n}): Promise<{\n  // Image detail hint returned by view_image. Returns `high` for default resized behavior or `original` when original resolution is preserved.\n  detail: \"high\" | \"original\";\n  // Data URL for the loaded image.\n  image_url: string;\n}>; };\n```",
+            "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.\n\nexec tool declaration:\n```ts\ndeclare const tools: { view_image(args: {\n  // Local filesystem path to an image file.\n  path: string;\n}): Promise<{\n  // Image detail hint returned by view_image. Returns `high` for default resized behavior or `original` when original resolution is preserved.\n  detail: \"high\" | \"original\";\n  // Data URL for the loaded image.\n  image_url: string;\n}>; };\n```",
         })
     );
 
@@ -3039,8 +3089,8 @@ async fn code_mode_can_call_hidden_dynamic_tools() -> Result<()> {
     test.session_configured = new_thread.session_configured;
 
     let code = r#"
-const tool = ALL_TOOLS.find(({ name }) => name === "codex_app_hidden_dynamic_tool");
-const out = await tools.codex_app_hidden_dynamic_tool({ city: "Paris" });
+const tool = ALL_TOOLS.find(({ name }) => name === "codex_app__hidden_dynamic_tool");
+const out = await tools.codex_app__hidden_dynamic_tool({ city: "Paris" });
 text(
   JSON.stringify({
     name: tool?.name ?? null,
@@ -3145,7 +3195,7 @@ text(
     )?;
     assert_eq!(
         parsed.get("name"),
-        Some(&Value::String("codex_app_hidden_dynamic_tool".to_string()))
+        Some(&Value::String("codex_app__hidden_dynamic_tool".to_string()))
     );
     assert_eq!(
         parsed.get("out"),
@@ -3158,7 +3208,7 @@ text(
             .is_some_and(|description| {
                 description.contains("A hidden dynamic tool.")
                     && description.contains("declare const tools:")
-                    && description.contains("codex_app_hidden_dynamic_tool(args:")
+                    && description.contains("codex_app__hidden_dynamic_tool(args:")
             })
     );
 

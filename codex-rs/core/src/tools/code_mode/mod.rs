@@ -29,7 +29,6 @@ use crate::tools::context::ToolPayload;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolCall;
 use crate::tools::router::ToolCallSource;
-use crate::unified_exec::resolve_max_tokens;
 use codex_protocol::openai_models::ToolMode;
 use codex_tools::ToolName;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -219,7 +218,9 @@ fn truncate_code_mode_result(
     items: Vec<FunctionCallOutputContentItem>,
     max_output_tokens: Option<usize>,
 ) -> Vec<FunctionCallOutputContentItem> {
-    let max_output_tokens = resolve_max_tokens(max_output_tokens);
+    let Some(max_output_tokens) = max_output_tokens else {
+        return items;
+    };
     let policy = TruncationPolicy::Tokens(max_output_tokens);
     if items
         .iter()

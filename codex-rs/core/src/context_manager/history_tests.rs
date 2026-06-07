@@ -1077,6 +1077,67 @@ fn record_items_truncates_custom_tool_call_output_content() {
 }
 
 #[test]
+fn record_items_uses_code_mode_exec_pragma_limit_for_matching_output() {
+    let mut history = ContextManager::new();
+    let policy = TruncationPolicy::Tokens(10);
+    let call = ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "exec-call".to_string(),
+        name: codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
+        input: "// @exec: {\"max_output_tokens\": 20000}\ntext('large output')".to_string(),
+    };
+    let output = ResponseItem::CustomToolCallOutput {
+        call_id: "exec-call".to_string(),
+        name: Some(codex_code_mode::PUBLIC_TOOL_NAME.to_string()),
+        output: FunctionCallOutputPayload::from_text("x".repeat(50_000)),
+    };
+
+    history.record_items([&call, &output], policy);
+
+    assert_eq!(
+        history.raw_items(),
+        &[
+            call,
+            ResponseItem::CustomToolCallOutput {
+                call_id: "exec-call".to_string(),
+                name: Some(codex_code_mode::PUBLIC_TOOL_NAME.to_string()),
+                output: FunctionCallOutputPayload::from_text("x".repeat(50_000)),
+            },
+        ]
+    );
+}
+
+#[test]
+fn record_items_does_not_apply_code_mode_limit_to_unmatched_custom_output() {
+    let mut history = ContextManager::new();
+    let policy = TruncationPolicy::Tokens(10);
+    let call = ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "exec-call".to_string(),
+        name: codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
+        input: "// @exec: {\"max_output_tokens\": 20000}\ntext('large output')".to_string(),
+    };
+    let output = ResponseItem::CustomToolCallOutput {
+        call_id: "other-call".to_string(),
+        name: Some(codex_code_mode::PUBLIC_TOOL_NAME.to_string()),
+        output: FunctionCallOutputPayload::from_text("x".repeat(50_000)),
+    };
+
+    history.record_items([&call, &output], policy);
+
+    match &history.raw_items()[1] {
+        ResponseItem::CustomToolCallOutput { output, .. } => {
+            let output = output.text_content().unwrap_or_default();
+            assert_ne!(output, "x".repeat(50_000));
+            assert!(output.contains("tokens truncated"));
+        }
+        other => panic!("unexpected history item: {other:?}"),
+    }
+}
+
+#[test]
 fn record_items_respects_custom_token_limit() {
     let mut history = ContextManager::new();
     let policy = TruncationPolicy::Tokens(10);

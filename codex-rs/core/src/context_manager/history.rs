@@ -390,11 +390,38 @@ impl ContextManager {
                 call_id,
                 name,
                 output,
-            } => ResponseItem::CustomToolCallOutput {
-                call_id: call_id.clone(),
-                name: name.clone(),
-                output: truncate_function_output_payload(output, policy_with_serialization_budget),
-            },
+            } => {
+                let policy = self
+                    .items
+                    .iter()
+                    .rev()
+                    .find_map(|item| match item {
+                        ResponseItem::CustomToolCall {
+                            call_id: previous_call_id,
+                            name,
+                            input,
+                            ..
+                        } if previous_call_id == call_id
+                            && name == codex_code_mode::PUBLIC_TOOL_NAME =>
+                        {
+                            codex_code_mode::parse_exec_source(input)
+                                .ok()
+                                .and_then(|parsed| parsed.max_output_tokens)
+                        }
+                        _ => None,
+                    })
+                    .filter(|max_output_tokens| *max_output_tokens > policy.token_budget())
+                    .map_or(policy, TruncationPolicy::Tokens);
+                let policy_with_serialization_budget = policy * 1.2;
+                ResponseItem::CustomToolCallOutput {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    output: truncate_function_output_payload(
+                        output,
+                        policy_with_serialization_budget,
+                    ),
+                }
+            }
             ResponseItem::Message { .. }
             | ResponseItem::Reasoning { .. }
             | ResponseItem::LocalShellCall { .. }
