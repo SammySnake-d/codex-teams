@@ -595,6 +595,9 @@
             "steer": {
               "type": "boolean"
             },
+            "teams": {
+              "type": "boolean"
+            },
             "telepathy": {
               "type": "boolean"
             },
@@ -4716,6 +4719,9 @@
           "type": "boolean"
         },
         "steer": {
+          "type": "boolean"
+        },
+        "teams": {
           "type": "boolean"
         },
         "telepathy": {

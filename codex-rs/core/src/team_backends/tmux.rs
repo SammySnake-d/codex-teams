@@ -204,9 +204,7 @@ impl TmuxBackend {
             codex_terminal_detection::terminal_info().multiplexer,
             Some(codex_terminal_detection::Multiplexer::Tmux { .. })
         );
-        let leader_pane_id = std::env::var("TMUX_PANE")
-            .ok()
-            .filter(|s| !s.is_empty());
+        let leader_pane_id = std::env::var("TMUX_PANE").ok().filter(|s| !s.is_empty());
         Self::from_parts(inside_tmux, leader_pane_id, std::process::id())
     }
 
@@ -432,12 +430,12 @@ impl TmuxBackend {
         teammate_name: &str,
         color: AgentColor,
     ) -> io::Result<CreatePaneResult> {
-        let current_pane = self.get_current_pane_id().ok_or_else(|| {
-            io::Error::other("tmux: could not resolve current pane id")
-        })?;
-        let window_target = self.get_current_window_target().ok_or_else(|| {
-            io::Error::other("tmux: could not resolve current window target")
-        })?;
+        let current_pane = self
+            .get_current_pane_id()
+            .ok_or_else(|| io::Error::other("tmux: could not resolve current pane id"))?;
+        let window_target = self
+            .get_current_window_target()
+            .ok_or_else(|| io::Error::other("tmux: could not resolve current window target"))?;
         let pane_count = self
             .get_current_window_pane_count(Some(&window_target), false)
             .ok_or_else(|| io::Error::other("tmux: could not count window panes"))?;
@@ -458,13 +456,8 @@ impl TmuxBackend {
             ])
         } else {
             // list-panes -t <window> -F #{pane_id}; drop leader (index 0).
-            let list = self.run_in_user_session(&[
-                "list-panes",
-                "-t",
-                &window_target,
-                "-F",
-                "#{pane_id}",
-            ]);
+            let list =
+                self.run_in_user_session(&["list-panes", "-t", &window_target, "-F", "#{pane_id}"]);
             let panes = split_pane_ids(&list.stdout);
             let teammate_panes: Vec<String> = panes.into_iter().skip(1).collect();
             let (vertical, target_pane) = pick_split(&teammate_panes);
@@ -484,9 +477,8 @@ impl TmuxBackend {
         if split_out.code != 0 {
             return Err(tmux_err(&split_out, "split-window"));
         }
-        let pane_id = non_empty_trimmed(&split_out.stdout).ok_or_else(|| {
-            io::Error::other("tmux: split-window returned no pane id")
-        })?;
+        let pane_id = non_empty_trimmed(&split_out.stdout)
+            .ok_or_else(|| io::Error::other("tmux: split-window returned no pane id"))?;
 
         self.set_pane_border_color(&pane_id, color, false)?;
         self.set_pane_title(&pane_id, teammate_name, color, false)?;
@@ -520,13 +512,7 @@ impl TmuxBackend {
             // Reuse the session's initial pane.
             initial_pane
         } else {
-            let list = self.run_in_swarm(&[
-                "list-panes",
-                "-t",
-                &window_target,
-                "-F",
-                "#{pane_id}",
-            ]);
+            let list = self.run_in_swarm(&["list-panes", "-t", &window_target, "-F", "#{pane_id}"]);
             let teammate_panes = split_pane_ids(&list.stdout);
             let (vertical, target_pane) = pick_split(&teammate_panes);
             let dir = if vertical { "-v" } else { "-h" };
@@ -542,9 +528,8 @@ impl TmuxBackend {
             if split_out.code != 0 {
                 return Err(tmux_err(&split_out, "split-window"));
             }
-            non_empty_trimmed(&split_out.stdout).ok_or_else(|| {
-                io::Error::other("tmux: split-window returned no pane id")
-            })?
+            non_empty_trimmed(&split_out.stdout)
+                .ok_or_else(|| io::Error::other("tmux: split-window returned no pane id"))?
         };
 
         self.set_pane_border_color(&pane_id, color, true)?;
@@ -577,20 +562,14 @@ impl TmuxBackend {
             "-F",
             "#{pane_id}",
         ]);
-        if create.code == 0 {
-            if let Some(pane) = non_empty_trimmed(&create.stdout) {
-                return Ok(pane);
-            }
+        if create.code == 0
+            && let Some(pane) = non_empty_trimmed(&create.stdout)
+        {
+            return Ok(pane);
         }
         // Already exists (or no pane id echoed): query the existing first pane.
         let window_target = SWARM_VIEW_WINDOW_NAME;
-        let list = self.run_in_swarm(&[
-            "list-panes",
-            "-t",
-            window_target,
-            "-F",
-            "#{pane_id}",
-        ]);
+        let list = self.run_in_swarm(&["list-panes", "-t", window_target, "-F", "#{pane_id}"]);
         split_pane_ids(&list.stdout)
             .into_iter()
             .next()
@@ -711,9 +690,8 @@ pub(crate) fn build_launch_line(
 
     let mut line = format!("cd {cwd_q} && env");
     for (key, value) in env {
-        let value_q = shlex::try_quote(value).map_err(|e| {
-            io::Error::other(format!("failed to quote env value for {key}: {e:?}"))
-        })?;
+        let value_q = shlex::try_quote(value)
+            .map_err(|e| io::Error::other(format!("failed to quote env value for {key}: {e:?}")))?;
         line.push(' ');
         line.push_str(key);
         line.push('=');
@@ -735,7 +713,7 @@ pub(crate) fn build_launch_line(
 fn quote_path(path: &Path) -> io::Result<String> {
     let s = path.to_string_lossy();
     shlex::try_quote(&s)
-        .map(|cow| cow.into_owned())
+        .map(std::borrow::Cow::into_owned)
         .map_err(|e| io::Error::other(format!("failed to quote path {s:?}: {e:?}")))
 }
 
@@ -749,7 +727,11 @@ mod tests {
         // 0 teammate panes -> caller uses the first/leader path.
         assert_eq!(pick_split(&[]), (false, String::new()));
 
-        let p = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let p = |ids: &[&str]| {
+            ids.iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+        };
 
         // 1 -> -v, target index 0.
         assert_eq!(pick_split(&p(&["%1"])), (true, "%1".to_string()));
@@ -823,7 +805,12 @@ mod tests {
             &PathBuf::from("/home/user/my project"),
             &[("TOKEN".to_string(), "a b c".to_string())],
             &PathBuf::from("/opt/code x/codex"),
-            &["--team-name".to_string(), "rocket".to_string()],
+            &[
+                "--team-name".to_string(),
+                "rocket".to_string(),
+                "-c".to_string(),
+                r#"model="gpt 5 \"preview\"""#.to_string(),
+            ],
         )
         .unwrap();
         assert!(
@@ -835,7 +822,19 @@ mod tests {
             line.contains("'/opt/code x/codex'"),
             "bin not quoted: {line}"
         );
-        assert!(line.ends_with("--team-name rocket"), "flags wrong: {line}");
+        assert!(line.contains(" -c "), "config flag missing: {line}");
+        assert_eq!(
+            shlex::split(
+                line.strip_prefix("cd '/home/user/my project' && env ")
+                    .unwrap()
+            )
+            .expect("launch args split")
+            .into_iter()
+            .rev()
+            .take(2)
+            .collect::<Vec<_>>(),
+            vec![r#"model="gpt 5 \"preview\"""#.to_string(), "-c".to_string()]
+        );
     }
 
     #[test]

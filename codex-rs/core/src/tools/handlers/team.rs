@@ -7,34 +7,40 @@ use crate::team::CreateTeamTaskRequest;
 use crate::team::ListTeamMessagesRequest;
 use crate::team::SendTeamMessageRequest;
 use crate::team::SendTeamMessageTarget;
-use crate::team::SpawnTeamMemberRequest;
 use crate::team::TeamCaller;
 use crate::team::TeamMessageDeliveryMode;
 use crate::team::TeamMessageTargetFilter;
 use crate::team::TeamTaskStatus;
 use crate::team::UpdateTeamTaskRequest;
-use crate::team_backends::iterm::{self, ITermBackend};
+use crate::team_backends::iterm::ITermBackend;
+use crate::team_backends::iterm::{self};
 use crate::team_backends::spawn;
 use crate::team_backends::tmux::TmuxBackend;
+use crate::team_coord;
 use crate::team_store;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
-use crate::tools::handlers::multi_agents_common::build_agent_spawn_config;
 use crate::tools::handlers::multi_agents_common::function_arguments;
-use crate::tools::handlers::multi_agents_common::thread_spawn_source;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::team_spec;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
 use codex_tools::ToolName;
+use codex_tools::ToolSearchInfo;
+use codex_tools::ToolSearchSourceInfo;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
 use serde::Serialize;
@@ -92,6 +98,10 @@ impl TeamTool {
         }
     }
 
+    fn allowed_in_teammate_process(self) -> bool {
+        matches!(self, TeamTool::TeamSend)
+    }
+
     fn spec(self) -> ToolSpec {
         match self {
             TeamTool::CreateTeam => team_spec::create_team_create_tool(),
@@ -120,6 +130,13 @@ impl TeamHandler {
         TeamTool::ALL.into_iter().map(|tool| Self { tool })
     }
 
+    pub(crate) fn for_teammate_process() -> impl Iterator<Item = Self> {
+        TeamTool::ALL
+            .into_iter()
+            .filter(|tool| tool.allowed_in_teammate_process())
+            .map(|tool| Self { tool })
+    }
+
     #[cfg(test)]
     fn for_tool(tool: TeamTool) -> Self {
         Self { tool }
@@ -134,6 +151,21 @@ impl ToolExecutor<ToolInvocation> for TeamHandler {
 
     fn spec(&self) -> ToolSpec {
         self.tool.spec()
+    }
+
+    fn search_info(&self) -> Option<ToolSearchInfo> {
+        ToolSearchInfo::from_spec(
+            "codex teams team teammate roster mailbox task board event feed split pane swarm team_send team_spawn_member create_team"
+                .to_string(),
+            self.spec(),
+            Some(ToolSearchSourceInfo {
+                name: "Codex Teams tools".to_string(),
+                description: Some(
+                    "Create and manage explicit Codex Teams workspaces, teammates, mailboxes, task boards, and split-pane sessions."
+                        .to_string(),
+                ),
+            }),
+        )
     }
 
     async fn handle(
@@ -260,6 +292,16 @@ struct TeamStatusResult {
 #[derive(Debug, Serialize)]
 struct TeamSpawnMemberResult {
     member: crate::team::TeamMember,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tmux_pane_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_type: Option<String>,
+}
+
+struct ProcessSpawnedTeamMember {
+    member: crate::team::TeamMember,
+    tmux_pane_id: String,
+    backend_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -317,6 +359,18 @@ async fn handle_team_tool(
         payload,
         ..
     } = invocation;
+    if matches!(turn.session_source, SessionSource::SubAgent(_)) {
+        return Err(FunctionCallError::RespondToModel(
+            "Codex Teams tools are lead-only. Use native spawn_agent/subagent tools for ordinary delegation."
+                .to_string(),
+        ));
+    }
+    if crate::team::teammate_identity().is_some() && !tool.allowed_in_teammate_process() {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "{} is lead-only in a Codex Teams teammate process. Teammates must not create teams or spawn roster members; use team_send to reply to the lead.",
+            tool.name()
+        )));
+    }
     let arguments = function_arguments(payload)?;
     match tool {
         TeamTool::CreateTeam => create_team(session, arguments).await,
@@ -406,11 +460,12 @@ async fn team_spawn_member(
     }
 
     // Preferred path: launch a real `codex teammate` PROCESS in a tmux pane
-    // (Claude `handleSpawnSplitPane`). Only possible inside a tmux session; when
-    // the lead is not in tmux, fall back to the in-process thread spawn so
-    // behavior degrades gracefully (Claude `handleSpawnInProcess`).
+    // (Claude `handleSpawnSplitPane`). If no process-pane backend is available,
+    // fail closed instead of degrading into native `spawn_agent`: Teams teammates
+    // need their own teammate process and mailbox, while ordinary delegation
+    // belongs to the native subagent tool path.
     if TmuxBackend::new().is_inside_tmux() {
-        let member = spawn_member_in_pane(
+        let spawned = spawn_member_in_pane(
             session.as_ref(),
             turn.as_ref(),
             team_id,
@@ -422,18 +477,20 @@ async fn team_spawn_member(
         )
         .await?;
         return json_output(
-            &TeamSpawnMemberResult { member },
+            &TeamSpawnMemberResult {
+                member: spawned.member,
+                tmux_pane_id: Some(spawned.tmux_pane_id),
+                backend_type: Some(spawned.backend_type),
+            },
             Some(true),
             "team_spawn_member",
         );
     }
 
-    // Next-best path: an iTerm2 split pane driven by the `it2` Python-API CLI,
-    // when the lead runs in iTerm2 (not tmux). Same real `codex teammate` process
-    // model as the tmux path; only taken when the `it2` CLI can reach the iTerm2
-    // Python API, otherwise we fall through to the in-process spawn below.
+    // Next-best path: an iTerm2 split pane driven by the `it2` Python-API CLI.
+    // This still launches a real `codex teammate` process with mailbox routing.
     if iterm::is_in_iterm2() && ITermBackend::new().is_available().await {
-        let member = spawn_member_in_iterm_pane(
+        let spawned = spawn_member_in_iterm_pane(
             session.as_ref(),
             turn.as_ref(),
             team_id,
@@ -445,47 +502,20 @@ async fn team_spawn_member(
         )
         .await?;
         return json_output(
-            &TeamSpawnMemberResult { member },
+            &TeamSpawnMemberResult {
+                member: spawned.member,
+                tmux_pane_id: Some(spawned.tmux_pane_id),
+                backend_type: Some(spawned.backend_type),
+            },
             Some(true),
             "team_spawn_member",
         );
     }
 
-    let config = build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-    let session_source = thread_spawn_source(
-        session.thread_id,
-        &turn.session_source,
-        child_depth,
-        /*agent_role*/ None,
-        /*task_name*/ None,
-    )?;
-    let registry = session.services.agent_control.team_registry();
-    let member = team_result(
-        session.as_ref(),
-        Some(team_id),
-        registry
-            .spawn_member(
-                SpawnTeamMemberRequest {
-                    team_id,
-                    name,
-                    profile: args.profile,
-                    capabilities,
-                    permissions,
-                    initial_items: items,
-                    config,
-                    session_source: Some(session_source),
-                    environments: Some(turn.environments.to_selections()),
-                },
-                &session.services.agent_control,
-            )
-            .await,
-    )
-    .await?;
-    json_output(
-        &TeamSpawnMemberResult { member },
-        Some(true),
-        "team_spawn_member",
-    )
+    Err(FunctionCallError::RespondToModel(
+        "team_spawn_member requires a tmux or iTerm2 pane backend so the teammate runs as a Codex Teams process. Use native spawn_agent/subagent tools for ordinary delegation."
+            .to_string(),
+    ))
 }
 
 /// Look up the live team's display name from the in-memory registry. The caller
@@ -514,6 +544,78 @@ fn unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
+fn append_teammate_model_override(flags: &mut Vec<String>, model: &str) {
+    append_teammate_config_string_override(flags, "model", model);
+}
+
+fn append_teammate_config_string_override(flags: &mut Vec<String>, key: &str, value: &str) {
+    flags.push("-c".to_string());
+    let quoted_value = serde_json::Value::String(value.to_string()).to_string();
+    flags.push(format!("{key}={quoted_value}"));
+}
+
+fn append_teammate_launch_mode_flags(
+    flags: &mut Vec<String>,
+    mode: ModeKind,
+    approval_policy: AskForApproval,
+    sandbox_policy: &SandboxPolicy,
+) -> bool {
+    let plan_mode_required = mode == ModeKind::Plan;
+    if plan_mode_required {
+        flags.push("--plan-mode-required".to_string());
+        append_teammate_config_string_override(flags, "approval_policy", "on-request");
+    } else {
+        match approval_policy {
+            AskForApproval::UnlessTrusted => {
+                append_teammate_config_string_override(flags, "approval_policy", "untrusted");
+            }
+            AskForApproval::OnFailure => {
+                append_teammate_config_string_override(flags, "approval_policy", "on-failure");
+            }
+            AskForApproval::OnRequest => {
+                append_teammate_config_string_override(flags, "approval_policy", "on-request");
+            }
+            AskForApproval::Never => {
+                append_teammate_config_string_override(flags, "approval_policy", "never");
+            }
+            AskForApproval::Granular(_) => {}
+        }
+    }
+
+    match sandbox_policy {
+        SandboxPolicy::DangerFullAccess if !plan_mode_required => {
+            append_teammate_config_string_override(flags, "sandbox_mode", "danger-full-access");
+        }
+        SandboxPolicy::DangerFullAccess => {}
+        SandboxPolicy::ReadOnly { .. } => {
+            append_teammate_config_string_override(flags, "sandbox_mode", "read-only");
+        }
+        SandboxPolicy::WorkspaceWrite { .. } => {
+            append_teammate_config_string_override(flags, "sandbox_mode", "workspace-write");
+        }
+        SandboxPolicy::ExternalSandbox { .. } => {}
+    }
+
+    plan_mode_required
+}
+
+fn teammate_provider_env_keys(provider: &ModelProviderInfo) -> Vec<&str> {
+    let mut keys = Vec::new();
+    if let Some(env_key) = provider.env_key.as_deref() {
+        keys.push(env_key);
+    }
+    if let Some(headers) = provider.env_http_headers.as_ref() {
+        let mut header_keys = headers.values().map(String::as_str).collect::<Vec<_>>();
+        header_keys.sort_unstable();
+        for key in header_keys {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
 /// Launch a teammate as a separate `codex teammate` process in a tmux pane and
 /// register it on disk (Claude `handleSpawnSplitPane`). Returns a `TeamMember`
 /// record for the tool result; the process coordinates via the on-disk team
@@ -528,7 +630,7 @@ async fn spawn_member_in_pane(
     capabilities: Vec<String>,
     permissions: Vec<String>,
     items: &[UserInput],
-) -> Result<crate::team::TeamMember, FunctionCallError> {
+) -> Result<ProcessSpawnedTeamMember, FunctionCallError> {
     // Resolve everything that needs `.await` BEFORE constructing the tmux
     // backend: `TmuxBackend` holds a `RefCell`, so keeping it alive across an
     // await point would make this tool future `!Send`.
@@ -570,7 +672,7 @@ async fn spawn_member_in_pane(
         format!("{context}\n\n{prompt_text}")
     };
     let parent_session_id = session.thread_id.to_string();
-    let model = turn.config.model.clone();
+    let model = turn.model_info.slug.clone();
     let cwd = turn.config.cwd.as_path();
     let binary = spawn::teammate_binary().map_err(|err| {
         FunctionCallError::RespondToModel(format!("failed to resolve teammate binary: {err}"))
@@ -578,12 +680,14 @@ async fn spawn_member_in_pane(
 
     // Open + style the pane (create_teammate_pane sets the title + border color
     // internally, so they are not re-set here).
-    let pane = backend.create_teammate_pane(&sanitized, color).map_err(|err| {
-        FunctionCallError::RespondToModel(format!("failed to create teammate pane: {err}"))
-    })?;
+    let pane = backend
+        .create_teammate_pane(&sanitized, color)
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("failed to create teammate pane: {err}"))
+        })?;
 
-    // Identity flags only — NO `--prompt`. The first turn is delivered via the
-    // mailbox below (mirroring Claude), so it is not run twice.
+    // NO `--prompt`: the first turn is delivered via the mailbox below
+    // (mirroring Claude), so it is not run twice.
     let mut flags = vec![
         "teammate".to_string(),
         "--agent-id".to_string(),
@@ -607,8 +711,17 @@ async fn spawn_member_in_pane(
     // teams OFF and cannot reply to the lead.
     flags.push("--enable".to_string());
     flags.push("teams".to_string());
+    append_teammate_model_override(&mut flags, &model);
+    let sandbox_policy = turn.sandbox_policy();
+    let plan_mode_required = append_teammate_launch_mode_flags(
+        &mut flags,
+        turn.collaboration_mode.mode,
+        turn.approval_policy.value(),
+        &sandbox_policy,
+    );
 
-    let env = spawn::build_inherited_env_vars(teams_root);
+    let provider_env_keys = teammate_provider_env_keys(&turn.config.model_provider);
+    let env = spawn::build_inherited_env_vars(teams_root, &provider_env_keys);
     backend
         .launch_teammate(
             &pane.pane_id,
@@ -623,19 +736,22 @@ async fn spawn_member_in_pane(
         })?;
 
     // Register the member in the on-disk team config.
+    let pane_id = pane.pane_id;
     let member_record = team_store::TeamFileMember {
         agent_id,
         member_id: Some(member_thread_id.to_string()),
         name: sanitized.clone(),
         agent_type: profile.clone(),
-        model,
-        prompt: Some(prompt_text.clone()),
+        model: Some(model),
+        prompt: Some(prompt_text),
         color: Some(color.as_name().to_string()),
         joined_at: unix_millis(),
-        tmux_pane_id: pane.pane_id.clone(),
+        tmux_pane_id: pane_id.clone(),
         cwd: cwd.to_string_lossy().into_owned(),
         backend_type: Some("tmux".to_string()),
         is_active: Some(true),
+        plan_mode_required: plan_mode_required.then_some(true),
+        mode: plan_mode_required.then_some("plan".to_string()),
         ..Default::default()
     };
     let team_for_cfg = team_name.clone();
@@ -669,13 +785,17 @@ async fn spawn_member_in_pane(
         FunctionCallError::RespondToModel(format!("failed to deliver teammate prompt: {err}"))
     })?;
 
-    Ok(crate::team::TeamMember::process_member_with_id(
-        member_thread_id,
-        sanitized,
-        profile,
-        capabilities,
-        permissions,
-    ))
+    Ok(ProcessSpawnedTeamMember {
+        member: crate::team::TeamMember::process_member_with_id(
+            member_thread_id,
+            sanitized,
+            profile,
+            capabilities,
+            permissions,
+        ),
+        tmux_pane_id: pane_id,
+        backend_type: "tmux".to_string(),
+    })
 }
 
 /// iTerm2 twin of [`spawn_member_in_pane`]: launch a real `codex teammate`
@@ -695,7 +815,7 @@ async fn spawn_member_in_iterm_pane(
     capabilities: Vec<String>,
     permissions: Vec<String>,
     items: &[UserInput],
-) -> Result<crate::team::TeamMember, FunctionCallError> {
+) -> Result<ProcessSpawnedTeamMember, FunctionCallError> {
     let team_name = registry_team_name(session, team_id).await?;
     let backend = ITermBackend::new();
     let teams_root = turn.config.codex_home.as_path();
@@ -728,7 +848,7 @@ async fn spawn_member_in_iterm_pane(
         format!("{context}\n\n{prompt_text}")
     };
     let parent_session_id = session.thread_id.to_string();
-    let model = turn.config.model.clone();
+    let model = turn.model_info.slug.clone();
     let cwd = turn.config.cwd.as_path();
     let binary = spawn::teammate_binary().map_err(|err| {
         FunctionCallError::RespondToModel(format!("failed to resolve teammate binary: {err}"))
@@ -743,6 +863,8 @@ async fn spawn_member_in_iterm_pane(
             FunctionCallError::RespondToModel(format!("failed to create iTerm2 pane: {err}"))
         })?;
 
+    // NO `--prompt`: the first turn is delivered via the mailbox below
+    // (mirroring Claude), so it is not run twice.
     let mut flags = vec![
         "teammate".to_string(),
         "--agent-id".to_string(),
@@ -763,16 +885,31 @@ async fn spawn_member_in_iterm_pane(
     // Teammates are by definition Teams sessions (see the tmux twin for why).
     flags.push("--enable".to_string());
     flags.push("teams".to_string());
+    append_teammate_model_override(&mut flags, &model);
+    let sandbox_policy = turn.sandbox_policy();
+    let plan_mode_required = append_teammate_launch_mode_flags(
+        &mut flags,
+        turn.collaboration_mode.mode,
+        turn.approval_policy.value(),
+        &sandbox_policy,
+    );
 
-    let env = spawn::build_inherited_env_vars(teams_root);
+    let provider_env_keys = teammate_provider_env_keys(&turn.config.model_provider);
+    let env = spawn::build_inherited_env_vars(teams_root, &provider_env_keys);
     // Reuse the tmux launch-line builder so the same shell-quoting applies (flag
     // values such as a team name with spaces must be quoted).
     let launch_line = crate::team_backends::tmux::build_launch_line(cwd, &env, &binary, &flags)
         .map_err(|err| {
-            FunctionCallError::RespondToModel(format!("failed to build teammate launch line: {err}"))
+            FunctionCallError::RespondToModel(format!(
+                "failed to build teammate launch line: {err}"
+            ))
         })?;
     backend
-        .send_command_to_pane(&pane.pane_id, &launch_line, /*use_external_session*/ false)
+        .send_command_to_pane(
+            &pane.pane_id,
+            &launch_line,
+            /*use_external_session*/ false,
+        )
         .await
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("failed to launch teammate process: {err}"))
@@ -783,7 +920,7 @@ async fn spawn_member_in_iterm_pane(
         member_id: Some(member_thread_id.to_string()),
         name: sanitized.clone(),
         agent_type: profile.clone(),
-        model,
+        model: Some(model),
         prompt: Some(prompt_text.clone()),
         color: Some(color.as_name().to_string()),
         joined_at: unix_millis(),
@@ -791,6 +928,8 @@ async fn spawn_member_in_iterm_pane(
         cwd: cwd.to_string_lossy().into_owned(),
         backend_type: Some("iterm2".to_string()),
         is_active: Some(true),
+        plan_mode_required: plan_mode_required.then_some(true),
+        mode: plan_mode_required.then_some("plan".to_string()),
         ..Default::default()
     };
     let team_for_cfg = team_name.clone();
@@ -822,13 +961,17 @@ async fn spawn_member_in_iterm_pane(
         FunctionCallError::RespondToModel(format!("failed to deliver teammate prompt: {err}"))
     })?;
 
-    Ok(crate::team::TeamMember::process_member_with_id(
-        member_thread_id,
-        sanitized,
-        profile,
-        capabilities,
-        permissions,
-    ))
+    Ok(ProcessSpawnedTeamMember {
+        member: crate::team::TeamMember::process_member_with_id(
+            member_thread_id,
+            sanitized,
+            profile,
+            capabilities,
+            permissions,
+        ),
+        tmux_pane_id: pane.pane_id,
+        backend_type: "iterm2".to_string(),
+    })
 }
 
 async fn team_send(
@@ -864,8 +1007,9 @@ async fn team_send(
     // Split-pane PROCESS teammates (P3b) live only in the on-disk team store, not
     // in the in-memory registry, so they are delivered to via the file mailbox
     // their process polls (lead -> process member). They can be addressed by NAME
-    // or by the spawn-returned member_id (persisted on disk); the in-memory
-    // registry path further down handles in-process (non-tmux) members.
+    // or by the spawn-returned member_id (persisted on disk). The registry path
+    // further down is retained for legacy in-memory members, but
+    // `team_spawn_member` no longer creates those members as a fallback.
     if matches!(args.target.as_deref(), Some("member") | None)
         && let Some((pane_name, pane_member_label)) = resolve_pane_member(
             session.as_ref(),
@@ -879,12 +1023,14 @@ async fn team_send(
         return team_send_to_pane_member(
             session.as_ref(),
             turn.as_ref(),
-            team_id,
-            &pane_name,
-            &pane_member_label,
-            args.delivery_mode.as_deref(),
-            args.message,
-            args.items,
+            PaneMemberSendRequest {
+                team_id,
+                member_name: pane_name,
+                member_label: pane_member_label,
+                delivery_mode: args.delivery_mode,
+                message: args.message,
+                items: args.items,
+            },
         )
         .await;
     }
@@ -943,22 +1089,26 @@ struct MailboxSendResult {
     via: &'static str,
 }
 
+struct PaneMemberSendRequest {
+    team_id: ThreadId,
+    member_name: String,
+    member_label: String,
+    delivery_mode: Option<String>,
+    message: Option<String>,
+    items: Option<Vec<UserInput>>,
+}
+
 /// Deliver a lead-originated message to a split-pane PROCESS teammate via its
 /// on-disk inbox (the teammate's run-loop polls it). Process members are not in
 /// the in-memory registry, so they are addressed by name, not ThreadId.
 async fn team_send_to_pane_member(
     session: &Session,
     turn: &TurnContext,
-    team_id: ThreadId,
-    member_name: &str,
-    member_label: &str,
-    delivery_mode: Option<&str>,
-    message: Option<String>,
-    items: Option<Vec<UserInput>>,
+    request: PaneMemberSendRequest,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
-    let team_name = registry_team_name(session, team_id).await?;
+    let team_name = registry_team_name(session, request.team_id).await?;
     let teams_root = turn.config.codex_home.as_path();
-    let sanitized = crate::team_backends::spawn::sanitize_agent_name(member_name);
+    let sanitized = crate::team_backends::spawn::sanitize_agent_name(&request.member_name);
 
     let known = team_store::read_config(teams_root, &team_name)
         .ok()
@@ -966,24 +1116,25 @@ async fn team_send_to_pane_member(
         .is_some_and(|cfg| cfg.members.iter().any(|member| member.name == sanitized));
     if !known {
         return Err(FunctionCallError::RespondToModel(format!(
-            "no teammate named '{member_name}' in team '{team_name}'"
+            "no teammate named '{}' in team '{team_name}'",
+            request.member_name
         )));
     }
 
-    let items = parse_team_input(message, items)?;
+    let items = parse_team_input(request.message, request.items)?;
     let content = input_preview(&items);
     // Wrap with the `Codex Teams message:` envelope so the teammate's model sees
     // the same routing markers the in-process delivery path adds; the teammate
     // runner injects lead messages verbatim, so the markers must be in the text.
-    let delivery_mode_label = match delivery_mode {
+    let delivery_mode_label = match request.delivery_mode.as_deref() {
         Some("interrupt") => "interrupt",
         _ => "queue",
     };
     let enveloped = crate::team::team_message_envelope(
-        team_id,
+        request.team_id,
         ThreadId::new(),
         &format!("lead:{}", session.thread_id),
-        member_label,
+        &request.member_label,
         delivery_mode_label,
         &content,
     );
@@ -1029,13 +1180,19 @@ async fn resolve_pane_member(
 ) -> Result<Option<(String, String)>, FunctionCallError> {
     let team_name = registry_team_name(session, team_id).await?;
     let teams_root = turn.config.codex_home.as_path();
-    let Some(cfg) = team_store::read_config(teams_root, &team_name).ok().flatten() else {
+    let Some(cfg) = team_store::read_config(teams_root, &team_name)
+        .ok()
+        .flatten()
+    else {
         return Ok(None);
     };
     if let Some(name) = member_name {
         let sanitized = crate::team_backends::spawn::sanitize_agent_name(name);
         if let Some(member) = cfg.members.iter().find(|member| member.name == sanitized) {
-            let label = member.member_id.clone().unwrap_or_else(|| member.name.clone());
+            let label = member
+                .member_id
+                .clone()
+                .unwrap_or_else(|| member.name.clone());
             return Ok(Some((member.name.clone(), label)));
         }
     }
@@ -1110,7 +1267,9 @@ async fn teammate_team_send(
         },
     )
     .map_err(|err| {
-        FunctionCallError::RespondToModel(format!("failed to deliver to {recipient} mailbox: {err}"))
+        FunctionCallError::RespondToModel(format!(
+            "failed to deliver to {recipient} mailbox: {err}"
+        ))
     })?;
 
     // Return a registry-shaped message so the teammate's model sees a normal
@@ -1184,10 +1343,12 @@ async fn team_message_list(
         && let Ok(team_name) = registry_team_name(session.as_ref(), team_id).await
     {
         let teams_root = turn.config.codex_home.as_path();
-        let inbox =
-            team_store::read_mailbox(teams_root, &team_name, team_store::TEAM_LEAD_NAME)
-                .unwrap_or_default();
+        let inbox = team_store::read_mailbox(teams_root, &team_name, team_store::TEAM_LEAD_NAME)
+            .unwrap_or_default();
         for entry in inbox {
+            if !is_model_visible_lead_mailbox_entry(&entry) {
+                continue;
+            }
             messages.push(crate::team::TeamMessage {
                 id: ThreadId::new(),
                 team_id,
@@ -1209,6 +1370,10 @@ async fn team_message_list(
         Some(true),
         "team_message_list",
     )
+}
+
+fn is_model_visible_lead_mailbox_entry(entry: &team_store::TeammateMessage) -> bool {
+    team_coord::parse_idle_notification(&entry.text).is_none()
 }
 
 async fn team_task_create(
@@ -1664,6 +1829,7 @@ mod tests {
     use crate::tools::context::ToolCallSource;
     use codex_protocol::models::FunctionCallOutputBody;
     use codex_protocol::models::ResponseInputItem;
+    use codex_protocol::protocol::SubAgentSource;
     use pretty_assertions::assert_eq;
     use serde::Deserialize;
     use serde_json::json;
@@ -1702,6 +1868,163 @@ mod tests {
             panic!("expected text function output");
         };
         text
+    }
+
+    fn contains_flag_pair(flags: &[String], key_value: &str) -> bool {
+        flags
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == key_value)
+    }
+
+    #[test]
+    fn teammate_process_model_override_uses_config_override() {
+        let mut flags = vec![
+            "teammate".to_string(),
+            "--enable".to_string(),
+            "teams".to_string(),
+        ];
+
+        append_teammate_model_override(&mut flags, r#"gpt 5 "preview""#);
+
+        assert_eq!(
+            flags,
+            vec![
+                "teammate".to_string(),
+                "--enable".to_string(),
+                "teams".to_string(),
+                "-c".to_string(),
+                r#"model="gpt 5 \"preview\"""#.to_string(),
+            ]
+        );
+
+        let override_arg = flags.last().expect("model override");
+        let Some((key, value)) = override_arg.split_once('=') else {
+            panic!("expected key=value override");
+        };
+        assert_eq!(key, "model");
+        let parsed: toml::Table =
+            toml::from_str(&format!("_x_ = {value}")).expect("valid TOML string value");
+        assert_eq!(
+            parsed.get("_x_").and_then(toml::Value::as_str),
+            Some(r#"gpt 5 "preview""#)
+        );
+    }
+
+    #[test]
+    fn teammate_plan_launch_flags_do_not_inherit_bypass() {
+        let mut flags = vec!["teammate".to_string()];
+
+        let plan_mode_required = append_teammate_launch_mode_flags(
+            &mut flags,
+            ModeKind::Plan,
+            AskForApproval::Never,
+            &SandboxPolicy::DangerFullAccess,
+        );
+
+        assert!(plan_mode_required);
+        assert!(flags.contains(&"--plan-mode-required".to_string()));
+        assert!(contains_flag_pair(
+            &flags,
+            r#"approval_policy="on-request""#
+        ));
+        assert!(!contains_flag_pair(&flags, r#"approval_policy="never""#));
+        assert!(!contains_flag_pair(
+            &flags,
+            r#"sandbox_mode="danger-full-access""#
+        ));
+    }
+
+    #[test]
+    fn teammate_plan_launch_flags_keep_restrictive_sandbox() {
+        let mut flags = vec!["teammate".to_string()];
+
+        let plan_mode_required = append_teammate_launch_mode_flags(
+            &mut flags,
+            ModeKind::Plan,
+            AskForApproval::Never,
+            &SandboxPolicy::ReadOnly {
+                network_access: false,
+            },
+        );
+
+        assert!(plan_mode_required);
+        assert!(flags.contains(&"--plan-mode-required".to_string()));
+        assert!(contains_flag_pair(
+            &flags,
+            r#"approval_policy="on-request""#
+        ));
+        assert!(!contains_flag_pair(&flags, r#"approval_policy="never""#));
+        assert!(contains_flag_pair(&flags, r#"sandbox_mode="read-only""#));
+    }
+
+    #[test]
+    fn teammate_plan_launch_flags_keep_workspace_write_sandbox_mode() {
+        let mut flags = vec!["teammate".to_string()];
+
+        let plan_mode_required = append_teammate_launch_mode_flags(
+            &mut flags,
+            ModeKind::Plan,
+            AskForApproval::Never,
+            &SandboxPolicy::WorkspaceWrite {
+                writable_roots: Vec::new(),
+                network_access: false,
+                exclude_tmpdir_env_var: true,
+                exclude_slash_tmp: true,
+            },
+        );
+
+        assert!(plan_mode_required);
+        assert!(flags.contains(&"--plan-mode-required".to_string()));
+        assert!(contains_flag_pair(
+            &flags,
+            r#"approval_policy="on-request""#
+        ));
+        assert!(!contains_flag_pair(&flags, r#"approval_policy="never""#));
+        assert!(contains_flag_pair(
+            &flags,
+            r#"sandbox_mode="workspace-write""#
+        ));
+        assert!(!contains_flag_pair(
+            &flags,
+            r#"sandbox_mode="danger-full-access""#
+        ));
+    }
+
+    #[test]
+    fn teammate_default_launch_flags_inherit_never_and_danger_full_access() {
+        let mut flags = vec!["teammate".to_string()];
+
+        let plan_mode_required = append_teammate_launch_mode_flags(
+            &mut flags,
+            ModeKind::Default,
+            AskForApproval::Never,
+            &SandboxPolicy::DangerFullAccess,
+        );
+
+        assert!(!plan_mode_required);
+        assert!(!flags.contains(&"--plan-mode-required".to_string()));
+        assert!(contains_flag_pair(&flags, r#"approval_policy="never""#));
+        assert!(contains_flag_pair(
+            &flags,
+            r#"sandbox_mode="danger-full-access""#
+        ));
+    }
+
+    #[test]
+    fn teammate_provider_env_keys_include_provider_auth_and_header_envs() {
+        let provider = ModelProviderInfo {
+            env_key: Some("OPENAI_API_KEY".to_string()),
+            env_http_headers: Some(std::collections::HashMap::from([
+                ("x-api-key".to_string(), "OPENAI_API_KEY".to_string()),
+                ("x-org".to_string(), "OPENAI_ORG_ID".to_string()),
+            ])),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            teammate_provider_env_keys(&provider),
+            vec!["OPENAI_API_KEY", "OPENAI_ORG_ID"]
+        );
     }
 
     #[derive(Debug, Deserialize)]
@@ -1761,6 +2084,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lead_mailbox_filter_excludes_idle_notifications_only() {
+        let idle = team_store::TeammateMessage {
+            from: "alice".to_string(),
+            text: serde_json::json!({
+                "type": "idle_notification",
+                "from": "alice",
+                "timestamp": "2026-06-05T00:00:00.000Z",
+                "idleReason": "available",
+            })
+            .to_string(),
+            timestamp: "t".to_string(),
+            read: false,
+            color: None,
+            summary: None,
+        };
+        let explicit = team_store::TeammateMessage {
+            from: "alice".to_string(),
+            text: "explicit update".to_string(),
+            timestamp: "t".to_string(),
+            read: false,
+            color: None,
+            summary: Some("done".to_string()),
+        };
+
+        assert!(!is_model_visible_lead_mailbox_entry(&idle));
+        assert!(is_model_visible_lead_mailbox_entry(&explicit));
+    }
+
+    #[test]
+    fn team_tool_search_info_is_explicit_teams_only() {
+        for tool in [TeamTool::CreateTeam, TeamTool::TeamSpawnMember] {
+            let info = TeamHandler::for_tool(tool)
+                .search_info()
+                .expect("team tools should expose deferred search info");
+            let source_description = info
+                .source_info
+                .as_ref()
+                .and_then(|source| source.description.as_deref())
+                .expect("team search info should describe its source");
+            let output_description = match &info.entry.output {
+                codex_tools::LoadableToolSpec::Function(function) => function.description.as_str(),
+                _ => panic!("expected Teams tool search output to be a function"),
+            };
+
+            assert!(info.entry.search_text.contains("codex teams"));
+            assert!(source_description.contains("explicit Codex Teams workspaces"));
+            assert!(output_description.contains("Teams"));
+            for forbidden_trigger in [
+                "spawn_agent",
+                "subagent",
+                "sub-agent",
+                "ordinary delegation",
+                "parallel delegation",
+                "parallel agent work",
+            ] {
+                assert!(
+                    !info.entry.search_text.contains(forbidden_trigger),
+                    "Teams search text must not match ordinary agent trigger {forbidden_trigger:?}"
+                );
+                assert!(
+                    !source_description.contains(forbidden_trigger),
+                    "Teams source description must not match ordinary agent trigger {forbidden_trigger:?}"
+                );
+                assert!(
+                    !output_description.contains(forbidden_trigger),
+                    "Teams tool description must not match ordinary agent trigger {forbidden_trigger:?}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn team_create_and_list_use_agent_control_registry() {
         let (session, turn) = make_session_and_context().await;
@@ -1792,5 +2187,44 @@ mod tests {
             serde_json::from_str(&text_output(listed)).expect("list result");
 
         assert_eq!(listed.teams, vec![created.team]);
+    }
+
+    #[tokio::test]
+    async fn team_tools_reject_subagent_execution_before_mutation() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.session_source =
+            SessionSource::SubAgent(SubAgentSource::Other("implementation_lane".to_string()));
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let result = TeamHandler::for_tool(TeamTool::CreateTeam)
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "create_team",
+                json!({"name": "should not exist"}),
+            ))
+            .await;
+        let message = match result {
+            Err(FunctionCallError::RespondToModel(message)) => message,
+            Err(_) => panic!("expected model-visible lead-only error"),
+            Ok(_) => panic!("subagents must not execute Teams tools"),
+        };
+        assert!(message.contains("lead-only"));
+        assert!(message.contains("spawn_agent/subagent"));
+
+        let (_unused_session, lead_turn) = make_session_and_context().await;
+        let listed = TeamHandler::for_tool(TeamTool::ListTeams)
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::new(lead_turn),
+                "list_teams",
+                json!({}),
+            ))
+            .await
+            .expect("list teams");
+        let listed: TestListTeamsResult =
+            serde_json::from_str(&text_output(listed)).expect("list result");
+        assert_eq!(listed.teams, Vec::new());
     }
 }

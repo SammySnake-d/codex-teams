@@ -60,10 +60,10 @@ pub(crate) fn unique_teammate_name(base: &str, existing: &[String]) -> String {
 /// Claude `getTeammateCommand`: honor the `CODEX_TEAMMATE_COMMAND` override,
 /// else launch this running executable.
 pub(crate) fn teammate_binary() -> std::io::Result<PathBuf> {
-    if let Ok(value) = std::env::var("CODEX_TEAMMATE_COMMAND") {
-        if !value.is_empty() {
-            return Ok(PathBuf::from(value));
-        }
+    if let Ok(value) = std::env::var("CODEX_TEAMMATE_COMMAND")
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
     }
     std::env::current_exe()
 }
@@ -87,8 +87,11 @@ const FORWARDED_ENV_VARS: [&str; 11] = [
 
 /// Claude `buildInheritedEnvVars` analog: mark teammate mode, pin the same
 /// `$CODEX_HOME` (so the teammate reads the same team store + config), and
-/// forward proxy / cert vars that are set and non-empty.
-pub(crate) fn build_inherited_env_vars(codex_home: &Path) -> Vec<(String, String)> {
+/// forward proxy / cert / provider auth vars that are set and non-empty.
+pub(crate) fn build_inherited_env_vars(
+    codex_home: &Path,
+    provider_env_keys: &[&str],
+) -> Vec<(String, String)> {
     let mut env = vec![
         ("CODEX_TEAMMATE".to_string(), "1".to_string()),
         (
@@ -96,11 +99,18 @@ pub(crate) fn build_inherited_env_vars(codex_home: &Path) -> Vec<(String, String
             codex_home.to_string_lossy().into_owned(),
         ),
     ];
-    for key in FORWARDED_ENV_VARS {
-        if let Ok(value) = std::env::var(key) {
-            if !value.is_empty() {
-                env.push((key.to_string(), value));
-            }
+    for key in FORWARDED_ENV_VARS
+        .iter()
+        .copied()
+        .chain(provider_env_keys.iter().copied())
+    {
+        if env.iter().any(|(existing, _)| existing == key) {
+            continue;
+        }
+        if let Ok(value) = std::env::var(key)
+            && !value.is_empty()
+        {
+            env.push((key.to_string(), value));
         }
     }
     env
@@ -134,11 +144,20 @@ mod tests {
 
     #[test]
     fn env_marks_teammate_and_pins_codex_home() {
-        let env = build_inherited_env_vars(Path::new("/tmp/codex-home"));
+        let env = build_inherited_env_vars(Path::new("/tmp/codex-home"), &[]);
         assert!(env.contains(&("CODEX_TEAMMATE".to_string(), "1".to_string())));
         assert!(
             env.iter()
                 .any(|(k, v)| k == "CODEX_HOME" && v == "/tmp/codex-home")
         );
+    }
+
+    #[test]
+    fn env_forwards_provider_auth_key_when_present() {
+        let path = std::env::var("PATH").expect("PATH should be set in test environment");
+
+        let env = build_inherited_env_vars(Path::new("/tmp/codex-home"), &["PATH"]);
+
+        assert!(env.contains(&("PATH".to_string(), path)));
     }
 }

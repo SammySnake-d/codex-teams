@@ -1,12 +1,17 @@
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
+#[cfg(test)]
 use crate::agent::control::SpawnAgentOptions;
+#[cfg(test)]
 use crate::config::Config;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+#[cfg(test)]
 use codex_protocol::protocol::SessionSource;
+#[cfg(test)]
 use codex_protocol::protocol::SubAgentSource;
+#[cfg(test)]
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
@@ -41,6 +46,15 @@ pub fn set_teammate_identity(team: String, agent_name: String) {
 /// The teammate identity for this process, if it is a spawned teammate.
 pub(crate) fn teammate_identity() -> Option<&'static TeammateIdentity> {
     TEAMMATE_IDENTITY.get()
+}
+
+/// Public `(team, agent_name)` for the current teammate process, if it was
+/// launched as one. The TUI uses this at startup to enter teammate mode (poll
+/// its own inbox and inject the lead's messages as turns in its own session).
+pub fn teammate_identity_parts() -> Option<(String, String)> {
+    TEAMMATE_IDENTITY
+        .get()
+        .map(|id| (id.team.clone(), id.agent_name.clone()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -236,6 +250,7 @@ pub(crate) struct TeamSnapshot {
     pub(crate) events: Vec<TeamEvent>,
 }
 
+#[cfg(test)]
 pub(crate) struct SpawnTeamMemberRequest {
     pub(crate) team_id: ThreadId,
     pub(crate) name: String,
@@ -406,6 +421,7 @@ impl TeamRegistry {
         Ok(TeamCaller::Unknown)
     }
 
+    #[cfg(test)]
     pub(crate) async fn spawn_member(
         &self,
         request: SpawnTeamMemberRequest,
@@ -457,8 +473,8 @@ impl TeamRegistry {
              \n\
              You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
              Treat the spawn prompt/items after this context as your assigned task boundary.\n\
-             Use generic Teams tools when available: team_status, team_send, team_task_list, team_task_update, team_task_claim, and team_event_list.\n\
-             When sending as this teammate, set sender_member_id to your member_id."
+             Use team_send to reply to the lead or another named teammate.\n\
+             Do not create teams or spawn teammates from this teammate process."
         );
         let mut wrapped_items = Vec::with_capacity(initial_items.len() + 1);
         wrapped_items.push(UserInput::Text {
@@ -1244,10 +1260,10 @@ fn validate_active_member(team: &Team, member_id: Option<ThreadId>) -> CodexResu
 }
 
 fn validate_member_exists(team: &Team, member_id: Option<ThreadId>) -> CodexResult<()> {
-    if let Some(member_id) = member_id {
-        if !team.members.iter().any(|member| member.id == member_id) {
-            return Err(CodexErr::ThreadNotFound(member_id));
-        }
+    if let Some(member_id) = member_id
+        && !team.members.iter().any(|member| member.id == member_id)
+    {
+        return Err(CodexErr::ThreadNotFound(member_id));
     }
     Ok(())
 }
@@ -1293,8 +1309,8 @@ pub(crate) fn team_context_envelope(
          \n\
          You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
          Treat the spawn prompt/items after this context as your assigned task boundary.\n\
-         Use generic Teams tools when available: team_status, team_send, team_task_list, team_task_update, team_task_claim, and team_event_list.\n\
-         When sending as this teammate, set sender_member_id to your member_id."
+         Use team_send to reply to the lead or another named teammate.\n\
+         Do not create teams or spawn teammates from this teammate process."
     )
 }
 
@@ -1494,8 +1510,8 @@ mod tests {
                      \n\
                      You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
                      Treat the spawn prompt/items after this context as your assigned task boundary.\n\
-                     Use generic Teams tools when available: team_status, team_send, team_task_list, team_task_update, team_task_claim, and team_event_list.\n\
-                     When sending as this teammate, set sender_member_id to your member_id."
+                     Use team_send to reply to the lead or another named teammate.\n\
+                     Do not create teams or spawn teammates from this teammate process."
                 ),
                 text_elements: Vec::new(),
             },

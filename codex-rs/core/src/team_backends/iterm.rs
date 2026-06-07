@@ -26,6 +26,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 
 use crate::team_store;
 
@@ -189,6 +190,7 @@ struct It2State {
 /// (mirror Claude's `cachedBackend`), otherwise parallel spawns race the iTerm layout.
 pub(crate) struct ITermBackend {
     state: Mutex<It2State>,
+    creation_lock: Semaphore,
 }
 
 impl Default for ITermBackend {
@@ -201,6 +203,7 @@ impl ITermBackend {
     pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(It2State::default()),
+            creation_lock: Semaphore::new(1),
         }
     }
 
@@ -251,15 +254,23 @@ impl ITermBackend {
     ) -> anyhow::Result<CreatePaneResult> {
         let _ = (name, color); // accepted for parity; iTerm ignores both.
         let leader = get_leader_session_id();
-        let mut state = self.state.lock().await;
+        let _permit =
+            self.creation_lock.acquire().await.map_err(|err| {
+                anyhow::anyhow!("failed to acquire iTerm2 pane creation lock: {err}")
+            })?;
 
         loop {
-            let is_first_teammate = !state.first_pane_used;
+            let (is_first_teammate, last_id) = {
+                let state = self.state.lock().await;
+                (
+                    !state.first_pane_used,
+                    state.teammate_session_ids.last().cloned(),
+                )
+            };
 
             // Build the split argv plus an optional targeted-teammate id (for dead-target
             // recovery). Owned `String`s are held so the borrowed argv slice stays valid.
             let leader_id = leader.clone();
-            let last_id = state.teammate_session_ids.last().cloned();
 
             let mut split_args: Vec<&str> = vec!["session", "split"];
             let mut targeted_teammate_id: Option<String> = None;
@@ -286,9 +297,8 @@ impl ITermBackend {
                 if let Some(dead_candidate) = targeted_teammate_id.as_deref() {
                     let probe = run_it2(&["session", "list"]).await;
                     if probe.code == 0 && !probe.stdout.contains(dead_candidate) {
-                        state
-                            .teammate_session_ids
-                            .retain(|id| id != dead_candidate);
+                        let mut state = self.state.lock().await;
+                        state.teammate_session_ids.retain(|id| id != dead_candidate);
                         if state.teammate_session_ids.is_empty() {
                             state.first_pane_used = false;
                         }
@@ -301,10 +311,6 @@ impl ITermBackend {
                 ));
             }
 
-            if is_first_teammate {
-                state.first_pane_used = true;
-            }
-
             let pane_id = parse_split_output(&r.stdout);
             if pane_id.is_empty() {
                 return Err(anyhow::anyhow!(
@@ -313,7 +319,13 @@ impl ITermBackend {
                 ));
             }
 
-            state.teammate_session_ids.push(pane_id.clone());
+            {
+                let mut state = self.state.lock().await;
+                if is_first_teammate {
+                    state.first_pane_used = true;
+                }
+                state.teammate_session_ids.push(pane_id.clone());
+            }
 
             // Skip color & title (each it2 call spawns a Python process — perf).
             return Ok(CreatePaneResult {
@@ -560,7 +572,11 @@ pub(crate) async fn install_it2(pm: PythonPackageManager) -> It2InstallResult {
         }
     } else {
         let error = if result.stderr.trim().is_empty() {
-            format!("it2 install via {} exited with code {}", pm.label(), result.code)
+            format!(
+                "it2 install via {} exited with code {}",
+                pm.label(),
+                result.code
+            )
         } else {
             result.stderr.trim().to_string()
         };
@@ -732,9 +748,18 @@ mod tests {
 
     #[test]
     fn package_manager_strings_are_verbatim() {
-        assert_eq!(PythonPackageManager::Uvx.install_command_hint(), "uv tool install it2");
-        assert_eq!(PythonPackageManager::Pipx.install_command_hint(), "pipx install it2");
-        assert_eq!(PythonPackageManager::Pip.install_command_hint(), "pip install --user it2");
+        assert_eq!(
+            PythonPackageManager::Uvx.install_command_hint(),
+            "uv tool install it2"
+        );
+        assert_eq!(
+            PythonPackageManager::Pipx.install_command_hint(),
+            "pipx install it2"
+        );
+        assert_eq!(
+            PythonPackageManager::Pip.install_command_hint(),
+            "pip install --user it2"
+        );
     }
 
     #[test]

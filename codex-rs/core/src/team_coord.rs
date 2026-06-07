@@ -73,9 +73,7 @@ fn format_rfc3339_utc(secs: i64, millis: u32) -> String {
     let second = secs_of_day % 60;
 
     let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
 /// Convert a count of days since 1970-01-01 to a `(year, month, day)` triple.
@@ -222,8 +220,7 @@ pub fn format_as_teammate_message(
         .map(|s| format!(" summary=\"{s}\""))
         .unwrap_or_default();
     format!(
-        "<{tag} teammate_id=\"{from}\"{color_attr}{summary_attr}>\n{content}\n</{tag}>",
-        tag = TEAMMATE_MESSAGE_TAG,
+        "<{TEAMMATE_MESSAGE_TAG} teammate_id=\"{from}\"{color_attr}{summary_attr}>\n{content}\n</{TEAMMATE_MESSAGE_TAG}>",
     )
 }
 
@@ -413,14 +410,14 @@ pub enum NextInbox {
 /// 3. else FIFO first-unread (any sender).
 pub fn select_next_inbox(messages: &[TeammateMessage]) -> NextInbox {
     for (i, m) in messages.iter().enumerate() {
-        if !m.read {
-            if let Some(req) = parse_shutdown_request(&m.text) {
-                return NextInbox::Shutdown {
-                    index: i,
-                    request: req,
-                    raw: m.text.clone(),
-                };
-            }
+        if !m.read
+            && let Some(req) = parse_shutdown_request(&m.text)
+        {
+            return NextInbox::Shutdown {
+                index: i,
+                request: req,
+                raw: m.text.clone(),
+            };
         }
     }
     if let Some(i) = messages
@@ -536,10 +533,10 @@ fn highest_task_id_from_files(teams_root: &Path, team: &str) -> i64 {
         for e in rd.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            if let Some(stem) = name.strip_suffix(".json") {
-                if let Ok(n) = stem.parse::<i64>() {
-                    max = max.max(n);
-                }
+            if let Some(stem) = name.strip_suffix(".json")
+                && let Ok(n) = stem.parse::<i64>()
+            {
+                max = max.max(n);
             }
         }
     }
@@ -552,9 +549,9 @@ fn highest_task_id_from_files(teams_root: &Path, team: &str) -> i64 {
 pub fn create_task(teams_root: &Path, team: &str, task: Task) -> io::Result<String> {
     let lock_target = tasks_dir(teams_root, team).join(".tasklist");
     let _lock = LocalFileLock::acquire(&lock_target)?;
-    let id =
-        (highest_task_id_from_files(teams_root, team).max(read_highwater(teams_root, team)) + 1)
-            .to_string();
+    let id = (highest_task_id_from_files(teams_root, team).max(read_highwater(teams_root, team))
+        + 1)
+    .to_string();
     let mut task = task;
     task.id = id.clone();
     let bytes = serde_json::to_vec_pretty(&task).map_err(io::Error::other)?;
@@ -779,7 +776,10 @@ mod tests {
             "timestamp": "2026-06-05T00:00:00.000Z",
         })
         .to_string();
-        assert_eq!(protocol_kind(&shutdown), Some(ProtocolKind::ShutdownRequest));
+        assert_eq!(
+            protocol_kind(&shutdown),
+            Some(ProtocolKind::ShutdownRequest)
+        );
         assert!(is_structured_protocol_message(&shutdown));
         let req = parse_shutdown_request(&shutdown).unwrap();
         assert_eq!(req.request_id, "shutdown-bob-1");
@@ -838,14 +838,14 @@ mod tests {
         };
 
         // Peer first, then lead, then shutdown — shutdown must still win.
-        let msgs = vec![peer.clone(), lead.clone(), shutdown.clone()];
+        let msgs = vec![peer.clone(), lead.clone(), shutdown];
         match select_next_inbox(&msgs) {
             NextInbox::Shutdown { index, .. } => assert_eq!(index, 2),
             other => panic!("expected shutdown, got {other:?}"),
         }
 
         // No shutdown → lead beats earlier peer.
-        let msgs = vec![peer.clone(), lead.clone()];
+        let msgs = vec![peer.clone(), lead];
         match select_next_inbox(&msgs) {
             NextInbox::Message { index, message } => {
                 assert_eq!(index, 1);
@@ -862,12 +862,9 @@ mod tests {
         }
 
         // Empty when all read.
-        let mut read_peer = peer.clone();
+        let mut read_peer = peer;
         read_peer.read = true;
-        assert!(matches!(
-            select_next_inbox(&[read_peer]),
-            NextInbox::Empty
-        ));
+        assert!(matches!(select_next_inbox(&[read_peer]), NextInbox::Empty));
     }
 
     #[test]

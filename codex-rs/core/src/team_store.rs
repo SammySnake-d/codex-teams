@@ -226,11 +226,7 @@ pub fn read_mailbox(
 }
 
 /// Mirrors `readUnreadMessages` — messages with `read == false`.
-pub fn read_unread(
-    teams_root: &Path,
-    team: &str,
-    agent: &str,
-) -> io::Result<Vec<TeammateMessage>> {
+pub fn read_unread(teams_root: &Path, team: &str, agent: &str) -> io::Result<Vec<TeammateMessage>> {
     Ok(read_mailbox(teams_root, team, agent)?
         .into_iter()
         .filter(|m| !m.read)
@@ -266,7 +262,9 @@ pub fn mark_messages_read(teams_root: &Path, team: &str, agent: &str) -> io::Res
 
 pub fn read_config(teams_root: &Path, team: &str) -> io::Result<Option<TeamFile>> {
     match fs::read(config_path(teams_root, team)) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).map_err(io::Error::other)?)),
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        )),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }

@@ -78,6 +78,7 @@ pub mod legacy_core {
     pub use codex_core::grant_read_root_non_elevated;
     pub use codex_core::team_coord;
     pub use codex_core::team_store;
+    pub use codex_core::teammate_identity_parts;
     pub use codex_core::web_search_detail;
 
     pub mod config {

@@ -17,9 +17,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use codex_core::CodexThread;
-use codex_core::team_coord::{self, IdleOptions, IdleReason, NextInbox};
-use codex_core::team_store::{self, TEAM_LEAD_NAME};
-use codex_protocol::protocol::{EventMsg, Op};
+use codex_core::team_coord::IdleOptions;
+use codex_core::team_coord::IdleReason;
+use codex_core::team_coord::NextInbox;
+use codex_core::team_coord::{self};
+use codex_core::team_store::TEAM_LEAD_NAME;
+use codex_core::team_store::{self};
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 
 /// Claude `POLL_INTERVAL_MS` = 500 ms.
@@ -203,5 +208,9 @@ fn shutdown_prompt_text(reason: Option<String>) -> String {
 /// `getLastPeerDmSummary` analog: a short (≤10-word) summary of the agent's last
 /// message, used as the idle-notification `summary`.
 fn summarize(message: &str) -> String {
-    message.split_whitespace().take(10).collect::<Vec<_>>().join(" ")
+    message
+        .split_whitespace()
+        .take(10)
+        .collect::<Vec<_>>()
+        .join(" ")
 }

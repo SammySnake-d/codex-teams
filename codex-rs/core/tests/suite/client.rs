@@ -71,6 +71,8 @@ use dunce::canonicalize as normalize_path;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use serial_test::serial;
+use std::ffi::OsString;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -1540,6 +1542,7 @@ async fn skills_append_to_developer_message() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
     skip_if_no_network!();
     let server = MockServer::start().await;
@@ -1550,6 +1553,8 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
     )
     .await;
 
+    let isolated_home = TempDir::new().unwrap();
+    let _home_guard = EnvVarGuard::set("HOME", isolated_home.path().as_os_str());
     let codex_home_parent = TempDir::new().unwrap();
     let long_home_parent = codex_home_parent
         .path()
@@ -1628,6 +1633,32 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
     );
     let _codex_home_guard = codex_home;
     let _codex_home_parent_guard = codex_home_parent;
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
