@@ -77,7 +77,9 @@ agent_name is used for messaging/tasks; agent_id for internal tracking.
 - Teams dialog: list teammates with color pills + is_active status; viewTeammateOutput
   (focus pane / tail), toggleTeammateVisibility (tmux hide/show pane, update hidden_pane_ids).
 - Footer roster already implemented (team_ui.rs) — keep; add colors.
-- ctrl+t switch stays for in-process fallback.
+- Do not use Ctrl+T for teammate switching; Ctrl+T remains the transcript toggle.
+  Use the Teams roster controls, `/teams`, or a distinct future keybinding for
+  teammate navigation.
 
 ### P6. iTerm backend (NEW: codex-rs/core/src/team_backends/iterm.rs)
 - `it2 session split` (1st vertical from leader, rest horizontal); setup prompt if `it2`/PythonAPI missing.

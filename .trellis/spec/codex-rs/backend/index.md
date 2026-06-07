@@ -15,7 +15,10 @@
 - Keep stable coordination state in core-level substrate types, with TUI acting as a view/control surface.
 - Reuse existing multi-agent primitives where possible: agent spawn, inter-agent communication, mailbox delivery, wait/list/close, and agent metadata.
 - Do not hardcode role-specific policy into Teams core. Roles should be capability profiles or instructions attached to members.
-- Treat display mode as a plugin boundary. In-process switching should work before tmux/iTerm split-pane support.
+- Treat display mode as a plugin boundary. Process-backed tmux/iTerm teammate
+  panes are the preferred Teams display path when a pane backend is available.
+  If no pane backend is available, `team_spawn_member` fails closed instead of
+  creating a native in-process subagent.
 - Persist team state explicitly or fail closed when resume cannot prove that members are still live.
 
 ## TUI Rules

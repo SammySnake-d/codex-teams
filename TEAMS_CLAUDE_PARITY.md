@@ -26,35 +26,65 @@ Truth source: `ChinaSiro/claude-code-sourcemap` (de-minified Claude Code).
   - `in-process`: all teammates in the one terminal; Shift+↑/↓ select; type to message. ANY terminal.
   - split-pane: each teammate own pane (tmux/iTerm). Requires separate teammate PROCESSES.
 
+## Claude Code branch boundary: Teams vs subagents
+- `restored-src/src/tools/AgentTool/AgentTool.tsx` resolves `teamName` from
+  explicit `team_name` or the active `appState.teamContext`, but only when Agent
+  Teams is enabled.
+- The decisive Teams branch is `if (teamName && name) { spawnTeammate(...);
+  return ... }`. It happens before the generic subagent path.
+- Teammates cannot spawn nested teammates with `name`; Claude raises an error and
+  tells the teammate to omit `name` to spawn an ordinary subagent instead.
+- If that Teams branch is not taken, execution continues into the normal
+  `runAgent(...)` path. So Claude's split-pane behavior is a teammate branch, not
+  a property of every subagent.
+- TUI switching is likewise separated: Claude uses Shift+↑/↓ + Enter for
+  teammate selection, `@name` mailbox routing when team context exists, and normal
+  background/subagent mechanics otherwise.
+
 ## Codex teams reality (this repo)
-- `core/src/tools/handlers/team.rs::team_spawn_member` → `session.services.agent_control.team_registry()`
-  spawns an IN-PROCESS agent thread (`TeamMember.agent_thread_id` lives in the lead's app-server).
-- Messaging is in-memory registry + `Op::InterAgentCommunication`; no on-disk mailbox/process.
-- `Team.live_session_only: bool` exists; teammates are threads, not processes.
-- => Codex's runtime == Claude's IN-PROCESS mode.
+- `core/src/tools/handlers/team.rs::team_spawn_member` now prefers a real
+  `codex teammate` process in tmux/iTerm2 when a pane backend is available.
+- Process-backed teammates receive their first turn through the on-disk team
+  mailbox and run the full interactive Codex TUI in teammate mode.
+- If no tmux/iTerm2 pane backend is available, `team_spawn_member` fails closed
+  instead of degrading into native `spawn_agent`; ordinary delegation remains on
+  the native subagent path.
+- Teams tools are default-off behind `features.teams` and are exposed only to
+  lead/top-level sessions; native subagents keep the normal `spawn_agent` path.
+- Codex intentionally does not overload generic `spawn_agent` with Claude's
+  `teamContext + name` teammate shortcut. The equivalent Teams product path is
+  explicit: `create_team` then `team_spawn_member`.
 
-## What is already implemented (codex TUI, this branch) = Claude in-process-mode parity
-- Footer/toolbar roster: `tui/src/chatwidget/team_ui.rs` (`footer_label`) — `Teams: <name> · @member running … · ctrl+t teammates`.
+## What is already implemented (codex TUI, this branch)
+- Footer/toolbar roster: Teams label plus colored `@main` / teammate pills, with Shift+↑/↓ selection, Enter switch, and Esc return-to-lead behavior.
 - `@teammate` candidates + routing: `mentions_v2` + `input_submission.rs` (team:// → model-mediated `team_send`).
-- ctrl+t teammate switch (native AgentNavigation) == Claude Shift+↑/↓.
-- Best-effort tmux side pane that TAILS the teammate rollout (read-only) — `app/teammate_panes.rs`.
-- All 4 TUI tests pass; standalone tmux split smoke passes.
+- Generic `/agent` navigation remains shared with ordinary subagents; the Teams footer roster is populated only by Teams teammate spawn events.
+- Process-backed teammates own their tmux/iTerm pane; the TUI focuses that pane
+  from the Teams roster instead of treating the returned Teams member id as a
+  generic `/agent` thread.
+- Legacy side-pane tailing remains only a display helper for already-known
+  thread transcripts; it is not a Teams teammate spawn fallback.
+- Validation must be reported from current command output; do not reuse the old
+  "All 4 TUI tests pass" claim after this process-pane rewrite.
 
-## The gap (split-pane mode)
-Real Claude split panes = separate teammate processes. Codex teammates are in-process threads, so a pane
-can only OBSERVE (tail) them, not host an interactive teammate. To match Claude's split-pane mode faithfully
-requires a codex teammate-PROCESS mode.
+## Remaining validation gap (cross-process split-pane E2E)
+Codex has the process-pane substrate, but do not call this slice complete unless
+current validation proves:
+`team_spawn_member -> pane process -> teammate inbox poller -> first turn -> team_send -> lead poller`.
+Do not call this slice done from static review or docs-only proof.
 
-## Paths
-- A (faithful, large, core change): add a split-pane teammate mode to codex:
+## Historical paths
+- A (faithful, large, core change; current direction): add a split-pane teammate mode to codex:
   `team_spawn_member` (or a TUI reaction) launches a separate `codex` teammate process in a tmux pane
   (split-window -h 70% + alternating, colored borders/titles), the teammate process joins the team via
   shared on-disk team state + a file mailbox, and lead⇄member messaging goes through that mailbox.
   Touches core (team registry persistence, a `codex --agent-id/--team` teammate entrypoint, mailbox IPC).
-- B (pragmatic, smaller): keep in-process runtime; upgrade the TUI to mirror Claude's UX precisely —
+- B (superseded fallback idea): keep in-process runtime; upgrade the TUI to mirror Claude's UX precisely —
   Claude's pane LAYOUT (split-window -h 70% + alternating, colored borders + titles) showing each teammate's
   live view, colored teammate "pills" in the footer, and the in-terminal select/@ flow. No core change.
 
 ## Recommendation
-Ship B now (matches Claude in-process mode + Claude-style pane layout for visibility), and only do A if
-truly-interactive separate teammate panes are required (it duplicates the runtime as multi-process).
+Continue the process-pane path. Keep native `spawn_agent` and generic `/agent`
+navigation as ordinary subagent surfaces; copy Claude Teams behavior only into
+the explicit Teams product path (`create_team` / `team_spawn_member` / Teams
+roster / mailbox pollers).

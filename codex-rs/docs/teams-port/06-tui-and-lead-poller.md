@@ -2,8 +2,9 @@
 
 Faithful Rust port of Claude Code's `TeamsDialog.tsx` and the lead-side inbox
 pollers (`useInboxPoller` / `runHeadlessStreaming`) into `codex-rs/tui`, wired to
-the on-disk `team_store` (Phase 1) and the existing in-process `team.rs` / team
-tools. Truth source: `ChinaSiro/claude-code-sourcemap`.
+the on-disk `team_store` (Phase 1), the process-backed `codex teammate` path, and
+the in-process fallback in `team.rs` / team tools. Truth source:
+`ChinaSiro/claude-code-sourcemap`.
 
 This phase has two halves:
 
@@ -153,9 +154,10 @@ export function useInboxPoller({ enabled, isLoading, focusedInputDialog,
   `teamContext.teammates[leadAgentId].name`, fallback `'team-lead'`).
 - `readUnreadMessages(agentName, teamName)` → unread inbox messages.
 - Partitions control messages (permission/shutdown/mode/plan-approval) from
-  `regularMessages`. **For the Codex port, only `regularMessages` matter** — the
-  permission/plan-approval/sandbox branches are Claude-specific and out of scope
-  here (codex teammates are in-process; no cross-process permission bridge).
+  `regularMessages`. **For the Codex port, only `regularMessages` matter** in
+  this slice — the permission/plan-approval/sandbox branches are Claude-specific
+  and remain out of scope even when the teammate is a separate `codex teammate`
+  process.
 - Formats each regular message and submits/queues:
 ```ts
 const colorAttr = m.color ? ` color="${m.color}"` : ''
@@ -432,8 +434,9 @@ Add to `enum AppEvent` (sits beside the existing `OpenTeammatePane`):
 /// the active (lead) thread. `text` is the joined <teammate-message …> payload.
 InjectTeammateReplies { text: String },
 
-/// Open the Teams dialog overlay (ctrl+t already toggles teammate switch; bind
-/// a distinct key, e.g. the existing teams entry point, to this).
+/// Open the Teams dialog overlay (Shift+↑/↓ already moves through the Teams
+/// footer roster; bind a distinct key, e.g. the existing teams entry point, to
+/// this).
 OpenTeamsDialog,
 
 /// Side-effects requested by the Teams dialog (focus / hide-show a pane).
@@ -477,20 +480,19 @@ and have `team_ui::sync_footer_context_label` also push
   `teammate_panes.rs`). The teams root passed to `team_store` IS `codex_home`
   (Phase 1 layout: `teams/{team}/…` under `$CODEX_HOME`).
 
-### B.8 Relationship to the existing in-process runtime (important)
-Codex teammates are currently **in-process threads** (see `TEAMS_CLAUDE_PARITY.md`).
-Until Phase 2/3 land a teammate **process** that actually `writeToMailbox`es the
-lead inbox, the lead inbox file will be empty and the poller is a no-op. Two safe
-options, both faithful:
-- (a) Ship B.4 poller now reading `team_store`; it activates automatically once
-  Phase 2 writes replies/idle notifications to the lead inbox.
-- (b) Bridge: have the in-process `team_send`/idle path in
-  `core/src/tools/handlers/team.rs` / `core/src/team.rs` **also**
-  `team_store::write_to_mailbox(team, lead_name, …)` for member→lead messages, so
-  the poller has data even in in-process mode. This is the smallest change that
-  makes the poller live without Phase 3; it is additive (the in-memory registry
-  path is unchanged). Recommend (b) for an end-to-end demo; it is the only
-  optional core touch and must be coordinated with the Phase 4 messaging owner.
+### B.8 Relationship to teammate runtime modes (important)
+Codex now has a process-backed teammate path: `team_spawn_member` can launch a
+full interactive `codex teammate` TUI in tmux/iTerm2, and that teammate receives
+its first turn through the on-disk team mailbox. If no pane backend is available,
+`team_spawn_member` fails closed instead of creating a native in-process
+subagent.
+
+That means the lead inbox poller is no longer speculative for process-backed
+teammates; it is the mechanism that turns teammate mailbox replies into lead
+turns:
+- Process-backed path: require the teammate TUI poller to read its inbox,
+  execute the first/follow-up turns, and write replies/idle notifications to the
+  lead inbox.
 
 ### B.9 Tests (TUI-local, no cargo run here)
 - `team_colors`: round-robin determinism, stable per id, `clear` resets index;
@@ -513,6 +515,5 @@ options, both faithful:
    should call into that backend once it exists; until then it tmux-only.
 2. Whether `BottomPane`'s active-agent label can render styled spans, or needs the
    new `set_active_team_pills` sibling (B.6). The sibling is the safe path.
-3. Whether to bridge in-process member→lead messages into the lead inbox now
-   (B.8 option b) — needs sign-off from the Phase 4 messaging owner since it
-   touches `core` (the one allowed-but-optional core change).
+3. Whether to add a future verified in-process teammate mode with a distinct
+   session source. Do not reuse native `spawn_agent` as a Teams fallback.

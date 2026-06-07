@@ -57,23 +57,27 @@ The first vertical slice should support:
 A user prompt like this must be enough to drive the model toward Teams tools once implemented:
 
 ```text
-Create an agent team with 3 teammates to investigate this task in parallel.
+Create a Codex Teams workspace with 3 named Teams teammates to investigate this task in parallel.
 ```
+
+Generic requests for subagents, agents in parallel, implementation/check lanes,
+or read-only audit lanes should use native `spawn_agent`/subagent tools unless
+the user explicitly says those agents should be Codex Teams teammates.
 
 Slash command parity is intentionally narrow in this slice: `/teams` may guide the user, but it must not become the primary proof or embed workflow policy. Natural language requires model-exposed tools and usage hints.
 
 ## First-Slice Design Decisions
 
 - Team state is live-session-only. Persistent resume is out of scope, and team snapshots must make the live-only boundary explicit.
-- Live team state is scoped to the owning `ThreadManager`, and `AgentControl` carries the manager-scoped `TeamRegistry` into spawned teammate sessions so team tools operate on the same live registry across lead and teammate threads.
+- Live lead-side team state is scoped to the owning `ThreadManager`. Teams teammates join the team through the on-disk team store and mailbox as process-backed `codex teammate` sessions; ordinary in-process `spawn_agent` sessions remain outside the Teams teammate path.
 - Stopped teams remain visible in `list_teams` and `team_status` so users can inspect final members, messages, tasks, and events after cleanup.
 - `team_status` refreshes member agent statuses from `AgentControl` before returning the snapshot.
-- `team_spawn_member` treats `message` or non-empty `items` as the teammate's spawn prompt. Teams core prepends a generic context envelope with team id/name, lead thread id, member id/name, profile, capabilities, permissions, live-session-only status, and available generic team coordination tools before submitting the initial input to `AgentControl`.
+- `team_spawn_member` treats `message` or non-empty `items` as the teammate's first-turn prompt. It launches a real `codex teammate` process in a tmux/iTerm pane, registers it in the on-disk team store, and writes the generic Teams context envelope plus prompt into that teammate's mailbox. If no pane backend is available, the tool fails closed instead of falling back to native `spawn_agent`.
 - Task state is now a generic substrate mutation boundary: `team_task_create`, `team_task_update`, and `team_task_list` can manage shared task-board items without encoding workflow policy.
 - `team_task_claim` adds the smallest task-board state-machine transition: a known team member can claim an open task only when dependencies are completed and any existing assignee matches the claimant.
 - `team_event_list` exposes lifecycle, message, task, and failure events as the standalone event-feed readback path.
 - Member `capabilities` and `permissions` are generic labels attached to team members; Teams core stores and returns them but does not enforce policy from them.
-- `team_send` records either the lead or a member as sender, supports member or lead targets, submits member-targeted messages through existing `AgentControl` input primitives, and records lead-targeted messages in the shared team mailbox/event feed. `interrupt` delivery is only valid for member targets.
+- `team_send` records either the lead or a member as sender and supports member or lead targets. Process-backed teammate traffic is routed through the on-disk team mailbox; native `spawn_agent` sessions are not Teams members.
 - `team_member_stop` stops one teammate agent, marks only that member stopped, records a `MemberStopped` event, keeps the team active/readable, rejects later sends from/to that stopped member, and rejects task claims by that stopped member.
 - `team_stop` is a mutating lifecycle transition. It stops active teammate agents and marks the team stopped once; repeated `team_stop` calls against an already stopped team are rejected while readback paths remain available.
 - Model-callable tools are `create_team`, `list_teams`, `team_status`, `team_spawn_member`, `team_send`, `team_task_create`, `team_task_update`, `team_task_claim`, `team_task_list`, `team_event_list`, `team_member_stop`, and `team_stop`.
@@ -81,7 +85,6 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 
 ## Out Of Scope For First Slice
 
-- tmux/iTerm split-pane display mode
 - nested teams
 - teammate spawning teammates
 - persistent resume across process restarts
@@ -97,7 +100,7 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 - [x] Natural-language model path can create and inspect a team through tool exposure, not only slash commands.
 - [x] Natural-language model path can create/claim/update/list generic team tasks and read the event feed through model-callable tools.
 - [x] TUI has a documented first subset: `/teams` renders manual guidance only.
-- [x] First slice reuses existing AgentControl/input primitives instead of duplicating agent lifecycle.
+- [x] First slice uses the on-disk mailbox for process-backed teammates and keeps native `spawn_agent` delegation outside the Teams teammate path.
 - [x] Team core does not hardcode reviewer, PASS/BLOCKERS, or Darwin policy.
 - [x] Tests cover the first substrate path.
 - [x] TUI-visible changes include snapshot coverage when rendering changes.
@@ -112,6 +115,29 @@ Slash command parity is intentionally narrow in this slice: `/teams` may guide t
 - Trellis context for this task is in `implement.jsonl` and `check.jsonl`.
 
 ## Validation Evidence
+
+Current validation and packaging proof from 2026-06-07:
+
+- `cd codex-rs && just fmt` passed; only the existing ruff `exclude-newer = "7 days"` warning was emitted.
+- `git diff --check` passed.
+- Focused CodeMode regression proof passed:
+  `just test -p codex-core code_mode_only_guides_all_tools_search_and_calls_deferred_app_tools`.
+- Focused tool-routing proof passed:
+  `just test -p codex-core code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools hosted_tools_follow_provider_auth_model_and_config_gates code_mode_only_restricts_prompt_tools code_mode_only_guides_all_tools_search_and_calls_deferred_app_tools shell_tools_run_in_parallel mixed_parallel_tools_run_in_parallel`.
+- Full `cd codex-rs && just test` completed with `10381 tests run: 10379 passed, 2 failed, 23 skipped`; the two failures were timing flakes in `shell_tools_run_in_parallel` and `mixed_parallel_tools_run_in_parallel`.
+- Focused retry for the full-suite failures passed:
+  `just test -p codex-core shell_tools_run_in_parallel mixed_parallel_tools_run_in_parallel`.
+- The additional flaky `snapshot_rollback_past_compaction_replays_append_only_history` also passed on focused retry.
+- Installed the current dirty worktree into the user command:
+  `cargo install --path cli --bin codex --locked --force --root /Users/snakesammy/.cargo`.
+- `command -v codex` resolved to `/Users/snakesammy/.cargo/bin/codex`.
+- `/Users/snakesammy/.cargo/bin/codex --version` returned `codex-cli 0.0.0`.
+- `codex --help` rendered the expected CLI command surface.
+- `codex doctor --summary --ascii` returned `15 ok | 1 idle | 4 notes | 2 warn | 0 fail degraded`.
+- Backed up the previous installed command at `/Users/snakesammy/.cargo/bin/codex.backup.20260607-204823`.
+- Ran `cargo clean` in `codex-rs`, removing `295398 files, 89.6GiB total`.
+- Verified `codex-rs/target` was removed and `/System/Volumes/Data` free space recovered to about `90Gi`.
+- Verified `/Users/snakesammy/.cargo/bin/codex` still existed and remained executable after cleanup.
 
 Final local proof from 2026-05-29:
 

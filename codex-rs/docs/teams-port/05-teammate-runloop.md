@@ -10,6 +10,17 @@ Scope of this component (per the orchestrator brief):
 `main.tsx::run` → `extractTeammateOptions` → `getTeammateUtils().setDynamicTeamContext`,
 `runInProcessTeammate`, `waitForNextPromptOrShutdown`, `initializeTeammateHooks` (Stop hook).
 
+> Current Codex implementation note: the original headless embedded
+> `CodexThread` runner plan in this file has been superseded by the interactive
+> teammate process path. `codex-rs/cli/src/teammate/mod.rs` now launches the full
+> Codex TUI in teammate mode; the TUI owns the teammate inbox poller and injects
+> mailbox messages as turns in that teammate's own session. The old
+> `cli/src/teammate/runner.rs` helpers are retained behind `#[allow(dead_code)]`
+> for mailbox/run-loop parity reference, not as the current launch path. Keep
+> using the Claude evidence below for mailbox priority, XML wrapping, idle, and
+> shutdown semantics; do not use the headless file/module plan as current
+> implementation guidance.
+
 > Backends (tmux/iTerm), the lead's spawn-in-pane, and the lead inbox poller are **out of
 > scope** here (Phases 3/4). This phase delivers the teammate-side binary that a spawned
 > `codex` process runs.
@@ -171,9 +182,12 @@ All new code lives in `codex-rs/cli`. Read-only elsewhere.
 | `codex-rs/cli/src/teammate/message_fmt.rs` *(NEW)* | `format_as_teammate_message`, `is_shutdown_request`, idle/shutdown serde types |
 | `codex-rs/cli/src/lib.rs` *(edit)* | `pub mod teammate_cmd;` (or `mod` if not re-exported) |
 
-Rationale for `cli` (not `tui`/`exec`): a teammate is a **headless embedded session** driven
-by the inbox, not an interactive TUI and not the one-shot `exec` flow. It needs the in-process
-`ThreadManager`/`CodexThread` API (§3), which `cli` can construct directly.
+Historical rationale for `cli` (not `tui`/`exec`): the first plan modeled a
+teammate as a **headless embedded session** driven by the inbox, not an
+interactive TUI and not the one-shot `exec` flow. Current code kept the hidden
+`codex teammate` CLI entrypoint but changed its body: it constructs a normal
+interactive TUI `Cli` with teammate identity fields and lets the TUI-side
+poller consume the mailbox.
 
 Module wiring in `teammate_cmd.rs`:
 ```rust

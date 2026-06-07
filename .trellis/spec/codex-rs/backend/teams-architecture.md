@@ -25,8 +25,12 @@ Policy layers own:
 Users must be able to say a request such as:
 
 ```text
-Create an agent team with 3 teammates to investigate this task in parallel.
+Create a Codex Teams workspace with 3 named Teams teammates to investigate this task in parallel.
 ```
+
+Generic requests for subagents, agents in parallel, implementation/check lanes,
+or read-only audit lanes should use native `spawn_agent`/subagent tools unless
+the user explicitly says those agents should be Codex Teams teammates.
 
 That means Teams actions need model-callable tools in core. `/teams` can exist, but only as a manual control surface over the same substrate.
 
@@ -43,7 +47,10 @@ First implementation should prove:
 7. Stop one teammate while the team remains active.
 8. Stop the team cleanly.
 
-Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
+Do not start with reviewer policy or Darwin feedback loops. Process-backed
+tmux/iTerm teammate panes are now part of the explicit Teams display path. Native
+in-process `spawn_agent` sessions stay on the subagent path and must not be
+registered as Teams teammates.
 
 ## Scenario: Model-Callable Teams Substrate
 
@@ -51,15 +58,15 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 
 - Trigger: Teams adds model-callable core tools that create and mutate collaboration state across agent lifecycle, message routing, task-board state, and event readback.
 - Scope: `codex-core` owns the live-session-only registry and function tools. The TUI `/teams` surface remains manual guidance over the same substrate.
-- Registry lifetime: the live `TeamRegistry` is scoped to the owning `ThreadManager` and carried by `AgentControl` into spawned Codex sessions, so lead and teammate tools read and mutate the same live team state.
+- Registry lifetime: the lead-side live `TeamRegistry` is scoped to the owning `ThreadManager`. Process-backed teammates join the same team through the on-disk team store and mailbox; native `spawn_agent` sessions do not become Teams teammates.
 
 ### 2. Signatures
 
 - `create_team(name)` -> creates a live-session-only `Team`.
 - `list_teams()` -> returns visible teams, including stopped teams.
 - `team_status(team_id)` -> returns `TeamSnapshot { team, messages, events }` after refreshing member agent statuses.
-- `team_spawn_member(team_id, name, profile?, capabilities?, permissions?, message?/items?)` -> spawns one independent Codex agent session through `AgentControl` after prepending a generic Teams context envelope to the teammate's spawn prompt/items.
-- `team_send(team_id, target?, member_id?, sender_member_id?, delivery_mode?, message?/items?)` -> submits input to an existing member agent when `target` is `member`, or records a message to the lead mailbox when `target` is `lead`.
+- `team_spawn_member(team_id, name, profile?, capabilities?, permissions?, message?/items?)` -> spawns one named Teams teammate as a process-backed `codex teammate` in a tmux/iTerm pane, with the generic Teams context envelope plus first prompt delivered through the on-disk mailbox. If no pane backend is available, fail closed instead of falling back to native `spawn_agent`.
+- `team_send(team_id, target?, member_id?, sender_member_id?, delivery_mode?, message?/items?)` -> routes process-backed teammate traffic through the on-disk mailbox.
 - `team_task_create(team_id, title, assignee_member_id?, dependencies?, note?)` -> creates one generic shared task-board item.
 - `team_task_update(team_id, task_id, title?, assignee_member_id?, dependencies?, status?, note?)` -> updates one generic shared task-board item.
 - `team_task_claim(team_id, task_id, member_id)` -> claims one open shared task-board item for a team member after dependency and assignee checks.
@@ -71,12 +78,13 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 ### 3. Contracts
 
 - `Team.live_session_only` must be `true` until persistent resume is explicitly implemented.
-- `TeamRegistry` must be shared across lead and spawned teammate sessions within the same `ThreadManager`; per-session registries would make teammate-originated team tools unable to see the lead-created team.
+- `TeamRegistry` must remain the lead-side live state authority, while process-backed teammates use the on-disk team store and mailbox as their cross-process authority. Per-session registries alone would make teammate-originated team tools unable to see the lead-created team.
 - Stopped teams remain readable through list/status/task/event readback, but mutating paths must reject them.
 - Member `capabilities` and `permissions` are generic labels. Teams core stores and returns them but does not enforce policy from them.
-- `team_spawn_member.message` or non-empty `items` is required because teammates do not inherit the lead conversation history. Teams core must prepend only generic identity and coordination context; it must not add reviewer, PASS/BLOCKERS, Darwin, tmux, or role-specific workflow policy.
-- `team_send.target` defaults to `member`; member targets require `member_id`, while lead targets must omit `member_id` and are recorded in the shared mailbox/event feed without submitting input to an agent thread.
-- `team_send.delivery_mode` defaults to `queue`; `interrupt` must call `AgentControl::interrupt_agent` before submitting input to member targets and must be rejected for lead targets.
+- `team_spawn_member.message` or non-empty `items` is required because teammates do not inherit the lead conversation history. Teams core must prepend only generic identity and coordination context; it must not add reviewer, PASS/BLOCKERS, Darwin, or role-specific workflow policy. Display mechanics such as tmux/iTerm panes belong to the Teams display adapter, not to policy-specific prompt context.
+- Process-backed teammate launch must explicitly inherit `CODEX_HOME`, `CODEX_TEAMMATE`, proxy/cert env vars, the current model provider `env_key`, and env vars referenced by `env_http_headers`. Do not rely on the tmux/iTerm child shell having the same provider auth environment as the lead process.
+- `team_send.target` defaults to `member`; member targets require `member_id`, while lead targets must omit `member_id`. Process-backed sends are recorded in the shared mailbox/event feed.
+- `team_send.delivery_mode` defaults to `queue`; `interrupt` must be rejected for lead targets and process-mailbox targets.
 - `team_send.sender_member_id` is optional. Omit it for a lead-originated message; provide a member id only when that member belongs to the same team.
 - `team_member_stop` requires an active team and a known member. It must be idempotent for an already stopped member, must not stop the team, and must not shut down other active members.
 - Stopped members remain visible in snapshots and event readback, but member-targeted sends from/to stopped members and task claims by stopped members must be rejected.
@@ -102,7 +110,7 @@ Do not start with tmux panes, reviewer policy, or Darwin feedback loops.
 
 - Good: create a team, spawn members with generic labels, send messages, create/claim/update/list tasks, list events, inspect status, and stop the team.
 - Base: create a team with no members or tasks; status still returns an explicit live-session-only snapshot.
-- Bad: encode reviewer, PASS/BLOCKERS, Darwin, split-pane, or role-marketplace behavior in core team types or tools.
+- Bad: encode reviewer, PASS/BLOCKERS, Darwin, or role-marketplace behavior in core team types or tools. Split-pane process launch is allowed only as a Teams display adapter over the generic substrate, not as a policy workflow.
 
 ### 6. Tests Required
 
@@ -119,13 +127,17 @@ Add a `reviewer` team mode that creates hardcoded blocker statuses and display p
 
 #### Correct
 
-Keep Teams core as live collaboration state plus generic tools. Attach reviewer workflows, external panes, and domain templates later as adapters or policy layers over `Team`, `Member`, `Message`, `Task`, and `TeamEvent`.
+Keep Teams core as live collaboration state plus generic tools. Attach reviewer workflows and domain templates later as policy layers over `Team`, `Member`, `Message`, `Task`, and `TeamEvent`; attach tmux/iTerm panes as display adapters over that same substrate.
 
 ## Display Boundary
 
-Initial display mode should be in-process TUI switching/watch output.
+Process-backed tmux/iTerm teammate panes are the preferred Teams display path
+when a pane backend is available. If no pane backend is available,
+`team_spawn_member` fails closed instead of creating a native in-process
+subagent, so Teams teammate state stays separate from native subagent
+navigation.
 
-External display modes such as tmux or iTerm panes should be adapters over the same team state and event feed.
+All display modes must remain adapters over the same team state and event feed.
 
 ## Persistence Boundary
 
