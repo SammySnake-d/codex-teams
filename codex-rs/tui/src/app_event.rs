@@ -74,6 +74,14 @@ pub(crate) struct HistoryLookupResponse {
     pub(crate) entry: Option<String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct TeammateInboxAck {
+    pub(crate) codex_home: PathBuf,
+    pub(crate) team: String,
+    pub(crate) agent_name: String,
+    pub(crate) indices: Vec<usize>,
+}
+
 impl RealtimeAudioDeviceKind {
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -154,6 +162,10 @@ pub(crate) enum AppEvent {
         agent_role: Option<String>,
         tmux_pane_id: Option<String>,
         backend_type: Option<String>,
+        color: Option<String>,
+        mode: Option<String>,
+        is_active: Option<bool>,
+        prompt: Option<String>,
     },
 
     /// Lead inbox poll found explicit teammate replies; inject them as this
@@ -162,12 +174,14 @@ pub(crate) enum AppEvent {
     /// `<teammate-message …>` payload.
     InjectTeammateReplies {
         text: String,
+        ack: TeammateInboxAck,
     },
 
     /// Teammate-mode inbox poll found a lead/peer/shutdown message for this
     /// teammate process; inject it as this TUI's own user turn.
     InjectTeammateInboxMessage {
         text: String,
+        ack: TeammateInboxAck,
     },
 
     /// A Codex team became active (created); start the lead inbox poller.
@@ -178,10 +192,8 @@ pub(crate) enum AppEvent {
     /// The active Codex team stopped; cancel the lead inbox poller.
     TeamBecameInactive,
 
-    /// Open the Teams dialog overlay (Phase 6 §B.6). No default keybinding is
-    /// wired yet — `ctrl+t` is the transcript toggle, so binding a distinct key
-    /// (or a `/teams` slash command) is a follow-up. The dispatch + overlay are
-    /// fully wired, so a future keybind only needs to send this event.
+    /// Open the Teams dialog overlay (Phase 6 §B.6). `/teams` sends this
+    /// event; a future keybind only needs to send the same event.
     #[allow(dead_code)]
     OpenTeamsDialog,
 

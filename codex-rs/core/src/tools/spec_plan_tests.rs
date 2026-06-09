@@ -10,6 +10,9 @@ use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::SearchToolCallParams;
 use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
@@ -32,9 +35,14 @@ use serde_json::json;
 
 use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
+use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::context::ToolPayload;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
+use crate::tools::router::ToolCall;
+use crate::tools::router::ToolCallSource;
 use crate::tools::router::ToolRouter;
 use crate::tools::router::ToolRouterParams;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -54,7 +62,7 @@ struct ToolPlanProbe {
 }
 
 impl ToolPlanProbe {
-    fn from_router(router: ToolRouter) -> Self {
+    fn from_router(router: &ToolRouter) -> Self {
         let visible_specs = router.model_visible_specs();
         let visible_names = visible_specs
             .iter()
@@ -185,11 +193,116 @@ async fn probe_with(
             dynamic_tools: inputs.dynamic_tools.as_slice(),
         },
     );
-    ToolPlanProbe::from_router(router)
+    ToolPlanProbe::from_router(&router)
 }
 
 async fn probe(configure_turn: impl FnOnce(&mut TurnContext)) -> ToolPlanProbe {
     probe_with(configure_turn, ToolPlanInputs::default()).await
+}
+
+async fn dispatch_function_tool(
+    router: &ToolRouter,
+    session: Arc<crate::session::session::Session>,
+    turn: Arc<TurnContext>,
+    call_id: &str,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let result = router
+        .dispatch_tool_call_with_code_mode_result(
+            session,
+            turn,
+            CancellationToken::new(),
+            SharedTurnDiffTracker::default(),
+            ToolCall {
+                tool_name: ToolName::plain(tool_name),
+                call_id: call_id.to_string(),
+                payload: ToolPayload::Function {
+                    arguments: arguments.to_string(),
+                },
+            },
+            ToolCallSource::Direct,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{tool_name} should dispatch through ToolRegistry: {err}"));
+
+    let ResponseInputItem::FunctionCallOutput { output, .. } = result.into_response() else {
+        panic!("{tool_name} should return function-call output");
+    };
+    assert_eq!(output.success, Some(true));
+    let FunctionCallOutputBody::Text(text) = output.body else {
+        panic!("{tool_name} should return text JSON");
+    };
+    serde_json::from_str(&text).unwrap_or_else(|err| {
+        panic!("{tool_name} should return JSON text output, got {text:?}: {err}")
+    })
+}
+
+async fn dispatch_tool_search(
+    router: &ToolRouter,
+    session: Arc<crate::session::session::Session>,
+    turn: Arc<TurnContext>,
+    query: &str,
+) -> Vec<serde_json::Value> {
+    let result = router
+        .dispatch_tool_call_with_code_mode_result(
+            session,
+            turn,
+            CancellationToken::new(),
+            SharedTurnDiffTracker::default(),
+            ToolCall {
+                tool_name: ToolName::plain("tool_search"),
+                call_id: "tool-search-call".to_string(),
+                payload: ToolPayload::ToolSearch {
+                    arguments: SearchToolCallParams {
+                        query: query.to_string(),
+                        limit: Some(10),
+                    },
+                },
+            },
+            ToolCallSource::Direct,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("tool_search should dispatch through ToolRegistry: {err}"));
+
+    let ResponseInputItem::ToolSearchOutput { tools, .. } = result.into_response() else {
+        panic!("tool_search should return tool-search output");
+    };
+    tools
+}
+
+fn tool_search_function_names(tools: &[serde_json::Value]) -> Vec<String> {
+    tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+async fn assert_teams_create_and_list_dispatch(
+    router: &ToolRouter,
+    session: Arc<crate::session::session::Session>,
+    turn: Arc<TurnContext>,
+) {
+    let created = dispatch_function_tool(
+        router,
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        "create-team-call",
+        "create_team",
+        json!({"name": "parallel investigation"}),
+    )
+    .await;
+    let listed = dispatch_function_tool(
+        router,
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        "list-teams-call",
+        "list_teams",
+        json!({}),
+    )
+    .await;
+    assert_eq!(listed["teams"], json!([created["team"].clone()]));
 }
 
 fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
@@ -1034,9 +1147,12 @@ async fn teams_tools_are_lead_only_and_do_not_replace_spawn_agent() {
     })
     .await;
     lead.assert_visible_contains(&["spawn_agent"]);
-    lead.assert_visible_contains(&team_tools);
+    lead.assert_visible_lacks(&team_tools);
     lead.assert_registered_contains(&["spawn_agent"]);
     lead.assert_registered_contains(&team_tools);
+    for tool_name in team_tools {
+        assert_eq!(lead.exposure(tool_name), ToolExposure::Hidden);
+    }
 
     let spawned_subagent = probe(|turn| {
         set_features(turn, &[Feature::MultiAgentV2, Feature::Teams]);
@@ -1048,6 +1164,30 @@ async fn teams_tools_are_lead_only_and_do_not_replace_spawn_agent() {
     spawned_subagent.assert_visible_lacks(&team_tools);
     spawned_subagent.assert_registered_contains(&["spawn_agent"]);
     spawned_subagent.assert_registered_lacks(&team_tools);
+}
+
+#[tokio::test]
+async fn hidden_teams_create_and_list_still_dispatch_without_tool_search() {
+    let (session, mut turn) = make_session_and_context().await;
+    set_features(&mut turn, &[Feature::MultiAgentV2, Feature::Teams]);
+
+    let router = ToolRouter::from_turn_context(
+        &turn,
+        ToolRouterParams {
+            mcp_tools: None,
+            deferred_mcp_tools: None,
+            discoverable_tools: None,
+            extension_tool_executors: Vec::new(),
+            dynamic_tools: &[],
+        },
+    );
+    let plan_probe = ToolPlanProbe::from_router(&router);
+    plan_probe.assert_visible_contains(&["spawn_agent"]);
+    plan_probe.assert_visible_lacks(&["create_team", "list_teams"]);
+    assert_eq!(plan_probe.exposure("create_team"), ToolExposure::Hidden);
+    assert_eq!(plan_probe.exposure("list_teams"), ToolExposure::Hidden);
+
+    assert_teams_create_and_list_dispatch(&router, Arc::new(session), Arc::new(turn)).await;
 }
 
 #[tokio::test]
@@ -1068,43 +1208,219 @@ async fn teams_tools_defer_when_tool_search_available() {
         "team_stop",
     ];
 
-    let lead = probe(|turn| {
-        turn.model_info.supports_search_tool = true;
-        set_features(turn, &[Feature::MultiAgentV2, Feature::Teams]);
-    })
+    let lead = probe_with(
+        |turn| {
+            turn.model_info.supports_search_tool = true;
+            set_features(turn, &[Feature::MultiAgentV2, Feature::Teams]);
+        },
+        ToolPlanInputs {
+            extension_tool_executors: vec![Arc::new(DeferredExtensionTool)],
+            ..ToolPlanInputs::default()
+        },
+    )
     .await;
     lead.assert_visible_contains(&["spawn_agent", "tool_search"]);
     lead.assert_visible_lacks(&team_tools);
     lead.assert_registered_contains(&["spawn_agent"]);
     lead.assert_registered_contains(&team_tools);
+    assert_eq!(lead.exposure("extension_echo"), ToolExposure::Deferred);
     for tool_name in team_tools {
         assert_eq!(lead.exposure(tool_name), ToolExposure::Deferred);
     }
+}
 
-    let ToolSpec::ToolSearch { description, .. } = lead.visible_spec("tool_search") else {
-        panic!("expected visible tool_search spec");
-    };
-    assert!(
-        description
-            .contains("- Codex Teams tools: Create and manage explicit Codex Teams workspaces")
+#[tokio::test]
+async fn deferred_teams_create_and_list_dispatch_through_registry() {
+    let (session, mut turn) = make_session_and_context().await;
+    turn.model_info.supports_search_tool = true;
+    set_features(&mut turn, &[Feature::MultiAgentV2, Feature::Teams]);
+    let extension_tool_executors: Vec<Arc<dyn ToolExecutor<ExtensionToolCall>>> =
+        vec![Arc::new(DeferredExtensionTool)];
+
+    let router = ToolRouter::from_turn_context(
+        &turn,
+        ToolRouterParams {
+            mcp_tools: None,
+            deferred_mcp_tools: None,
+            discoverable_tools: None,
+            extension_tool_executors,
+            dynamic_tools: &[],
+        },
     );
-    let teams_source_line = description
-        .lines()
-        .find(|line| line.starts_with("- Codex Teams tools:"))
-        .expect("tool_search should list the Codex Teams source");
-    for forbidden_trigger in [
-        "spawn_agent",
+    let plan_probe = ToolPlanProbe::from_router(&router);
+    plan_probe.assert_visible_contains(&["tool_search"]);
+    plan_probe.assert_visible_lacks(&["create_team", "list_teams"]);
+    assert_eq!(plan_probe.exposure("create_team"), ToolExposure::Deferred);
+    assert_eq!(plan_probe.exposure("list_teams"), ToolExposure::Deferred);
+
+    assert_teams_create_and_list_dispatch(&router, Arc::new(session), Arc::new(turn)).await;
+}
+
+#[tokio::test]
+async fn teams_tool_search_requires_explicit_teams_terms_not_subagent() {
+    let (session, mut turn) = make_session_and_context().await;
+    turn.model_info.supports_search_tool = true;
+    set_features(&mut turn, &[Feature::MultiAgentV2, Feature::Teams]);
+    let router = ToolRouter::from_turn_context(
+        &turn,
+        ToolRouterParams {
+            mcp_tools: None,
+            deferred_mcp_tools: None,
+            discoverable_tools: None,
+            extension_tool_executors: Vec::new(),
+            dynamic_tools: &[],
+        },
+    );
+    let plan_probe = ToolPlanProbe::from_router(&router);
+    plan_probe.assert_visible_contains(&["spawn_agent", "tool_search"]);
+    plan_probe.assert_visible_lacks(&["create_team", "team_spawn_member"]);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    for query in [
         "subagent",
-        "sub-agent",
-        "ordinary delegation",
-        "parallel delegation",
-        "parallel agent work",
+        "sub-agents",
+        "parallel sub-agents",
+        "spawn subagents",
+        "spawn_agent",
+        "delegate work to a subagent",
+        "开启subagent",
+        "开启子代理",
+        "launch another agent",
+        "parallel agents",
     ] {
+        let subagent_tools =
+            dispatch_tool_search(&router, Arc::clone(&session), Arc::clone(&turn), query).await;
         assert!(
-            !teams_source_line.contains(forbidden_trigger),
-            "Teams tool_search source must not match ordinary agent trigger {forbidden_trigger:?}"
+            subagent_tools.is_empty(),
+            "generic agent delegation query {query:?} must not load Teams tools: {subagent_tools:?}"
         );
     }
+
+    for (query, expected_tools) in [
+        ("teammate", &["create_team"][..]),
+        ("swarm", &["create_team"][..]),
+        ("collaboration", &["create_team"][..]),
+        ("coordinate", &["create_team"][..]),
+        ("团队", &["create_team"][..]),
+        ("队友", &["create_team"][..]),
+        ("spawn teammate", &["create_team"][..]),
+        ("create teammate", &["create_team"][..]),
+        ("create_team", &["create_team"][..]),
+        ("team_spawn_member", &["team_spawn_member"][..]),
+        ("team_send", &["team_send"][..]),
+    ] {
+        let teams_tools =
+            dispatch_tool_search(&router, Arc::clone(&session), Arc::clone(&turn), query).await;
+        let tool_names = tool_search_function_names(&teams_tools);
+        let rendered = serde_json::Value::Array(teams_tools).to_string();
+        for expected_tool in expected_tools {
+            assert!(
+                tool_names.iter().any(|name| name == expected_tool),
+                "explicit Teams query {query:?} should load {expected_tool}: {tool_names:?}; {rendered}"
+            );
+        }
+        if query != "team_spawn_member" {
+            assert!(
+                !tool_names.iter().any(|name| name == "team_spawn_member"),
+                "Teams query {query:?} should route teammate spawn through spawn_agent name/team_name, not team_spawn_member: {tool_names:?}; {rendered}"
+            );
+        }
+    }
+
+    for query in ["team spawn member"] {
+        let teams_tools =
+            dispatch_tool_search(&router, Arc::clone(&session), Arc::clone(&turn), query).await;
+        let tool_names = tool_search_function_names(&teams_tools);
+        let rendered = serde_json::Value::Array(teams_tools).to_string();
+        assert!(
+            !tool_names.iter().any(|name| name == "team_spawn_member"),
+            "near-exact Teams query {query:?} should not load team_spawn_member without the exact tool name: {tool_names:?}; {rendered}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn teams_feature_keeps_v1_subagent_search_separate() {
+    let (session, mut turn) = make_session_and_context().await;
+    turn.model_info.supports_search_tool = true;
+    set_feature(&mut turn, Feature::Teams, /*enabled*/ true);
+    set_feature(&mut turn, Feature::MultiAgentV2, /*enabled*/ false);
+    set_feature(&mut turn, Feature::Collab, /*enabled*/ true);
+    let router = ToolRouter::from_turn_context(
+        &turn,
+        ToolRouterParams {
+            mcp_tools: None,
+            deferred_mcp_tools: None,
+            discoverable_tools: None,
+            extension_tool_executors: Vec::new(),
+            dynamic_tools: &[],
+        },
+    );
+    let plan_probe = ToolPlanProbe::from_router(&router);
+    plan_probe.assert_visible_contains(&["tool_search"]);
+    plan_probe.assert_visible_lacks(&["create_team", "spawn_agent"]);
+    assert_eq!(
+        plan_probe
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::Deferred
+    );
+    assert_eq!(plan_probe.exposure("create_team"), ToolExposure::Deferred);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let subagent_tools = dispatch_tool_search(
+        &router,
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        "sub-agents",
+    )
+    .await;
+    let rendered_subagent = serde_json::Value::Array(subagent_tools).to_string();
+    assert!(rendered_subagent.contains(MULTI_AGENT_V1_NAMESPACE));
+    assert!(!rendered_subagent.contains("create_team"));
+    assert!(!rendered_subagent.contains("team_spawn_member"));
+
+    let teams_tools = dispatch_tool_search(&router, session, turn, "create_team").await;
+    let teams_tool_names = tool_search_function_names(&teams_tools);
+    assert!(
+        teams_tool_names.iter().any(|name| name == "create_team"),
+        "exact create_team query should load create_team: {teams_tool_names:?}"
+    );
+    assert!(
+        !teams_tool_names
+            .iter()
+            .any(|name| name == "team_spawn_member")
+    );
+
+    let (session, mut turn) = make_session_and_context().await;
+    turn.model_info.supports_search_tool = true;
+    set_features(&mut turn, &[Feature::MultiAgentV2, Feature::Teams]);
+    let router = ToolRouter::from_turn_context(
+        &turn,
+        ToolRouterParams {
+            mcp_tools: None,
+            deferred_mcp_tools: None,
+            discoverable_tools: None,
+            extension_tool_executors: Vec::new(),
+            dynamic_tools: &[],
+        },
+    );
+    let exact_tools = dispatch_tool_search(
+        &router,
+        Arc::new(session),
+        Arc::new(turn),
+        "team_spawn_member",
+    )
+    .await;
+    let exact_tool_names = tool_search_function_names(&exact_tools);
+    let rendered_exact = serde_json::Value::Array(exact_tools).to_string();
+    assert!(
+        exact_tool_names
+            .iter()
+            .any(|name| name == "team_spawn_member"),
+        "exact tool name query should load team_spawn_member: {exact_tool_names:?}; {rendered_exact}"
+    );
 }
 
 #[tokio::test]

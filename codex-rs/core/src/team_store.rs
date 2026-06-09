@@ -8,9 +8,9 @@
 //!   teams/{team}/inboxes/{agent}.json
 //!   tasks/{team}/
 //! ```
-//! It is intentionally self-contained (std + serde only) and not yet wired into the
-//! in-process team runtime; later phases replace `spawn_member` with a process spawn
-//! and route `team_send` through these mailboxes.
+//! It is intentionally self-contained (std + serde only). The lead process mirrors
+//! pane-backed teammates into the live `TeamRegistry`, while cross-process delivery
+//! still uses this store and mailbox.
 #![allow(dead_code)]
 
 use std::fs;
@@ -35,6 +35,8 @@ pub const TEAM_LEAD_NAME: &str = "team-lead";
 pub struct TeamFile {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub created_at: i64,
     pub lead_agent_id: String,
@@ -52,9 +54,9 @@ pub struct TeamFileMember {
     pub agent_id: String,
     pub name: String,
     /// Registry-style `ThreadId` (string) returned to the model when this member
-    /// was spawned. Split-pane PROCESS members live only on disk (never in the
-    /// in-memory registry), so the lead resolves a `team_send` `member_id` back
-    /// to a mailbox recipient through this field.
+    /// was spawned. Split-pane PROCESS members are mirrored into the live registry,
+    /// while this field lets the lead resolve a `team_send` `member_id` back to a
+    /// mailbox recipient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +99,12 @@ pub struct TeammateMessage {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedTeammateMessage {
+    pub index: usize,
+    pub message: TeammateMessage,
 }
 
 /// Sanitize a team/agent name for use as a path segment (mirrors Claude `getInboxPath`).
@@ -227,9 +235,23 @@ pub fn read_mailbox(
 
 /// Mirrors `readUnreadMessages` — messages with `read == false`.
 pub fn read_unread(teams_root: &Path, team: &str, agent: &str) -> io::Result<Vec<TeammateMessage>> {
+    Ok(read_unread_with_indices(teams_root, team, agent)?
+        .into_iter()
+        .map(|entry| entry.message)
+        .collect())
+}
+
+pub fn read_unread_with_indices(
+    teams_root: &Path,
+    team: &str,
+    agent: &str,
+) -> io::Result<Vec<IndexedTeammateMessage>> {
     Ok(read_mailbox(teams_root, team, agent)?
         .into_iter()
-        .filter(|m| !m.read)
+        .enumerate()
+        .filter_map(|(index, message)| {
+            (!message.read).then_some(IndexedTeammateMessage { index, message })
+        })
         .collect())
 }
 
@@ -255,6 +277,24 @@ pub fn mark_messages_read(teams_root: &Path, team: &str, agent: &str) -> io::Res
     let mut msgs = read_messages(&path)?;
     for message in &mut msgs {
         message.read = true;
+    }
+    let bytes = serde_json::to_vec_pretty(&msgs).map_err(io::Error::other)?;
+    write_atomic(&path, &bytes)
+}
+
+pub fn mark_messages_read_by_indices(
+    teams_root: &Path,
+    team: &str,
+    agent: &str,
+    indices: &[usize],
+) -> io::Result<()> {
+    let path = inbox_path(teams_root, team, agent);
+    let _lock = FileLock::acquire(&path)?;
+    let mut msgs = read_messages(&path)?;
+    for index in indices {
+        if let Some(message) = msgs.get_mut(*index) {
+            message.read = true;
+        }
     }
     let bytes = serde_json::to_vec_pretty(&msgs).map_err(io::Error::other)?;
     write_atomic(&path, &bytes)
@@ -354,6 +394,52 @@ mod tests {
                 .to_string_lossy()
                 .contains("Rocket_Team")
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mark_messages_read_by_indices_preserves_later_unread_messages() {
+        let root = unique_root();
+        let team = "Rocket Team";
+        let agent = "team-lead";
+        write_to_mailbox(
+            &root,
+            team,
+            agent,
+            TeammateMessage {
+                from: "alice".to_string(),
+                text: "first".to_string(),
+                timestamp: now_timestamp(),
+                read: false,
+                color: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+        let snapshot = read_unread_with_indices(&root, team, agent).unwrap();
+        assert_eq!(snapshot.len(), 1);
+
+        write_to_mailbox(
+            &root,
+            team,
+            agent,
+            TeammateMessage {
+                from: "bob".to_string(),
+                text: "second".to_string(),
+                timestamp: now_timestamp(),
+                read: false,
+                color: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+        let indices = snapshot.iter().map(|entry| entry.index).collect::<Vec<_>>();
+        mark_messages_read_by_indices(&root, team, agent, &indices).unwrap();
+
+        let unread = read_unread(&root, team, agent).unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].from, "bob");
 
         let _ = fs::remove_dir_all(&root);
     }

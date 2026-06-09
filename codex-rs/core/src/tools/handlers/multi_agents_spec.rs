@@ -89,7 +89,21 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     properties.insert(
         "task_name".to_string(),
         JsonSchema::string(Some(
-            "Task name for the new agent. Use lowercase letters, digits, and underscores."
+            "Task name for the new native Codex subagent. Use lowercase letters, digits, and underscores. Required unless spawning a Codex Teams teammate with name/team_name."
+                .to_string(),
+        )),
+    );
+    properties.insert(
+        "name".to_string(),
+        JsonSchema::string(Some(
+            "Codex Teams teammate name. When a team is active, passing name spawns a split-pane Teams teammate instead of a native subagent."
+                .to_string(),
+        )),
+    );
+    properties.insert(
+        "team_name".to_string(),
+        JsonSchema::string(Some(
+            "Codex Teams workspace name for teammate spawning. Uses the current active team if omitted."
                 .to_string(),
         )),
     );
@@ -107,7 +121,7 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            Some(vec!["task_name".to_string(), "message".to_string()]),
+            Some(vec!["message".to_string()]),
             Some(false.into()),
         ),
         output_schema: Some(spawn_agent_output_schema_v2(
@@ -372,8 +386,8 @@ fn spawn_agent_output_schema_v1() -> Value {
 }
 
 fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
-    if hide_agent_metadata {
-        return json!({
+    let native_output = if hide_agent_metadata {
+        json!({
             "type": "object",
             "properties": {
                 "task_name": {
@@ -383,10 +397,9 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
             },
             "required": ["task_name"],
             "additionalProperties": false
-        });
-    }
-
-    json!({
+        })
+    } else {
+        json!({
         "type": "object",
         "properties": {
             "task_name": {
@@ -400,6 +413,54 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
         },
         "required": ["task_name", "nickname"],
         "additionalProperties": false
+        })
+    };
+
+    let teammate_output = json!({
+        "type": "object",
+        "properties": {
+            "member": {
+                "type": "object",
+                "description": "Codex Teams teammate member record.",
+                "properties": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "agent_thread_id": { "type": "string" }
+                },
+                "required": ["id", "name", "agent_thread_id"],
+                "additionalProperties": true
+            },
+            "tmux_pane_id": {
+                "type": "string",
+                "description": "Pane id for the split-pane teammate process."
+            },
+            "backend_type": {
+                "type": "string",
+                "description": "Pane backend used for the teammate process."
+            },
+            "color": {
+                "type": ["string", "null"],
+                "description": "Teammate display color when assigned."
+            },
+            "mode": {
+                "type": ["string", "null"],
+                "description": "Launch mode for the teammate process when available."
+            },
+            "is_active": {
+                "type": ["boolean", "null"],
+                "description": "Whether the teammate process is active."
+            },
+            "prompt": {
+                "type": ["string", "null"],
+                "description": "Initial teammate task prompt."
+            }
+        },
+        "required": ["member", "tmux_pane_id"],
+        "additionalProperties": false
+    });
+
+    json!({
+        "oneOf": [native_output, teammate_output]
     })
 }
 
@@ -728,7 +789,7 @@ fn spawn_agent_tool_description_v2(
         r#"
         {agent_role_guidance}
         Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
-Native `spawn_agent` creates ordinary Codex subagents only; it does not create Codex Teams roster entries, mailboxes, or split-pane teammates.
+By default, `spawn_agent` creates an ordinary Codex subagent. If a Codex Teams workspace is active and you pass `name`, `spawn_agent` instead spawns a named split-pane Teams teammate, matching Claude Code AgentTool's team_name/name branch. Do not pass `name` or `team_name` for ordinary subagent delegation.
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 {inherited_model_guidance}

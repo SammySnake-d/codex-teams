@@ -1213,11 +1213,17 @@ async fn register_teammate_thread_without_pane_metadata_is_ignored() {
         ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
 
     app.register_teammate_thread(
-        teammate_thread_id,
-        "alice".to_string(),
+        TeamRosterMemberInput {
+            thread_id: teammate_thread_id,
+            name: "alice".to_string(),
+            tmux_pane_id: None,
+            backend_type: None,
+            color: None,
+            mode: None,
+            is_active: None,
+            prompt: None,
+        },
         Some("researcher".to_string()),
-        None,
-        None,
     );
 
     assert_eq!(app.agent_navigation.get(&teammate_thread_id), None);
@@ -1236,11 +1242,17 @@ async fn process_backed_teammate_stays_out_of_generic_agent_navigation() {
         ThreadId::from_string("00000000-0000-0000-0000-000000000126").expect("valid thread id");
 
     app.register_teammate_thread(
-        teammate_thread_id,
-        "alice".to_string(),
+        TeamRosterMemberInput {
+            thread_id: teammate_thread_id,
+            name: "alice".to_string(),
+            tmux_pane_id: Some("%9".to_string()),
+            backend_type: Some("tmux".to_string()),
+            color: Some("red".to_string()),
+            mode: Some("plan".to_string()),
+            is_active: Some(true),
+            prompt: None,
+        },
         Some("researcher".to_string()),
-        Some("%9".to_string()),
-        Some("tmux".to_string()),
     );
 
     assert_eq!(app.agent_navigation.get(&teammate_thread_id), None);
@@ -1248,6 +1260,15 @@ async fn process_backed_teammate_stays_out_of_generic_agent_navigation() {
         app.team_roster_navigation
             .is_teammate_thread(Some(teammate_thread_id))
     );
+    let spans = app
+        .team_roster_navigation
+        .footer_spans(None, None)
+        .expect("pane-backed teammate should render in Teams footer");
+    let text = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(text, "1 teammate");
 }
 
 #[tokio::test]

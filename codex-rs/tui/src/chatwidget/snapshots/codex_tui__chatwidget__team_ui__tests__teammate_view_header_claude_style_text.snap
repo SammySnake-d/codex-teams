@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/team_ui.rs
+assertion_line: 536
+expression: plain_line_text(&header.lines())
+---
+Viewing @alice · esc return
+Inspect issue #15 and report the proof path.

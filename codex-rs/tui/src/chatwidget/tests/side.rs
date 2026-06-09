@@ -255,13 +255,23 @@ async fn teammate_inbox_injection_does_not_run_shell_commands() {
     chat.inject_teammate_inbox_message("!echo hello".to_string());
 
     match next_submit_op(&mut op_rx) {
-        Op::UserTurn { items, .. } => assert_eq!(
+        Op::UserTurn {
             items,
-            vec![UserInput::Text {
-                text: "!echo hello".to_string(),
-                text_elements: Vec::new(),
-            }]
-        ),
+            user_input_source,
+            ..
+        } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "!echo hello".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+            assert_eq!(
+                user_input_source,
+                crate::app_command::UserInputSource::TeamsMailbox
+            );
+        }
         other => {
             panic!("expected Op::UserTurn for teammate inbox shell-like input, got {other:?}")
         }
@@ -269,7 +279,145 @@ async fn teammate_inbox_injection_does_not_run_shell_commands() {
 }
 
 #[tokio::test]
-async fn lead_teammate_reply_submits_plain_user_turn() {
+async fn teammate_inbox_injection_preserves_wrapped_mailbox_message() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let message =
+        "<teammate-message teammate_id=\"team-lead\" summary=\"task\">\nDo X\n</teammate-message>";
+
+    chat.inject_teammate_inbox_message(message.to_string());
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            items,
+            user_input_source,
+            ..
+        } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: message.to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+            assert_eq!(
+                user_input_source,
+                crate::app_command::UserInputSource::TeamsMailbox
+            );
+        }
+        other => panic!("expected Op::UserTurn for teammate inbox message, got {other:?}"),
+    }
+}
+
+#[test]
+fn teammate_inbox_history_strips_legacy_visible_team_context() {
+    let legacy = "\
+Codex Teams context:
+  - team_id: team-1
+  - team_name: Rocket
+  - lead_thread_id: lead-1
+  - member_id: member-1
+  - member_name: alice
+  - profile: Read-only locator
+  - capabilities: code-search
+  - permissions: read-only
+  - live_session_only: true
+
+You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.
+Treat the spawn prompt/items after this context as your assigned task boundary.
+Use team_send to reply to the lead or another named teammate.
+Do not create teams or spawn teammates from this teammate process.
+
+Please inspect task 1.";
+
+    let rendered = teammate_inbox_display_text(legacy);
+    assert!(rendered.contains("Please inspect task 1."));
+    assert!(!rendered.contains("Codex Teams context:"));
+    assert!(!rendered.contains("member_id:"));
+}
+
+#[test]
+fn teammate_inbox_history_strips_xml_wrapped_legacy_visible_team_context() {
+    let legacy = "\
+<teammate-message teammate_id=\"team-lead\">
+Codex Teams context:
+  - team_id: team-1
+  - member_id: member-1
+
+Do not create teams or spawn teammates from this teammate process.
+
+Please inspect task 1.
+</teammate-message>";
+
+    let rendered = teammate_inbox_display_text(legacy);
+    assert!(rendered.contains("Please inspect task 1."));
+    assert!(!rendered.contains("Codex Teams context:"));
+    assert!(!rendered.contains("member_id:"));
+    assert!(!rendered.contains("</teammate-message>"));
+}
+
+#[tokio::test]
+async fn teammate_inbox_injection_strips_legacy_context_from_model_turn() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let legacy = "\
+Codex Teams context:
+  - team_id: team-1
+  - member_id: member-1
+
+Do not create teams or spawn teammates from this teammate process.
+
+Please inspect task 1.";
+
+    chat.inject_teammate_inbox_message(legacy.to_string());
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "Please inspect task 1.".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected Op::UserTurn for legacy teammate inbox input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn teammate_inbox_injection_strips_xml_wrapped_legacy_context_from_model_turn() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let legacy = "\
+<teammate-message teammate_id=\"team-lead\">
+Codex Teams context:
+  - team_id: team-1
+  - member_id: member-1
+
+Do not create teams or spawn teammates from this teammate process.
+
+Please inspect task 1.
+</teammate-message>";
+
+    chat.inject_teammate_inbox_message(legacy.to_string());
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "Please inspect task 1.".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected Op::UserTurn for legacy teammate inbox input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn lead_teammate_reply_submits_teams_mailbox_turn() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
 
@@ -279,15 +427,25 @@ async fn lead_teammate_reply_submits_plain_user_turn() {
     );
 
     match next_submit_op(&mut op_rx) {
-        Op::UserTurn { items, .. } => assert_eq!(
+        Op::UserTurn {
             items,
-            vec![UserInput::Text {
-                text:
-                    "<teammate-message teammate_id=\"alice\">\nexplicit update\n</teammate-message>"
-                        .to_string(),
-                text_elements: Vec::new(),
-            }]
-        ),
+            user_input_source,
+            ..
+        } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text:
+                        "<teammate-message teammate_id=\"alice\">\nexplicit update\n</teammate-message>"
+                            .to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+            assert_eq!(
+                user_input_source,
+                crate::app_command::UserInputSource::TeamsMailbox
+            );
+        }
         other => panic!("expected Op::UserTurn for teammate reply, got {other:?}"),
     }
 }
@@ -309,22 +467,32 @@ async fn queued_lead_teammate_reply_submits_after_running_turn() {
             .front()
             .unwrap()
             .action,
-        QueuedInputAction::PlainNoShell
+        QueuedInputAction::TeamsMailbox
     );
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 
     handle_turn_completed(&mut chat, "turn-1", None);
 
     match next_submit_op(&mut op_rx) {
-        Op::UserTurn { items, .. } => assert_eq!(
+        Op::UserTurn {
             items,
-            vec![UserInput::Text {
-                text:
-                    "<teammate-message teammate_id=\"alice\">\nexplicit update\n</teammate-message>"
-                        .to_string(),
-                text_elements: Vec::new(),
-            }]
-        ),
+            user_input_source,
+            ..
+        } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text:
+                        "<teammate-message teammate_id=\"alice\">\nexplicit update\n</teammate-message>"
+                            .to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+            assert_eq!(
+                user_input_source,
+                crate::app_command::UserInputSource::TeamsMailbox
+            );
+        }
         other => panic!("expected queued Op::UserTurn for teammate reply, got {other:?}"),
     }
 }
@@ -343,25 +511,117 @@ async fn queued_teammate_inbox_injection_does_not_run_shell_commands() {
             .front()
             .unwrap()
             .action,
-        QueuedInputAction::PlainNoShell
+        QueuedInputAction::TeamsMailbox
     );
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 
     handle_turn_completed(&mut chat, "turn-1", None);
 
     match next_submit_op(&mut op_rx) {
-        Op::UserTurn { items, .. } => assert_eq!(
+        Op::UserTurn {
             items,
-            vec![UserInput::Text {
-                text: "!echo hello".to_string(),
-                text_elements: Vec::new(),
-            }]
-        ),
+            user_input_source,
+            ..
+        } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "!echo hello".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+            assert_eq!(
+                user_input_source,
+                crate::app_command::UserInputSource::TeamsMailbox
+            );
+        }
         other => {
             panic!(
                 "expected queued Op::UserTurn for teammate inbox shell-like input, got {other:?}"
             )
         }
+    }
+}
+
+#[tokio::test]
+async fn pre_session_teammate_inbox_queue_preserves_teams_mailbox_source() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    assert!(chat.inject_teammate_inbox_message("!echo hello".to_string()));
+    assert_eq!(
+        chat.input_queue
+            .queued_user_messages
+            .front()
+            .unwrap()
+            .action,
+        QueuedInputAction::TeamsMailbox
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.thread_id = Some(ThreadId::new());
+    assert!(chat.maybe_send_next_queued_input());
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            items,
+            user_input_source,
+            ..
+        } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "!echo hello".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+            assert_eq!(
+                user_input_source,
+                crate::app_command::UserInputSource::TeamsMailbox
+            );
+        }
+        other => {
+            panic!(
+                "expected queued Op::UserTurn for pre-session teammate inbox input, got {other:?}"
+            )
+        }
+    }
+}
+
+#[tokio::test]
+async fn pre_session_teammate_inbox_queue_is_fifo() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    assert!(chat.inject_teammate_inbox_message("first".to_string()));
+    assert!(chat.inject_teammate_inbox_message("second".to_string()));
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.thread_id = Some(ThreadId::new());
+    assert!(chat.maybe_send_next_queued_input());
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "first".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected first queued teammate inbox turn, got {other:?}"),
+    }
+
+    handle_turn_completed(&mut chat, "turn-1", None);
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "second".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected second queued teammate inbox turn, got {other:?}"),
     }
 }
 

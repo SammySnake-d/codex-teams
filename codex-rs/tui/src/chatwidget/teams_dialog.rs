@@ -25,6 +25,10 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
+use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
+
+const PROMPT_COLLAPSED_WIDTH: usize = 80;
 
 /// Which level of the dialog is currently focused (Claude's `dialogLevel`).
 pub(crate) enum TeamsDialogLevel {
@@ -43,6 +47,7 @@ pub(crate) struct TeammateRow {
     pub tmux_pane_id: String,
     pub backend_type: Option<String>,
     pub model: Option<String>,
+    pub prompt: Option<String>,
     pub mode: Option<String>,
     pub color: Option<String>,
     pub is_active: Option<bool>,
@@ -53,6 +58,7 @@ pub(crate) struct TeamsDialog {
     level: TeamsDialogLevel,
     selected_index: usize,
     teammates: Vec<TeammateRow>,
+    prompt_expanded: bool,
     last_refresh: Instant,
 }
 
@@ -71,8 +77,32 @@ pub(crate) enum TeamsDialogAction {
         pane_id: String,
         hide: bool,
     },
+    ToggleAllVisibility {
+        team: String,
+        hide: bool,
+    },
+    KillTeammate {
+        team: String,
+        teammate: TeamsDialogTeammateAction,
+    },
+    ShutdownTeammate {
+        team: String,
+        name: String,
+    },
+    PruneIdle {
+        team: String,
+        teammates: Vec<TeamsDialogTeammateAction>,
+    },
     /// `esc` / `q` — close the overlay (or pop back to the list from detail).
     Close,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TeamsDialogTeammateAction {
+    pub(crate) pane_id: String,
+    pub(crate) backend_type: Option<String>,
+    pub(crate) agent_id: String,
+    pub(crate) name: String,
 }
 
 impl TeamsDialog {
@@ -82,6 +112,7 @@ impl TeamsDialog {
             level: TeamsDialogLevel::TeammateList { team },
             selected_index: 0,
             teammates: Vec::new(),
+            prompt_expanded: false,
             last_refresh: Instant::now(),
         }
     }
@@ -105,6 +136,10 @@ impl TeamsDialog {
         self.teammates = team_file
             .members
             .iter()
+            .filter(|member| {
+                member.name != crate::legacy_core::team_store::TEAM_LEAD_NAME
+                    && !member.tmux_pane_id.trim().is_empty()
+            })
             .map(|member| {
                 let is_hidden = team_file
                     .hidden_pane_ids
@@ -116,6 +151,7 @@ impl TeamsDialog {
                     tmux_pane_id: member.tmux_pane_id.clone(),
                     backend_type: member.backend_type.clone(),
                     model: member.model.clone(),
+                    prompt: member.prompt.clone(),
                     mode: member.mode.clone(),
                     color: member.color.clone(),
                     is_active: member.is_active,
@@ -140,9 +176,10 @@ impl TeamsDialog {
         Paragraph::new(lines).render(area, buf);
     }
 
-    /// Port of `TeamsDialog.tsx` `useInput`: `j/k`+arrows move `selected_index`;
-    /// `↵` on the list drills into a teammate detail; `↵` on detail focuses the
-    /// pane; `h` toggles visibility; `esc`/`q` closes (or pops detail -> list).
+    /// Port of `TeamsDialog.tsx` `useInput`: arrows move `selected_index`; `↵`
+    /// drills into a teammate detail or focuses the pane; `k` kills; `s`
+    /// requests graceful shutdown; `h`/`H` hide/show; `p` prunes idle teammates;
+    /// `esc`/`q` closes (or pops detail -> list).
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Option<TeamsDialogAction> {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return None;
@@ -164,12 +201,13 @@ impl TeamsDialog {
                 self.move_selection_next();
                 None
             }
-            KeyCode::Char('k') if plain => {
-                self.move_selection_prev();
-                None
-            }
+            KeyCode::Char('k') if plain => self.kill_action(),
+            KeyCode::Char('s') if plain => self.shutdown_action(),
             KeyCode::Char('h') if plain => self.toggle_visibility_action(),
+            KeyCode::Char('H') if plain => self.toggle_all_visibility_action(),
+            KeyCode::Char('p') if plain => self.prompt_or_prune_action(),
             KeyCode::Enter => self.activate_selected(),
+            KeyCode::Left => self.back_from_detail(),
             KeyCode::Esc => self.close_or_pop(),
             KeyCode::Char('q') if plain => self.close_or_pop(),
             _ => None,
@@ -183,26 +221,22 @@ impl TeamsDialog {
         }
     }
 
-    /// Wrap selection when moving down past the end (Claude wraps the list).
+    /// Clamp selection when moving down past the end (Claude uses min/max).
     fn move_selection_next(&mut self) {
         if self.teammates.is_empty() {
             self.selected_index = 0;
             return;
         }
-        self.selected_index = (self.selected_index + 1) % self.teammates.len();
+        self.selected_index = (self.selected_index + 1).min(self.teammates.len() - 1);
     }
 
-    /// Wrap selection when moving up past the start.
+    /// Clamp selection when moving up past the start.
     fn move_selection_prev(&mut self) {
         if self.teammates.is_empty() {
             self.selected_index = 0;
             return;
         }
-        self.selected_index = if self.selected_index == 0 {
-            self.teammates.len() - 1
-        } else {
-            self.selected_index - 1
-        };
+        self.selected_index = self.selected_index.saturating_sub(1);
     }
 
     fn clamp_selection(&mut self) {
@@ -222,6 +256,7 @@ impl TeamsDialog {
                     team: team.clone(),
                     member_name: row.name.clone(),
                 };
+                self.prompt_expanded = false;
                 None
             }
             TeamsDialogLevel::TeammateDetail { .. } => {
@@ -248,6 +283,61 @@ impl TeamsDialog {
         })
     }
 
+    fn toggle_all_visibility_action(&self) -> Option<TeamsDialogAction> {
+        if !matches!(self.level, TeamsDialogLevel::TeammateList { .. }) || self.teammates.is_empty()
+        {
+            return None;
+        }
+        Some(TeamsDialogAction::ToggleAllVisibility {
+            team: self.team_name().to_string(),
+            hide: self.teammates.iter().any(|row| !row.is_hidden),
+        })
+    }
+
+    fn kill_action(&mut self) -> Option<TeamsDialogAction> {
+        let teammate = self.selected_action_teammate()?;
+        let team = self.team_name().to_string();
+        if matches!(self.level, TeamsDialogLevel::TeammateDetail { .. }) {
+            self.level = TeamsDialogLevel::TeammateList { team: team.clone() };
+            self.prompt_expanded = false;
+        }
+        Some(TeamsDialogAction::KillTeammate { team, teammate })
+    }
+
+    fn shutdown_action(&mut self) -> Option<TeamsDialogAction> {
+        let name = self.selected_action_teammate()?.name;
+        let team = self.team_name().to_string();
+        if matches!(self.level, TeamsDialogLevel::TeammateDetail { .. }) {
+            self.level = TeamsDialogLevel::TeammateList { team: team.clone() };
+            self.prompt_expanded = false;
+        }
+        Some(TeamsDialogAction::ShutdownTeammate { team, name })
+    }
+
+    fn prompt_or_prune_action(&mut self) -> Option<TeamsDialogAction> {
+        if matches!(self.level, TeamsDialogLevel::TeammateDetail { .. }) {
+            self.prompt_expanded = !self.prompt_expanded;
+            return None;
+        }
+        self.prune_idle_action()
+    }
+
+    fn prune_idle_action(&self) -> Option<TeamsDialogAction> {
+        if !matches!(self.level, TeamsDialogLevel::TeammateList { .. }) {
+            return None;
+        }
+        let teammates = self
+            .teammates
+            .iter()
+            .filter(|row| row.is_active == Some(false))
+            .map(action_from_row)
+            .collect::<Vec<_>>();
+        (!teammates.is_empty()).then(|| TeamsDialogAction::PruneIdle {
+            team: self.team_name().to_string(),
+            teammates,
+        })
+    }
+
     /// `esc`/`q`: from detail pop back to the list (consumed, no action); from the
     /// list close the whole overlay. Claude's `TeamsDialog` is a two-level dialog,
     /// so esc on the detail level only steps back one level.
@@ -255,10 +345,19 @@ impl TeamsDialog {
         match &self.level {
             TeamsDialogLevel::TeammateDetail { team, .. } => {
                 self.level = TeamsDialogLevel::TeammateList { team: team.clone() };
+                self.prompt_expanded = false;
                 None
             }
             TeamsDialogLevel::TeammateList { .. } => Some(TeamsDialogAction::Close),
         }
+    }
+
+    fn back_from_detail(&mut self) -> Option<TeamsDialogAction> {
+        if let TeamsDialogLevel::TeammateDetail { team, .. } = &self.level {
+            self.level = TeamsDialogLevel::TeammateList { team: team.clone() };
+            self.prompt_expanded = false;
+        }
+        None
     }
 
     /// The row backing the current `TeammateDetail` level, matched by name.
@@ -268,6 +367,17 @@ impl TeamsDialog {
                 self.teammates.iter().find(|row| &row.name == member_name)
             }
             TeamsDialogLevel::TeammateList { .. } => self.teammates.get(self.selected_index),
+        }
+    }
+
+    fn selected_action_teammate(&self) -> Option<TeamsDialogTeammateAction> {
+        match &self.level {
+            TeamsDialogLevel::TeammateList { .. } => {
+                self.teammates.get(self.selected_index).map(action_from_row)
+            }
+            TeamsDialogLevel::TeammateDetail { .. } => {
+                self.selected_detail_row().map(action_from_row)
+            }
         }
     }
 
@@ -285,7 +395,7 @@ impl TeamsDialog {
         }
         lines.push(Line::from(String::new()));
         lines.push(Line::from(
-            "j/k move · ↵ details · h hide/show · esc close".dim_span(),
+            "↑/↓ select · ↵ view · k kill · s shutdown · p prune idle · h hide/show · H hide/show all · esc close".dim_span(),
         ));
         lines
     }
@@ -301,7 +411,7 @@ impl TeamsDialog {
             Line::from(self.teammate_name_span(row)),
             Line::from(String::new()),
         ];
-        lines.push(detail_field("agent", &row.agent_id));
+        lines.push(detail_field("teammate id", &row.agent_id));
         lines.push(detail_field("pane", &row.tmux_pane_id));
         if let Some(backend_type) = row.backend_type.as_deref() {
             lines.push(detail_field("backend", backend_type));
@@ -311,6 +421,11 @@ impl TeamsDialog {
         }
         if let Some(mode) = row.mode.as_deref() {
             lines.push(detail_field("mode", mode));
+        }
+        if let Some(prompt) = row.prompt.as_deref().filter(|prompt| !prompt.is_empty()) {
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from("Prompt".bold_span()));
+            lines.push(prompt_line(prompt, self.prompt_expanded));
         }
         lines.push(detail_field(
             "status",
@@ -326,7 +441,8 @@ impl TeamsDialog {
         ));
         lines.push(Line::from(String::new()));
         lines.push(Line::from(
-            "↵ view output · h hide/show · esc back".dim_span(),
+            "↵ view output · k kill · s shutdown · p expand prompt · h hide/show · esc back"
+                .dim_span(),
         ));
         lines
     }
@@ -412,6 +528,42 @@ fn detail_field(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
+fn action_from_row(row: &TeammateRow) -> TeamsDialogTeammateAction {
+    TeamsDialogTeammateAction {
+        pane_id: row.tmux_pane_id.clone(),
+        backend_type: row.backend_type.clone(),
+        agent_id: row.agent_id.clone(),
+        name: row.name.clone(),
+    }
+}
+
+fn prompt_line(prompt: &str, expanded: bool) -> Line<'static> {
+    if expanded {
+        return Line::from(prompt.to_string());
+    }
+    let truncated = truncate_to_width(prompt, PROMPT_COLLAPSED_WIDTH);
+    let needs_expand_hint = UnicodeWidthStr::width(prompt) > PROMPT_COLLAPSED_WIDTH;
+    if needs_expand_hint {
+        Line::from(vec![truncated.into(), " (p to expand)".dim_span()])
+    } else {
+        Line::from(truncated)
+    }
+}
+
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    let mut width = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
 /// Tiny styling helpers so the render code reads like the rest of the TUI without
 /// pulling `Stylize` in (string -> styled `Span`).
 trait DialogSpan {
@@ -448,6 +600,7 @@ mod tests {
             tmux_pane_id: format!("%{name}"),
             backend_type: Some("tmux".to_string()),
             model: Some("gpt-5".to_string()),
+            prompt: None,
             mode: None,
             color: None,
             is_active: None,
@@ -487,7 +640,52 @@ mod tests {
     }
 
     #[test]
-    fn jk_selection_wraps_and_clamps() {
+    fn refresh_excludes_team_lead_and_empty_pane_rows() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        crate::legacy_core::team_store::write_config(
+            codex_home.path(),
+            "Rocket",
+            &crate::legacy_core::team_store::TeamFile {
+                name: "Rocket".to_string(),
+                lead_agent_id: "team-lead@Rocket".to_string(),
+                members: vec![
+                    crate::legacy_core::team_store::TeamFileMember {
+                        agent_id: "team-lead@Rocket".to_string(),
+                        name: crate::legacy_core::team_store::TEAM_LEAD_NAME.to_string(),
+                        ..Default::default()
+                    },
+                    crate::legacy_core::team_store::TeamFileMember {
+                        agent_id: "empty@Rocket".to_string(),
+                        name: "empty".to_string(),
+                        tmux_pane_id: String::new(),
+                        ..Default::default()
+                    },
+                    crate::legacy_core::team_store::TeamFileMember {
+                        agent_id: "alice@Rocket".to_string(),
+                        name: "alice".to_string(),
+                        tmux_pane_id: "%7".to_string(),
+                        backend_type: Some("tmux".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .expect("write team config");
+        let mut dialog = TeamsDialog::open("Rocket".to_string());
+
+        dialog.refresh(codex_home.path());
+
+        assert_eq!(dialog.teammates.len(), 1);
+        assert_eq!(dialog.teammates[0].name, "alice");
+        let text = rendered_text(&dialog);
+        assert!(text.contains("@alice"), "missing @alice in:\n{text}");
+        assert!(!text.contains("@team-lead"), "lead leaked into:\n{text}");
+        assert!(!text.contains("@empty"), "empty pane leaked into:\n{text}");
+    }
+
+    #[test]
+    fn arrow_selection_clamps() {
         let mut dialog = dialog_with(vec![row("alice"), row("bob"), row("carol")]);
         assert_eq!(dialog.selected_index, 0);
 
@@ -495,14 +693,16 @@ mod tests {
         assert_eq!(dialog.selected_index, 1);
         dialog.handle_key(press(KeyCode::Down));
         assert_eq!(dialog.selected_index, 2);
-        // Down past the end wraps to the top.
+        // Down past the end stays at the last row.
         dialog.handle_key(press(KeyCode::Char('j')));
-        assert_eq!(dialog.selected_index, 0);
-        // Up from the top wraps to the bottom.
-        dialog.handle_key(press(KeyCode::Char('k')));
         assert_eq!(dialog.selected_index, 2);
         dialog.handle_key(press(KeyCode::Up));
         assert_eq!(dialog.selected_index, 1);
+        dialog.handle_key(press(KeyCode::Up));
+        assert_eq!(dialog.selected_index, 0);
+        // Up from the top stays at the first row.
+        dialog.handle_key(press(KeyCode::Up));
+        assert_eq!(dialog.selected_index, 0);
     }
 
     #[test]
@@ -568,6 +768,85 @@ mod tests {
                 assert!(!hide, "hidden row should request hide=false");
             }
             _ => panic!("expected ToggleVisibility"),
+        }
+    }
+
+    #[test]
+    fn k_kills_selected_teammate() {
+        let mut dialog = dialog_with(vec![row("alice")]);
+
+        match dialog.handle_key(press(KeyCode::Char('k'))) {
+            Some(TeamsDialogAction::KillTeammate { team, teammate }) => {
+                assert_eq!(team, "Rocket");
+                assert_eq!(
+                    teammate,
+                    TeamsDialogTeammateAction {
+                        pane_id: "%alice".to_string(),
+                        backend_type: Some("tmux".to_string()),
+                        agent_id: "agent-alice".to_string(),
+                        name: "alice".to_string(),
+                    }
+                );
+            }
+            _ => panic!("expected KillTeammate"),
+        }
+    }
+
+    #[test]
+    fn s_sends_shutdown_to_selected_teammate() {
+        let mut dialog = dialog_with(vec![row("alice")]);
+
+        match dialog.handle_key(press(KeyCode::Char('s'))) {
+            Some(TeamsDialogAction::ShutdownTeammate { team, name }) => {
+                assert_eq!(team, "Rocket");
+                assert_eq!(name, "alice");
+            }
+            _ => panic!("expected ShutdownTeammate"),
+        }
+    }
+
+    #[test]
+    fn uppercase_h_toggles_all_visibility() {
+        let mut hidden = row("bob");
+        hidden.is_hidden = true;
+        let mut dialog = dialog_with(vec![row("alice"), hidden]);
+
+        match dialog.handle_key(press(KeyCode::Char('H'))) {
+            Some(TeamsDialogAction::ToggleAllVisibility { team, hide }) => {
+                assert_eq!(team, "Rocket");
+                assert!(hide, "any visible row should hide all");
+            }
+            _ => panic!("expected ToggleAllVisibility"),
+        }
+
+        let mut hidden_a = row("alice");
+        hidden_a.is_hidden = true;
+        let mut hidden_b = row("bob");
+        hidden_b.is_hidden = true;
+        let mut dialog = dialog_with(vec![hidden_a, hidden_b]);
+        match dialog.handle_key(press(KeyCode::Char('H'))) {
+            Some(TeamsDialogAction::ToggleAllVisibility { hide, .. }) => {
+                assert!(!hide, "all hidden rows should show all");
+            }
+            _ => panic!("expected ToggleAllVisibility"),
+        }
+    }
+
+    #[test]
+    fn p_prunes_idle_teammates() {
+        let mut idle = row("alice");
+        idle.is_active = Some(false);
+        let mut active = row("bob");
+        active.is_active = Some(true);
+        let mut dialog = dialog_with(vec![idle, active]);
+
+        match dialog.handle_key(press(KeyCode::Char('p'))) {
+            Some(TeamsDialogAction::PruneIdle { team, teammates }) => {
+                assert_eq!(team, "Rocket");
+                assert_eq!(teammates.len(), 1);
+                assert_eq!(teammates[0].name, "alice");
+            }
+            _ => panic!("expected PruneIdle"),
         }
     }
 

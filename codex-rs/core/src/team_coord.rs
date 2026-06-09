@@ -393,7 +393,7 @@ pub enum NextInbox {
         request: ShutdownRequestMessage,
         raw: String,
     },
-    /// A regular message was selected (lead-priority, else FIFO first-unread).
+    /// A regular message was selected (FIFO after shutdown priority).
     Message {
         index: usize,
         message: TeammateMessage,
@@ -406,8 +406,7 @@ pub enum NextInbox {
 /// `mark_message_read_by_index`). Priority mirrors Claude
 /// `waitForNextPromptOrShutdown`:
 /// 1. first unread `shutdown_request` (prevents starvation under peer flood),
-/// 2. else first unread from [`TEAM_LEAD_NAME`],
-/// 3. else FIFO first-unread (any sender).
+/// 2. else FIFO first-unread (any sender).
 pub fn select_next_inbox(messages: &[TeammateMessage]) -> NextInbox {
     for (i, m) in messages.iter().enumerate() {
         if !m.read
@@ -419,15 +418,6 @@ pub fn select_next_inbox(messages: &[TeammateMessage]) -> NextInbox {
                 raw: m.text.clone(),
             };
         }
-    }
-    if let Some(i) = messages
-        .iter()
-        .position(|m| !m.read && m.from == TEAM_LEAD_NAME)
-    {
-        return NextInbox::Message {
-            index: i,
-            message: messages[i].clone(),
-        };
     }
     match messages.iter().position(|m| !m.read) {
         Some(i) => NextInbox::Message {
@@ -844,14 +834,15 @@ mod tests {
             other => panic!("expected shutdown, got {other:?}"),
         }
 
-        // No shutdown → lead beats earlier peer.
+        // No shutdown → regular messages stay FIFO; lead must not jump ahead
+        // of an older peer update.
         let msgs = vec![peer.clone(), lead];
         match select_next_inbox(&msgs) {
             NextInbox::Message { index, message } => {
-                assert_eq!(index, 1);
-                assert_eq!(message.from, TEAM_LEAD_NAME);
+                assert_eq!(index, 0);
+                assert_eq!(message.from, "bob");
             }
-            other => panic!("expected lead message, got {other:?}"),
+            other => panic!("expected fifo message, got {other:?}"),
         }
 
         // FIFO fallback.

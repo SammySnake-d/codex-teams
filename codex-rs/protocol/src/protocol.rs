@@ -104,6 +104,12 @@ pub const COLLABORATION_MODE_CLOSE_TAG: &str = "</collaboration_mode>";
 pub const REALTIME_CONVERSATION_OPEN_TAG: &str = "<realtime_conversation>";
 pub const REALTIME_CONVERSATION_CLOSE_TAG: &str = "</realtime_conversation>";
 pub const USER_MESSAGE_BEGIN: &str = "## My request for Codex:";
+/// Private TUI-to-core marker carried through app-server turn metadata.
+///
+/// Core consumes this key before Responses API client metadata is assembled; it
+/// must not be forwarded to the model provider.
+pub const INTERNAL_USER_INPUT_SOURCE_METADATA_KEY: &str = "codex_internal_user_input_source";
+pub const INTERNAL_USER_INPUT_SOURCE_TEAMS_MAILBOX: &str = "teams_mailbox";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema)]
 pub struct TurnEnvironmentSelection {

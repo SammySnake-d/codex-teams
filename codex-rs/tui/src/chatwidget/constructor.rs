@@ -141,6 +141,7 @@ impl ChatWidget {
             active_agent_label: None,
             team_footer_label: None,
             team_footer_spans: None,
+            team_teammate_view_header: None,
             team_ui: TeamUiState::default(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
@@ -249,6 +250,7 @@ impl ChatWidget {
         widget.sync_service_tier_commands();
         widget.sync_personality_command_enabled();
         widget.sync_plugins_command_enabled();
+        widget.sync_teams_enabled();
         widget.sync_goal_command_enabled();
         widget.sync_mentions_v2_enabled();
         widget

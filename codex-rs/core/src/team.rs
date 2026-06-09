@@ -36,6 +36,16 @@ pub struct TeammateIdentity {
 
 static TEAMMATE_IDENTITY: OnceLock<TeammateIdentity> = OnceLock::new();
 
+const TEAMMATE_SYSTEM_PROMPT_ADDENDUM: &str = r#"# Codex Teams Teammate Communication
+
+IMPORTANT: You are running as a teammate in a Codex team. To communicate with anyone on your team:
+- Use the SendMessage tool with `to: "<name>"` to send messages to specific teammates, or `to: "team-lead"` to reply to the lead.
+- Use the SendMessage tool with `to: "*"` sparingly for team-wide broadcasts.
+
+Plain assistant text is not visible to other teammates or the lead. To communicate, you MUST use SendMessage. If only the Codex-native equivalent is available, use team_send with the same `to` and `message` fields.
+
+The user interacts primarily with the team lead. Your work is coordinated through Teams tasks and teammate messaging."#;
+
 /// Record that this process is running as a teammate. Called once by the hidden
 /// `codex teammate` entrypoint before its inbox loop starts; later calls are
 /// ignored (the identity is fixed for the process lifetime).
@@ -46,6 +56,12 @@ pub fn set_teammate_identity(team: String, agent_name: String) {
 /// The teammate identity for this process, if it is a spawned teammate.
 pub(crate) fn teammate_identity() -> Option<&'static TeammateIdentity> {
     TEAMMATE_IDENTITY.get()
+}
+
+pub(crate) fn teammate_system_prompt_addendum() -> Option<&'static str> {
+    TEAMMATE_IDENTITY
+        .get()
+        .map(|_| TEAMMATE_SYSTEM_PROMPT_ADDENDUM)
 }
 
 /// Public `(team, agent_name)` for the current teammate process, if it was
@@ -62,6 +78,21 @@ pub fn teammate_identity_parts() -> Option<(String, String)> {
 pub(crate) enum TeamStatus {
     Active,
     Stopped,
+}
+
+#[cfg(test)]
+mod teammate_prompt_tests {
+    use super::TEAMMATE_SYSTEM_PROMPT_ADDENDUM;
+
+    #[test]
+    fn teammate_prompt_addendum_matches_claude_visibility_contract() {
+        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("SendMessage"));
+        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("team_send"));
+        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("to: \"<name>\""));
+        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("to: \"*\""));
+        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("Plain assistant text is not visible"));
+        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("team lead"));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -122,19 +153,13 @@ pub(crate) struct TeamMember {
 }
 
 impl TeamMember {
-    /// Build a record for an out-of-process (pane) teammate that has no
-    /// in-process agent thread (Claude split-pane spawn). `agent_thread_id` is a
-    /// fresh placeholder shared with `id`, and `agent_status` starts at its
-    /// default (`PendingInit`) until the teammate process self-reports
-    /// (Phase 4). Such members are tracked on disk via `team_store`, not in this
-    /// in-memory registry.
     /// Build a record for an out-of-process (split-pane) teammate using a
     /// caller-provided `id`, so the spawn handler can reference the same id in
-    /// the on-disk member record and in the `Codex Teams context:` envelope
-    /// before returning it to the model. Such members are tracked on disk via
-    /// `team_store`, not in this in-memory registry; `agent_thread_id` mirrors
-    /// `id` as a placeholder and `agent_status` starts at its default
-    /// (`PendingInit`) until the teammate process self-reports.
+    /// the on-disk member record before returning it to the model. The live
+    /// registry mirrors this member for status/task/stop semantics, while
+    /// cross-process IO stays on disk. `agent_thread_id` mirrors `id` as a
+    /// sentinel because there is no
+    /// in-process agent thread behind a pane-backed teammate.
     pub(crate) fn process_member_with_id(
         id: ThreadId,
         name: String,
@@ -151,7 +176,7 @@ impl TeamMember {
             capabilities,
             permissions,
             status: TeamMemberStatus::Active,
-            agent_status: AgentStatus::default(),
+            agent_status: AgentStatus::Running,
             created_at: at,
             last_activity_at: at,
         }
@@ -360,6 +385,33 @@ impl TeamRegistry {
         teams
     }
 
+    pub(crate) async fn register_process_member(
+        &self,
+        team_id: ThreadId,
+        member: TeamMember,
+    ) -> CodexResult<TeamMember> {
+        let at = unix_timestamp();
+        let mut state = self.state.write().await;
+        let team = state
+            .teams
+            .get_mut(&team_id)
+            .ok_or(CodexErr::ThreadNotFound(team_id))?;
+        validate_team_active(team_id, team)?;
+        if team.members.iter().any(|existing| existing.id == member.id) {
+            return Ok(member);
+        }
+        team.members.push(member.clone());
+        team.updated_at = at;
+        state.events.push(TeamEvent::MemberSpawned {
+            team_id,
+            member_id: member.id,
+            agent_thread_id: member.agent_thread_id,
+            name: member.name.clone(),
+            at,
+        });
+        Ok(member)
+    }
+
     pub(crate) async fn team_status(
         &self,
         team_id: ThreadId,
@@ -433,55 +485,20 @@ impl TeamRegistry {
             profile,
             capabilities,
             permissions,
-            mut initial_items,
+            initial_items,
             config,
             session_source,
             environments,
         } = request;
-        let (team_name, lead_thread_id) = {
+        {
             let state = self.state.read().await;
             let team = state
                 .teams
                 .get(&team_id)
                 .ok_or(CodexErr::ThreadNotFound(team_id))?;
             validate_team_active(team_id, team)?;
-            (team.name.clone(), team.lead_thread_id)
-        };
+        }
         let member_id = ThreadId::new();
-        let profile_label = profile.as_deref().unwrap_or("none");
-        let capabilities_label = if capabilities.is_empty() {
-            "none".to_string()
-        } else {
-            capabilities.join(", ")
-        };
-        let permissions_label = if permissions.is_empty() {
-            "none".to_string()
-        } else {
-            permissions.join(", ")
-        };
-        let context = format!(
-            "Codex Teams context:\n\
-             - team_id: {team_id}\n\
-             - team_name: {team_name}\n\
-             - lead_thread_id: {lead_thread_id}\n\
-             - member_id: {member_id}\n\
-             - member_name: {name}\n\
-             - profile: {profile_label}\n\
-             - capabilities: {capabilities_label}\n\
-             - permissions: {permissions_label}\n\
-             - live_session_only: true\n\
-             \n\
-             You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
-             Treat the spawn prompt/items after this context as your assigned task boundary.\n\
-             Use team_send to reply to the lead or another named teammate.\n\
-             Do not create teams or spawn teammates from this teammate process."
-        );
-        let mut wrapped_items = Vec::with_capacity(initial_items.len() + 1);
-        wrapped_items.push(UserInput::Text {
-            text: context,
-            text_elements: Vec::new(),
-        });
-        wrapped_items.append(&mut initial_items);
         let parent_thread_id = match session_source.as_ref() {
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id, ..
@@ -491,7 +508,7 @@ impl TeamRegistry {
         let spawned_agent = agent_control
             .spawn_agent_with_metadata(
                 config,
-                wrapped_items.into(),
+                initial_items.into(),
                 session_source,
                 SpawnAgentOptions {
                     parent_thread_id,
@@ -555,7 +572,7 @@ impl TeamRegistry {
             target,
             content,
             delivery_mode,
-            mut items,
+            items,
         } = request;
         let message_id = ThreadId::new();
         let at = unix_timestamp();
@@ -649,15 +666,6 @@ impl TeamRegistry {
             return Err(err);
         }
 
-        items = wrap_team_message_items(
-            team_id,
-            message_id,
-            &message.sender,
-            target_member_id,
-            &message.delivery_mode,
-            &message.content,
-            items,
-        );
         match agent_control
             .send_input(agent_thread_id, items.into())
             .await
@@ -1042,6 +1050,19 @@ impl TeamRegistry {
                 .ok_or(CodexErr::ThreadNotFound(member_id))?;
             if member.status == TeamMemberStatus::Stopped {
                 (member.agent_thread_id, true)
+            } else if is_process_member(member) {
+                let agent_thread_id = member.agent_thread_id;
+                member.status = TeamMemberStatus::Stopped;
+                member.agent_status = AgentStatus::Shutdown;
+                member.last_activity_at = at;
+                team.updated_at = at;
+                state.events.push(TeamEvent::MemberStopped {
+                    team_id,
+                    member_id,
+                    agent_thread_id,
+                    at,
+                });
+                (agent_thread_id, true)
             } else {
                 let agent_thread_id = member.agent_thread_id;
                 member.status = TeamMemberStatus::Stopped;
@@ -1100,7 +1121,12 @@ impl TeamRegistry {
                     if member.status == TeamMemberStatus::Active {
                         member.status = TeamMemberStatus::Stopped;
                         member.last_activity_at = at;
-                        Some(member.agent_thread_id)
+                        if is_process_member(member) {
+                            member.agent_status = AgentStatus::Shutdown;
+                            None
+                        } else {
+                            Some(member.agent_thread_id)
+                        }
                     } else {
                         None
                     }
@@ -1166,6 +1192,7 @@ impl TeamRegistry {
                 .ok_or(CodexErr::ThreadNotFound(team_id))?;
             team.members
                 .iter()
+                .filter(|member| !is_process_member(member))
                 .map(|member| (member.id, member.agent_thread_id))
                 .collect::<Vec<_>>()
         };
@@ -1268,116 +1295,8 @@ fn validate_member_exists(team: &Team, member_id: Option<ThreadId>) -> CodexResu
     Ok(())
 }
 
-/// Build the `Codex Teams context:` spawn envelope for an out-of-process (pane)
-/// teammate's FIRST mailbox turn. Mirrors the in-process spawn envelope in
-/// [`TeamRegistry::spawn_member`] so a teammate sees the same context markers
-/// (`- team_id:` / `- member_id:` lines) regardless of spawn path; the on-disk
-/// delivery path (split-pane process) would otherwise strip them.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn team_context_envelope(
-    team_id: ThreadId,
-    team_name: &str,
-    lead_thread_id: ThreadId,
-    member_id: ThreadId,
-    member_name: &str,
-    profile: Option<&str>,
-    capabilities: &[String],
-    permissions: &[String],
-) -> String {
-    let profile_label = profile.unwrap_or("none");
-    let capabilities_label = if capabilities.is_empty() {
-        "none".to_string()
-    } else {
-        capabilities.join(", ")
-    };
-    let permissions_label = if permissions.is_empty() {
-        "none".to_string()
-    } else {
-        permissions.join(", ")
-    };
-    format!(
-        "Codex Teams context:\n\
-         - team_id: {team_id}\n\
-         - team_name: {team_name}\n\
-         - lead_thread_id: {lead_thread_id}\n\
-         - member_id: {member_id}\n\
-         - member_name: {member_name}\n\
-         - profile: {profile_label}\n\
-         - capabilities: {capabilities_label}\n\
-         - permissions: {permissions_label}\n\
-         - live_session_only: true\n\
-         \n\
-         You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
-         Treat the spawn prompt/items after this context as your assigned task boundary.\n\
-         Use team_send to reply to the lead or another named teammate.\n\
-         Do not create teams or spawn teammates from this teammate process."
-    )
-}
-
-/// Build the `Codex Teams message:` routing envelope for a lead -> pane-member
-/// mailbox delivery. Mirrors [`wrap_team_message_items`] so a teammate process
-/// sees the same message markers regardless of delivery path.
-pub(crate) fn team_message_envelope(
-    team_id: ThreadId,
-    message_id: ThreadId,
-    sender_label: &str,
-    target_member_label: &str,
-    delivery_mode_label: &str,
-    content: &str,
-) -> String {
-    format!(
-        "Codex Teams message:\n\
-         - team_id: {team_id}\n\
-         - message_id: {message_id}\n\
-         - sender: {sender_label}\n\
-         - target_member_id: {target_member_label}\n\
-         - delivery_mode: {delivery_mode_label}\n\
-         \n\
-         Treat the following item(s) as a routed Teams message, not inherited conversation history.\n\
-         To reply, use team_send with this team_id and set sender_member_id to your member_id.\n\
-         Message preview:\n{content}"
-    )
-}
-
-fn wrap_team_message_items(
-    team_id: ThreadId,
-    message_id: ThreadId,
-    sender: &TeamMessageEndpoint,
-    target_member_id: Option<ThreadId>,
-    delivery_mode: &TeamMessageDeliveryMode,
-    content: &str,
-    mut items: Vec<UserInput>,
-) -> Vec<UserInput> {
-    let sender_label = match sender {
-        TeamMessageEndpoint::Lead(lead_thread_id) => format!("lead:{lead_thread_id}"),
-        TeamMessageEndpoint::Member(member_id) => format!("member:{member_id}"),
-    };
-    let target_member_label = target_member_id
-        .map(|member_id| member_id.to_string())
-        .unwrap_or_else(|| "none".to_string());
-    let delivery_mode_label = match delivery_mode {
-        TeamMessageDeliveryMode::Queue => "queue",
-        TeamMessageDeliveryMode::Interrupt => "interrupt",
-    };
-    let envelope = format!(
-        "Codex Teams message:\n\
-         - team_id: {team_id}\n\
-         - message_id: {message_id}\n\
-         - sender: {sender_label}\n\
-         - target_member_id: {target_member_label}\n\
-         - delivery_mode: {delivery_mode_label}\n\
-         \n\
-         Treat the following item(s) as a routed Teams message, not inherited conversation history.\n\
-         To reply, use team_send with this team_id and set sender_member_id to your member_id.\n\
-         Message preview:\n{content}"
-    );
-    let mut wrapped_items = Vec::with_capacity(items.len() + 1);
-    wrapped_items.push(UserInput::Text {
-        text: envelope,
-        text_elements: Vec::new(),
-    });
-    wrapped_items.append(&mut items);
-    wrapped_items
+fn is_process_member(member: &TeamMember) -> bool {
+    member.agent_thread_id == member.id
 }
 
 fn validate_dependency_graph_acyclic(
@@ -1478,90 +1397,25 @@ mod tests {
     }
 
     fn expected_spawn_items(team: &Team, member: &TeamMember, prompt: &str) -> Vec<UserInput> {
-        let team_id = team.id;
-        let team_name = &team.name;
-        let lead_thread_id = team.lead_thread_id;
-        let member_id = member.id;
-        let member_name = &member.name;
-        let profile_label = member.profile.as_deref().unwrap_or("none");
-        let capabilities_label = if member.capabilities.is_empty() {
-            "none".to_string()
-        } else {
-            member.capabilities.join(", ")
-        };
-        let permissions_label = if member.permissions.is_empty() {
-            "none".to_string()
-        } else {
-            member.permissions.join(", ")
-        };
-        vec![
-            UserInput::Text {
-                text: format!(
-                    "Codex Teams context:\n\
-                     - team_id: {team_id}\n\
-                     - team_name: {team_name}\n\
-                     - lead_thread_id: {lead_thread_id}\n\
-                     - member_id: {member_id}\n\
-                     - member_name: {member_name}\n\
-                     - profile: {profile_label}\n\
-                     - capabilities: {capabilities_label}\n\
-                     - permissions: {permissions_label}\n\
-                     - live_session_only: true\n\
-                     \n\
-                     You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.\n\
-                     Treat the spawn prompt/items after this context as your assigned task boundary.\n\
-                     Use team_send to reply to the lead or another named teammate.\n\
-                     Do not create teams or spawn teammates from this teammate process."
-                ),
-                text_elements: Vec::new(),
-            },
-            UserInput::Text {
-                text: prompt.to_string(),
-                text_elements: Vec::new(),
-            },
-        ]
+        let _ = (team, member);
+        vec![UserInput::Text {
+            text: prompt.to_string(),
+            text_elements: Vec::new(),
+        }]
     }
 
     fn expected_message_items(message: &TeamMessage, prompt: &str) -> Vec<UserInput> {
-        expected_message_items_with_items(message, prompt, text_input(prompt))
+        let _ = message;
+        text_input(prompt)
     }
 
     fn expected_message_items_with_items(
         message: &TeamMessage,
         prompt: &str,
-        mut items: Vec<UserInput>,
+        items: Vec<UserInput>,
     ) -> Vec<UserInput> {
-        let team_id = message.team_id;
-        let message_id = message.id;
-        let sender_label = match &message.sender {
-            TeamMessageEndpoint::Lead(lead_thread_id) => format!("lead:{lead_thread_id}"),
-            TeamMessageEndpoint::Member(member_id) => format!("member:{member_id}"),
-        };
-        let target_member_label = message
-            .target_member_id
-            .map(|member_id| member_id.to_string())
-            .unwrap_or_else(|| "none".to_string());
-        let delivery_mode_label = match &message.delivery_mode {
-            TeamMessageDeliveryMode::Queue => "queue",
-            TeamMessageDeliveryMode::Interrupt => "interrupt",
-        };
-        let mut wrapped = vec![UserInput::Text {
-            text: format!(
-                "Codex Teams message:\n\
-                 - team_id: {team_id}\n\
-                 - message_id: {message_id}\n\
-                 - sender: {sender_label}\n\
-                 - target_member_id: {target_member_label}\n\
-                 - delivery_mode: {delivery_mode_label}\n\
-                 \n\
-                 Treat the following item(s) as a routed Teams message, not inherited conversation history.\n\
-                 To reply, use team_send with this team_id and set sender_member_id to your member_id.\n\
-                 Message preview:\n{prompt}"
-            ),
-            text_elements: Vec::new(),
-        }];
-        wrapped.append(&mut items);
-        wrapped
+        let _ = (message, prompt);
+        items
     }
 
     fn thread_manager() -> ThreadManager {
@@ -1685,7 +1539,7 @@ mod tests {
         );
         assert!(
             manager.captured_ops().contains(&expected_followup),
-            "send should submit follow-up input with Teams envelope"
+            "send should submit follow-up input without a visible Teams envelope"
         );
 
         let member_items = vec![
@@ -1723,7 +1577,7 @@ mod tests {
                 )
                 .into(),
             )),
-            "structured member messages should preserve original items after the Teams envelope"
+            "structured member messages should preserve original items without a visible Teams envelope"
         );
 
         let lead_items = vec![
@@ -1930,6 +1784,76 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, TeamEvent::TeamStopped { .. })),
             "stopped team event feed remains readable"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_member_mirror_supports_status_tasks_and_stop() {
+        let registry = TeamRegistry::default();
+        let manager = thread_manager();
+        let agent_control = manager.agent_control();
+        let team = registry
+            .create_team("process members".to_string(), ThreadId::new())
+            .await;
+        let member = TeamMember::process_member_with_id(
+            ThreadId::new(),
+            "pane-a".to_string(),
+            Some("general".to_string()),
+            vec!["audit".to_string()],
+            Vec::new(),
+        );
+
+        let registered = registry
+            .register_process_member(team.id, member.clone())
+            .await
+            .expect("register process member");
+
+        assert_eq!(registered, member);
+        let status = registry
+            .team_status(team.id, &agent_control)
+            .await
+            .expect("process member status");
+        assert_eq!(status.team.members, vec![member.clone()]);
+
+        let task = registry
+            .create_task(CreateTeamTaskRequest {
+                team_id: team.id,
+                title: "owned by pane".to_string(),
+                assignee_member_id: Some(member.id),
+                dependencies: Vec::new(),
+                note: None,
+            })
+            .await
+            .expect("assign task to process member");
+        assert_eq!(task.assignee_member_id, Some(member.id));
+
+        let stopped = registry
+            .stop_member(team.id, member.id, &agent_control)
+            .await
+            .expect("stop process member");
+        assert_eq!(stopped.team.status, TeamStatus::Active);
+        assert_eq!(stopped.team.members[0].status, TeamMemberStatus::Stopped);
+        assert_eq!(stopped.team.members[0].agent_status, AgentStatus::Shutdown);
+        assert!(
+            manager.captured_ops().is_empty(),
+            "process member stop must not use native AgentControl shutdown"
+        );
+        assert!(
+            registry
+                .send_message(
+                    SendTeamMessageRequest {
+                        team_id: team.id,
+                        sender_member_id: None,
+                        target: SendTeamMessageTarget::Member(member.id),
+                        content: "after stop".to_string(),
+                        delivery_mode: TeamMessageDeliveryMode::Queue,
+                        items: text_input("after stop"),
+                    },
+                    &agent_control,
+                )
+                .await
+                .is_err(),
+            "stopped process member should reject sends"
         );
     }
 

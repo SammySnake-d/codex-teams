@@ -1063,7 +1063,68 @@ async fn multi_agent_v2_spawn_requires_task_name() {
     let FunctionCallError::RespondToModel(message) = err else {
         panic!("missing task_name should surface as a model-facing error");
     };
-    assert!(message.contains("missing field `task_name`"));
+    assert!(message.contains("task_name is required"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_name_uses_active_team_teammate_branch() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    session
+        .services
+        .agent_control
+        .team_registry()
+        .create_team("rocket".to_string(), root.thread_id)
+        .await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Teams)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "name": "alice",
+            "team_name": "rocket",
+            "model": "inherit"
+        })),
+    );
+    match SpawnAgentHandlerV2::default().handle(invocation).await {
+        Ok(output) => {
+            let (content, success) = expect_text_output(output);
+            let result: serde_json::Value =
+                serde_json::from_str(&content).expect("spawn_agent teammate result should be json");
+            assert_eq!(success, Some(true));
+            assert_eq!(result["member"]["name"], json!("alice"));
+            assert!(result["member"]["id"].is_string());
+            assert!(result["member"]["agent_thread_id"].is_string());
+            assert!(result["tmux_pane_id"].is_string());
+            assert!(result.get("task_name").is_none());
+        }
+        Err(FunctionCallError::RespondToModel(message)) => {
+            assert!(message.contains("requires a tmux or iTerm2 pane backend"));
+            assert!(
+                !message.contains("task_name is required"),
+                "name/team_name should route to the Teams teammate branch before native task_name validation"
+            );
+        }
+        Err(err) => panic!("unexpected teammate spawn error: {err:?}"),
+    }
 }
 
 #[tokio::test]

@@ -7,17 +7,22 @@ use ratatui::text::Span;
 
 const TAG_WIDTH: usize = "Plugin".len();
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Selection {
     File(PathBuf),
     Tool {
         insert_text: String,
         path: Option<String>,
     },
+    Team {
+        insert_text: String,
+        path: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum MentionType {
+    Team,
     Plugin,
     Skill,
     File,
@@ -31,6 +36,7 @@ impl MentionType {
 
     pub(super) fn span(self, base_style: Style) -> Span<'static> {
         let style = match self {
+            Self::Team => base_style.cyan(),
             Self::Plugin => base_style.magenta(),
             Self::Skill => base_style.dim(),
             Self::File => base_style.cyan(),
@@ -41,6 +47,7 @@ impl MentionType {
 
     fn label(self) -> &'static str {
         match self {
+            Self::Team => "Team",
             Self::Plugin => "Plugin",
             Self::Skill => "Skill",
             Self::File => "File",

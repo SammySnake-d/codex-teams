@@ -275,6 +275,16 @@ impl ChatWidget {
             SlashCommand::Agent | SlashCommand::MultiAgents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
+            SlashCommand::Teams => {
+                if self.config.features.enabled(Feature::Teams) {
+                    self.app_event_tx.send(AppEvent::OpenTeamsDialog);
+                } else {
+                    self.add_info_message(
+                        "Codex Teams is disabled.".to_string(),
+                        Some("Enable it with `--enable teams` or `features.teams = true`, then run /teams again.".to_string()),
+                    );
+                }
+            }
             SlashCommand::Permissions => {
                 self.open_permissions_popup();
             }
@@ -947,6 +957,7 @@ impl ChatWidget {
             goal_command_enabled: self.config.features.enabled(Feature::Goals),
             service_tier_commands_enabled: self.fast_mode_enabled(),
             personality_command_enabled: self.config.features.enabled(Feature::Personality),
+            teams_enabled: self.config.features.enabled(Feature::Teams),
             realtime_conversation_enabled: self.realtime_conversation_enabled(),
             audio_device_selection_enabled: self.realtime_audio_device_selection_enabled(),
             allow_elevate_sandbox,
@@ -996,6 +1007,7 @@ impl ChatWidget {
             | SlashCommand::Keymap
             | SlashCommand::Agent
             | SlashCommand::MultiAgents
+            | SlashCommand::Teams
             | SlashCommand::Permissions
             | SlashCommand::ElevateSandbox
             | SlashCommand::SandboxReadRoot

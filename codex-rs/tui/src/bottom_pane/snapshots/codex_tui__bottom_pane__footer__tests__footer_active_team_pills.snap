@@ -1,5 +1,6 @@
 ---
 source: tui/src/bottom_pane/footer.rs
+assertion_line: 1533
 expression: terminal.backend()
 ---
-"  Teams: Rocket · @main · @alice                             100% context left  "
+"  2 teammates                                                100% context left  "

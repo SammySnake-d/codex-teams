@@ -234,9 +234,11 @@ use self::side::SideParentStatus;
 use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
 use self::startup_prompts::*;
-use self::team_roster_navigation::SelectedTeamRosterTarget;
 use self::team_roster_navigation::TeamRosterDirection;
+use self::team_roster_navigation::TeamRosterMember;
+use self::team_roster_navigation::TeamRosterMemberInput;
 use self::team_roster_navigation::TeamRosterNavigationState;
+use self::team_roster_navigation::TeamRosterSelectionAction;
 use self::thread_events::*;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
@@ -1281,8 +1283,8 @@ See the Codex keymap documentation for supported actions and examples."
             // The Teams dialog overlay (Phase 6 §B.6) captures key input while it
             // is open; everything else (Draw/Resize/Paste) falls through to the
             // chat widget so the composer keeps rendering beneath it. Reached only
-            // when a team is active and the (currently unbound) OpenTeamsDialog
-            // event has opened the overlay, so non-team sessions never enter here.
+            // when a team is active and OpenTeamsDialog has opened the overlay,
+            // so non-team sessions never enter here.
             match event {
                 TuiEvent::Key(key_event) => {
                     self.handle_teams_dialog_key(tui, key_event);

@@ -336,7 +336,11 @@ fn team_tools_exposure(turn_context: &TurnContext) -> ToolExposure {
     if search_tool_enabled(turn_context) && namespace_tools_enabled(turn_context) {
         ToolExposure::Deferred
     } else {
-        ToolExposure::Direct
+        // Keep lead-side Teams dispatch registered for explicit/internal calls,
+        // but do not put Teams tools directly in the model-visible tool list.
+        // Without tool_search, direct exposure lets ordinary "subagent" or
+        // "parallel agents" requests choose split-pane Teams tools.
+        ToolExposure::Hidden
     }
 }
 

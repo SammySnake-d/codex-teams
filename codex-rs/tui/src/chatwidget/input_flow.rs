@@ -81,17 +81,54 @@ impl ChatWidget {
         &mut self,
         user_message: UserMessage,
         action: QueuedInputAction,
-    ) {
+    ) -> bool {
+        self.queue_user_message_with_history_record(
+            user_message,
+            action,
+            UserMessageHistoryRecord::UserMessageText,
+        )
+    }
+
+    pub(super) fn queue_user_message_with_history_record(
+        &mut self,
+        user_message: UserMessage,
+        action: QueuedInputAction,
+        history_record: UserMessageHistoryRecord,
+    ) -> bool {
         if !self.is_session_configured() || self.is_user_turn_pending_or_running() {
             self.input_queue
                 .queued_user_messages
                 .push_back(QueuedUserMessage::new(user_message, action));
             self.input_queue
                 .queued_user_message_history_records
-                .push_back(UserMessageHistoryRecord::UserMessageText);
+                .push_back(history_record);
             self.refresh_pending_input_preview();
+            true
         } else {
-            self.submit_user_message(user_message);
+            match action {
+                QueuedInputAction::TeamsMailbox => {
+                    self.submit_teams_mailbox_message(user_message, history_record)
+                        .0
+                }
+                QueuedInputAction::PlainNoShell => {
+                    self.submit_user_message_with_history_and_shell_escape_policy(
+                        user_message,
+                        history_record,
+                        ShellEscapePolicy::Disallow,
+                    )
+                    .0
+                }
+                QueuedInputAction::Plain
+                | QueuedInputAction::ParseSlash
+                | QueuedInputAction::RunShell => {
+                    self.submit_user_message_with_history_and_shell_escape_policy(
+                        user_message,
+                        history_record,
+                        ShellEscapePolicy::Allow,
+                    )
+                    .0
+                }
+            }
         }
     }
 
@@ -122,6 +159,15 @@ impl ChatWidget {
                             queued_message.into_user_message(),
                             history_record,
                             ShellEscapePolicy::Disallow,
+                        )
+                        .0;
+                    break;
+                }
+                QueuedInputAction::TeamsMailbox => {
+                    submitted_follow_up = self
+                        .submit_teams_mailbox_message(
+                            queued_message.into_user_message(),
+                            history_record,
                         )
                         .0;
                     break;

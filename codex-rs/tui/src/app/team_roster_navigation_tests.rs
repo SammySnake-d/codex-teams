@@ -13,83 +13,89 @@ fn span_text(spans: &[Span<'static>]) -> String {
         .collect::<String>()
 }
 
+fn member(suffix: u128, name: &str, pane: &str) -> TeamRosterMember {
+    TeamRosterMember::new(TeamRosterMemberInput {
+        thread_id: thread_id(suffix),
+        name: name.to_string(),
+        tmux_pane_id: Some(pane.to_string()),
+        backend_type: Some("tmux".to_string()),
+        color: None,
+        mode: None,
+        is_active: None,
+        prompt: None,
+    })
+    .expect("pane-backed member")
+}
+
 #[test]
-fn footer_roster_is_main_plus_teammates_sorted_by_name() {
+fn footer_status_shows_leader_teammates_and_hide_row() {
     let mut state = TeamRosterNavigationState::default();
     let main_thread_id = thread_id(1);
-    let bob_thread_id = thread_id(2);
-    let alice_thread_id = thread_id(3);
 
     state.set_active_team("Rocket".to_string());
-    assert_eq!(state.footer_label(), Some("Teams: Rocket".to_string()));
     assert_eq!(
         state.footer_spans(Some(main_thread_id), Some(main_thread_id)),
         None
     );
 
-    state.register_member(bob_thread_id, "bob".to_string(), None, None);
-    state.register_member(alice_thread_id, "alice".to_string(), None, None);
+    state.register_member(member(2, "bob", "%bob"));
+    state.register_member(member(3, "alice", "%alice"));
 
     let spans = state
         .footer_spans(Some(main_thread_id), Some(main_thread_id))
-        .expect("members should render footer roster");
-    assert_eq!(span_text(&spans), "@main · @alice · @bob");
-    assert_eq!(
-        state.viewed_footer_index(Some(main_thread_id), Some(main_thread_id)),
-        Some(0)
-    );
-    assert_eq!(
-        state.viewed_footer_index(Some(alice_thread_id), Some(main_thread_id)),
-        Some(1)
-    );
-    assert_eq!(
-        state.viewed_footer_index(Some(bob_thread_id), Some(main_thread_id)),
-        Some(2)
-    );
+        .expect("members should render Teams status");
+    assert_eq!(span_text(&spans), "2 teammates");
 }
 
 #[test]
-fn selection_cycles_through_main_sorted_teammates_and_hide_row() {
+fn selection_cycles_leader_teammates_and_hide_row() {
     let mut state = TeamRosterNavigationState::default();
     let main_thread_id = thread_id(1);
-    let bob_thread_id = thread_id(2);
-    let alice_thread_id = thread_id(3);
 
-    state.register_member(bob_thread_id, "bob".to_string(), None, None);
-    state.register_member(alice_thread_id, "alice".to_string(), None, None);
+    state.register_member(member(2, "bob", "%bob"));
+    state.register_member(member(3, "alice", "%alice"));
 
-    assert!(state.step_selection(TeamRosterDirection::Next));
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
     assert_eq!(state.selected_footer_index(), Some(0));
-    assert_eq!(
-        state.selected_target(Some(main_thread_id)),
-        Some(SelectedTeamRosterTarget::Thread(main_thread_id))
-    );
-
-    assert!(state.step_selection(TeamRosterDirection::Next));
-    assert_eq!(state.selected_footer_index(), Some(1));
-    assert_eq!(
-        state.selected_target(Some(main_thread_id)),
-        Some(SelectedTeamRosterTarget::Thread(alice_thread_id))
-    );
-
-    assert!(state.step_selection(TeamRosterDirection::Next));
-    assert_eq!(state.selected_footer_index(), Some(2));
-    assert_eq!(
-        state.selected_target(Some(main_thread_id)),
-        Some(SelectedTeamRosterTarget::Thread(bob_thread_id))
-    );
-
-    assert!(state.step_selection(TeamRosterDirection::Next));
-    assert_eq!(state.selected_footer_index(), Some(3));
-    assert_eq!(
-        state.selected_target(Some(main_thread_id)),
-        Some(SelectedTeamRosterTarget::Hide)
-    );
 
     let spans = state
         .footer_spans(Some(main_thread_id), Some(main_thread_id))
-        .expect("selected roster should render hide row");
-    assert_eq!(span_text(&spans), "@main · @alice · @bob · hide");
+        .expect("selected status should render hint");
+    assert_eq!(span_text(&spans), "main @alice @bob hide · Enter to view");
+
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(state.selected_footer_index(), Some(1));
+
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(state.selected_footer_index(), Some(2));
+
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(state.selected_footer_index(), Some(3));
+
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(state.selected_footer_index(), Some(0));
+
+    assert!(state.step_selection(TeamRosterDirection::Previous, None, None));
+    assert_eq!(state.selected_footer_index(), Some(3));
+
+    state.clear_selection();
+    assert_eq!(state.selected_footer_index(), None);
+}
+
+#[test]
+fn selection_is_disabled_without_teammates() {
+    let mut state = TeamRosterNavigationState::default();
+
+    assert!(!state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(state.selected_footer_index(), None);
+    assert_eq!(state.footer_spans(None, None), None);
+}
+
+#[test]
+fn stepping_reopens_collapsed_roster() {
+    let mut state = TeamRosterNavigationState::default();
+    let main_thread_id = thread_id(1);
+    state.register_member(member(3, "alice", "%alice"));
 
     state.collapse_roster();
     assert_eq!(
@@ -97,59 +103,105 @@ fn selection_cycles_through_main_sorted_teammates_and_hide_row() {
         None
     );
 
-    assert!(state.step_selection(TeamRosterDirection::Next));
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
     assert_eq!(state.selected_footer_index(), Some(0));
     let spans = state
         .footer_spans(Some(main_thread_id), Some(main_thread_id))
-        .expect("stepping should reopen the collapsed roster");
-    assert_eq!(span_text(&spans), "@main · @alice · @bob · hide");
-
-    assert!(state.step_selection(TeamRosterDirection::Next));
-    assert_eq!(state.selected_footer_index(), Some(1));
-
-    assert!(state.step_selection(TeamRosterDirection::Previous));
-    assert_eq!(state.selected_footer_index(), Some(0));
-
-    assert!(state.step_selection(TeamRosterDirection::Previous));
-    assert_eq!(state.selected_footer_index(), Some(3));
-    assert_eq!(
-        state.selected_target(Some(main_thread_id)),
-        Some(SelectedTeamRosterTarget::Hide)
-    );
-
-    state.clear_selection();
-    assert_eq!(state.selected_footer_index(), None);
-    assert_eq!(state.selected_target(Some(main_thread_id)), None);
+        .expect("stepping should reopen the collapsed status");
+    assert_eq!(span_text(&spans), "main @alice hide · Enter to view");
 }
 
 #[test]
-fn selection_is_disabled_without_teammates() {
+fn idle_and_mode_metadata_keep_footer_to_roster_items() {
     let mut state = TeamRosterNavigationState::default();
-
-    assert!(!state.step_selection(TeamRosterDirection::Next));
-    assert_eq!(state.selected_footer_index(), None);
-    assert_eq!(state.footer_spans(None, None), None);
-}
-
-#[test]
-fn pane_backed_teammates_select_pane_target() {
-    let mut state = TeamRosterNavigationState::default();
-    let alice_thread_id = thread_id(3);
-
     state.register_member(
-        alice_thread_id,
-        "alice".to_string(),
-        Some("%9".to_string()),
-        Some("tmux".to_string()),
+        TeamRosterMember::new(TeamRosterMemberInput {
+            thread_id: thread_id(3),
+            name: "alice".to_string(),
+            tmux_pane_id: Some("%alice".to_string()),
+            backend_type: Some("tmux".to_string()),
+            color: Some("red".to_string()),
+            mode: Some("plan".to_string()),
+            is_active: Some(false),
+            prompt: None,
+        })
+        .expect("pane-backed member"),
     );
 
-    assert!(state.step_selection(TeamRosterDirection::Next));
-    assert!(state.step_selection(TeamRosterDirection::Next));
-    assert_eq!(
-        state.selected_target(Some(thread_id(1))),
-        Some(SelectedTeamRosterTarget::Pane {
-            pane_id: "%9".to_string(),
+    let spans = state
+        .footer_spans(Some(thread_id(1)), Some(thread_id(1)))
+        .expect("idle member should render");
+    assert_eq!(span_text(&spans), "1 teammate");
+}
+
+#[test]
+fn teammate_view_header_is_available_only_for_teammate_thread() {
+    let mut state = TeamRosterNavigationState::default();
+    let main_thread_id = thread_id(1);
+    let alice_thread_id = thread_id(3);
+    state.register_member(
+        TeamRosterMember::new(TeamRosterMemberInput {
+            thread_id: alice_thread_id,
+            name: "alice".to_string(),
+            tmux_pane_id: Some("%alice".to_string()),
             backend_type: Some("tmux".to_string()),
+            color: Some("red".to_string()),
+            mode: Some("plan".to_string()),
+            is_active: Some(true),
+            prompt: Some("Inspect issue #15 and report the proof path.".to_string()),
         })
+        .expect("pane-backed member"),
+    );
+
+    assert_eq!(state.teammate_view_header(Some(main_thread_id)), None);
+    let header = state
+        .teammate_view_header(Some(alice_thread_id))
+        .expect("teammate thread should expose view header");
+    assert_eq!(header.name, "alice");
+    assert_eq!(header.color.as_deref(), Some("red"));
+    assert_eq!(
+        header.prompt.as_deref(),
+        Some("Inspect issue #15 and report the proof path.")
+    );
+}
+
+#[test]
+fn activating_leader_teammate_and_hide_returns_expected_action() {
+    let mut state = TeamRosterNavigationState::default();
+    let main_thread_id = thread_id(1);
+    state.register_member(member(2, "bob", "%bob"));
+    state.register_member(member(3, "alice", "%alice"));
+
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(
+        state.activate_selection(Some(main_thread_id)),
+        Some(TeamRosterSelectionAction::SelectThread(main_thread_id))
+    );
+
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(
+        state.activate_selection(Some(main_thread_id)),
+        Some(TeamRosterSelectionAction::ViewTeammate(thread_id(3)))
+    );
+    assert_eq!(
+        state
+            .teammate_view_header(Some(main_thread_id))
+            .expect("viewed teammate header")
+            .name,
+        "alice"
+    );
+    assert!(state.clear_viewed_teammate());
+    assert_eq!(state.teammate_view_header(Some(main_thread_id)), None);
+
+    assert!(state.step_selection(TeamRosterDirection::Previous, None, None));
+    assert!(state.step_selection(TeamRosterDirection::Previous, None, None));
+    assert_eq!(
+        state.activate_selection(Some(main_thread_id)),
+        Some(TeamRosterSelectionAction::CollapseRoster)
+    );
+    assert_eq!(
+        state.footer_spans(Some(main_thread_id), Some(main_thread_id)),
+        None
     );
 }

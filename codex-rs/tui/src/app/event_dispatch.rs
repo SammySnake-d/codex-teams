@@ -50,23 +50,38 @@ impl App {
                 agent_role,
                 tmux_pane_id,
                 backend_type,
+                color,
+                mode,
+                is_active,
+                prompt,
             } => {
                 self.register_teammate_thread(
-                    agent_thread_id,
-                    member_name,
+                    TeamRosterMemberInput {
+                        thread_id: agent_thread_id,
+                        name: member_name,
+                        tmux_pane_id,
+                        backend_type,
+                        color,
+                        mode,
+                        is_active,
+                        prompt,
+                    },
                     agent_role,
-                    tmux_pane_id,
-                    backend_type,
                 );
             }
-            AppEvent::InjectTeammateReplies { text } => {
-                self.chat_widget.inject_teammate_reply(text);
+            AppEvent::InjectTeammateReplies { text, ack } => {
+                if self.chat_widget.inject_teammate_reply(text) {
+                    mark_teammate_inbox_ack(ack).await;
+                }
             }
-            AppEvent::InjectTeammateInboxMessage { text } => {
-                self.chat_widget.inject_teammate_inbox_message(text);
+            AppEvent::InjectTeammateInboxMessage { text, ack } => {
+                if self.chat_widget.inject_teammate_inbox_message(text) {
+                    mark_teammate_inbox_ack(ack).await;
+                }
             }
             AppEvent::TeamBecameActive { team } => {
                 self.team_roster_navigation.set_active_team(team.clone());
+                self.sync_team_roster_from_config(&team);
                 self.sync_active_agent_label();
                 if self.lead_inbox_poller.is_none() {
                     self.lead_inbox_poller =
@@ -88,9 +103,12 @@ impl App {
             AppEvent::OpenTeamsDialog => {
                 // Construct the dialog for the active lead team and prime its
                 // roster from the on-disk team store before showing it. No
-                // default keybinding sends this event yet (Phase 6 §B.6
-                // follow-up); it is reachable via the AppEvent bus.
-                if let Some(team) = self.chat_widget.active_team_name() {
+                // keybinding would only need to send this same AppEvent.
+                let active_team = self
+                    .chat_widget
+                    .active_team_name()
+                    .or_else(|| self.team_roster_navigation.active_team_name());
+                if let Some(team) = active_team {
                     let mut dialog = crate::chatwidget::teams_dialog::TeamsDialog::open(team);
                     dialog.refresh(&self.config.codex_home);
                     self.teams_dialog = Some(Box::new(dialog));
@@ -113,6 +131,7 @@ impl App {
                         backend_type,
                     } => {
                         self.focus_teammate_pane(&pane_id, backend_type.as_deref());
+                        self.teams_dialog = None;
                     }
                     TeamsDialogAction::ToggleVisibility {
                         team,
@@ -120,6 +139,46 @@ impl App {
                         hide,
                     } => {
                         self.set_teammate_pane_hidden(&team, &pane_id, hide);
+                        if let Some(dialog) = self.teams_dialog.as_mut() {
+                            dialog.refresh(&self.config.codex_home);
+                        }
+                    }
+                    TeamsDialogAction::ToggleAllVisibility { team, hide } => {
+                        self.set_all_teammate_panes_hidden(&team, hide);
+                        if let Some(dialog) = self.teams_dialog.as_mut() {
+                            dialog.refresh(&self.config.codex_home);
+                        }
+                    }
+                    TeamsDialogAction::KillTeammate { team, teammate } => {
+                        self.kill_teammate_pane_and_remove_member(
+                            &team,
+                            &teammate.pane_id,
+                            teammate.backend_type.as_deref(),
+                            &teammate.agent_id,
+                        );
+                        self.sync_team_roster_from_config(&team);
+                        self.sync_active_agent_label();
+                        if let Some(dialog) = self.teams_dialog.as_mut() {
+                            dialog.refresh(&self.config.codex_home);
+                        }
+                    }
+                    TeamsDialogAction::ShutdownTeammate { team, name } => {
+                        self.send_teammate_shutdown_request(&team, &name);
+                        if let Some(dialog) = self.teams_dialog.as_mut() {
+                            dialog.refresh(&self.config.codex_home);
+                        }
+                    }
+                    TeamsDialogAction::PruneIdle { team, teammates } => {
+                        for teammate in teammates {
+                            self.kill_teammate_pane_and_remove_member(
+                                &team,
+                                &teammate.pane_id,
+                                teammate.backend_type.as_deref(),
+                                &teammate.agent_id,
+                            );
+                        }
+                        self.sync_team_roster_from_config(&team);
+                        self.sync_active_agent_label();
                         if let Some(dialog) = self.teams_dialog.as_mut() {
                             dialog.refresh(&self.config.codex_home);
                         }
@@ -2320,5 +2379,49 @@ impl App {
                 AppRunControl::Continue
             }
         }
+    }
+
+    fn sync_team_roster_from_config(&mut self, team: &str) {
+        let members =
+            match crate::legacy_core::team_store::read_config(&self.config.codex_home, team) {
+                Ok(Some(config)) => config
+                    .members
+                    .into_iter()
+                    .filter_map(|member| {
+                        let member_id = member.member_id?;
+                        let tmux_pane_id = member.tmux_pane_id.trim().to_string();
+                        let thread_id = ThreadId::from_string(&member_id).ok()?;
+                        TeamRosterMember::new(TeamRosterMemberInput {
+                            thread_id,
+                            name: member.name,
+                            tmux_pane_id: Some(tmux_pane_id),
+                            backend_type: member.backend_type,
+                            color: member.color,
+                            mode: member.mode,
+                            is_active: member.is_active,
+                            prompt: member.prompt,
+                        })
+                    })
+                    .collect(),
+                Ok(None) | Err(_) => Vec::new(),
+            };
+        self.team_roster_navigation.replace_members(members);
+    }
+}
+
+async fn mark_teammate_inbox_ack(ack: crate::app_event::TeammateInboxAck) {
+    let result = tokio::task::spawn_blocking(move || {
+        crate::legacy_core::team_store::mark_messages_read_by_indices(
+            &ack.codex_home,
+            &ack.team,
+            &ack.agent_name,
+            &ack.indices,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::warn!(error = %err, "failed to mark teammate inbox messages read"),
+        Err(err) => tracing::warn!(error = %err, "failed to join teammate inbox ack task"),
     }
 }

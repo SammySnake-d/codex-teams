@@ -300,6 +300,7 @@ pub enum InputResult {
 pub enum QueuedInputAction {
     Plain,
     PlainNoShell,
+    TeamsMailbox,
     ParseSlash,
     RunShell,
 }
@@ -364,8 +365,10 @@ pub(crate) struct ChatComposer {
     next_element_id: u64,
     skills: Option<Vec<SkillMetadata>>,
     plugins: Option<Vec<PluginCapabilitySummary>>,
+    team_mentions: Vec<String>,
     connectors_snapshot: Option<ConnectorsSnapshot>,
     collaboration_modes_enabled: bool,
+    teams_enabled: bool,
     config: ChatComposerConfig,
     connectors_enabled: bool,
     plugins_command_enabled: bool,
@@ -437,6 +440,7 @@ impl ChatComposer {
     fn builtin_command_flags(&self) -> BuiltinCommandFlags {
         BuiltinCommandFlags {
             collaboration_modes_enabled: self.collaboration_modes_enabled,
+            teams_enabled: self.teams_enabled,
             connectors_enabled: self.connectors_enabled,
             plugins_command_enabled: self.plugins_command_enabled,
             service_tier_commands_enabled: self.service_tier_commands_enabled,
@@ -533,8 +537,10 @@ impl ChatComposer {
             next_element_id: 0,
             skills: None,
             plugins: None,
+            team_mentions: Vec::new(),
             connectors_snapshot: None,
             collaboration_modes_enabled: false,
+            teams_enabled: false,
             config,
             connectors_enabled: false,
             plugins_command_enabled: false,
@@ -585,6 +591,11 @@ impl ChatComposer {
         self.sync_popups();
     }
 
+    pub fn set_team_mentions(&mut self, team_mentions: Vec<String>) {
+        self.team_mentions = team_mentions;
+        self.sync_popups();
+    }
+
     pub fn set_plugins_command_enabled(&mut self, enabled: bool) {
         self.plugins_command_enabled = enabled;
     }
@@ -629,6 +640,10 @@ impl ChatComposer {
 
     pub fn set_collaboration_modes_enabled(&mut self, enabled: bool) {
         self.collaboration_modes_enabled = enabled;
+    }
+
+    pub fn set_teams_enabled(&mut self, enabled: bool) {
+        self.teams_enabled = enabled;
     }
 
     pub fn set_connectors_enabled(&mut self, enabled: bool) {
@@ -2055,6 +2070,9 @@ impl ChatComposer {
                     }
                     MentionV2Selection::Tool { insert_text, path } => {
                         self.insert_selected_mention(&insert_text, path.as_deref());
+                    }
+                    MentionV2Selection::Team { insert_text, path } => {
+                        self.insert_selected_mention(&insert_text, Some(path.as_str()));
                     }
                 }
             }
@@ -3708,6 +3726,7 @@ impl ChatComposer {
         let candidates = super::mentions_v2::build_search_catalog(
             self.skills.as_deref(),
             self.plugins.as_deref(),
+            &self.team_mentions,
         );
 
         match &mut self.popups.active {

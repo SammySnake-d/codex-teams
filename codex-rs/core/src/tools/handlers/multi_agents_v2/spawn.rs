@@ -7,11 +7,13 @@ use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
+use crate::tools::handlers::team;
 use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_tools::ToolSpec;
+use std::sync::Arc;
 
 #[derive(Default)]
 pub(crate) struct Handler {
@@ -38,13 +40,13 @@ impl ToolExecutor<ToolInvocation> for Handler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        handle_spawn_agent(invocation).await.map(boxed_tool_output)
+        handle_spawn_agent(invocation).await
     }
 }
 
 async fn handle_spawn_agent(
     invocation: ToolInvocation,
-) -> Result<SpawnAgentResult, FunctionCallError> {
+) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
     let ToolInvocation {
         session,
         turn,
@@ -54,7 +56,28 @@ async fn handle_spawn_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+    if let Some(output) = team::maybe_spawn_member_from_agent_tool(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        team::SpawnMemberFromAgentToolRequest {
+            team_name: args.team_name.clone(),
+            name: args.name.clone(),
+            profile: args.agent_type.clone(),
+            model: args.model.clone(),
+            message: args.message.clone(),
+        },
+    )
+    .await?
+    {
+        return Ok(boxed_tool_output(output));
+    }
     let fork_mode = args.fork_mode()?;
+    let task_name = args.task_name.clone().ok_or_else(|| {
+        FunctionCallError::RespondToModel(
+            "task_name is required when spawn_agent is creating a native Codex subagent. To spawn a Teams teammate, first create a team and pass name (plus optional team_name)."
+                .to_string(),
+        )
+    })?;
     let role_name = args
         .agent_type
         .as_deref()
@@ -114,7 +137,7 @@ async fn handle_spawn_agent(
         &turn.session_source,
         child_depth,
         role_name,
-        Some(args.task_name.clone()),
+        Some(task_name),
     )?;
     let result = Box::pin(
         session.services.agent_control.spawn_agent_with_metadata(
@@ -224,12 +247,14 @@ async fn handle_spawn_agent(
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     if hide_agent_metadata {
-        Ok(SpawnAgentResult::HiddenMetadata { task_name })
+        Ok(boxed_tool_output(SpawnAgentResult::HiddenMetadata {
+            task_name,
+        }))
     } else {
-        Ok(SpawnAgentResult::WithNickname {
+        Ok(boxed_tool_output(SpawnAgentResult::WithNickname {
             task_name,
             nickname,
-        })
+        }))
     }
 }
 
@@ -243,7 +268,9 @@ impl CoreToolRuntime for Handler {
 #[serde(deny_unknown_fields)]
 struct SpawnAgentArgs {
     message: String,
-    task_name: String,
+    task_name: Option<String>,
+    name: Option<String>,
+    team_name: Option<String>,
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,

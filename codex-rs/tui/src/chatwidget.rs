@@ -411,9 +411,10 @@ mod status_controls;
 mod status_surfaces;
 mod streaming;
 use self::status_surfaces::CachedProjectRootName;
-mod team_colors;
+pub(crate) mod team_colors;
 mod team_ui;
 pub(crate) mod teams_dialog;
+pub(crate) use self::team_ui::TeamTeammateViewHeader;
 use self::team_ui::TeamUiState;
 mod tool_lifecycle;
 mod tool_requests;
@@ -432,7 +433,6 @@ use self::user_messages::ThreadComposerState;
 pub(crate) use self::user_messages::ThreadInputState;
 pub(crate) use self::user_messages::UserMessage;
 use self::user_messages::UserMessageDisplay;
-#[cfg(test)]
 use self::user_messages::UserMessageHistoryOverride;
 use self::user_messages::UserMessageHistoryRecord;
 use self::user_messages::app_server_text_elements;
@@ -573,6 +573,7 @@ pub(crate) struct ChatWidget {
     active_agent_label: Option<String>,
     team_footer_label: Option<String>,
     team_footer_spans: Option<Vec<ratatui::text::Span<'static>>>,
+    team_teammate_view_header: Option<TeamTeammateViewHeader>,
     team_ui: TeamUiState,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
@@ -898,6 +899,106 @@ fn token_usage_info_from_app_server(token_usage: ThreadTokenUsage) -> TokenUsage
         },
         model_context_window: token_usage.model_context_window,
     }
+}
+
+fn teammate_reply_history_record(text: &str) -> UserMessageHistoryRecord {
+    UserMessageHistoryRecord::Override(UserMessageHistoryOverride {
+        text: teammate_message_history_text(text),
+        text_elements: Vec::new(),
+    })
+}
+
+fn teammate_inbox_history_record(text: &str) -> UserMessageHistoryRecord {
+    UserMessageHistoryRecord::Override(UserMessageHistoryOverride {
+        text: teammate_inbox_display_text(text),
+        text_elements: Vec::new(),
+    })
+}
+
+fn teammate_inbox_display_text(text: &str) -> String {
+    teammate_message_history_text(&sanitize_teammate_inbox_text_for_display(text))
+}
+
+fn sanitize_teammate_inbox_text_for_display(text: &str) -> String {
+    const CONTEXT_MARKER: &str = "The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.";
+    const MESSAGE_PREVIEW_MARKER: &str = "Message preview:\n";
+    const LEGACY_CONTEXT_PREFIX: &str = "Codex Teams context:";
+    const LEGACY_CONTEXT_END: &str =
+        "Do not create teams or spawn teammates from this teammate process.";
+    let sanitize_extracted_task = |task: &str| {
+        let task = task
+            .split_once("\n</teammate-message>")
+            .map_or(task, |(task, _)| task)
+            .trim();
+        if task.is_empty() {
+            "Codex Teams assignment received.".to_string()
+        } else {
+            task.to_string()
+        }
+    };
+    let trimmed = text.trim_start();
+    if trimmed.starts_with(LEGACY_CONTEXT_PREFIX)
+        && let Some((_, task)) = trimmed.split_once(LEGACY_CONTEXT_END)
+    {
+        return sanitize_extracted_task(task);
+    }
+    if text.contains(LEGACY_CONTEXT_PREFIX)
+        && let Some((_, task)) = text.split_once(LEGACY_CONTEXT_END)
+    {
+        return sanitize_extracted_task(task);
+    }
+    if let Some((_, task)) = text.split_once(CONTEXT_MARKER) {
+        return sanitize_extracted_task(task);
+    }
+    if text.starts_with("Codex Teams message:")
+        && let Some((_, preview)) = text.split_once(MESSAGE_PREVIEW_MARKER)
+    {
+        return preview.trim().to_string();
+    }
+    text.to_string()
+}
+
+fn teammate_message_history_text(text: &str) -> String {
+    let mut lines = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<teammate-message") {
+        rest = &rest[start..];
+        let Some(tag_end) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[..tag_end + 1];
+        let after_tag = &rest[tag_end + 1..];
+        let Some(close_start) = after_tag.find("</teammate-message>") else {
+            break;
+        };
+        let body = after_tag[..close_start].trim();
+        let teammate =
+            teammate_message_attr(tag, "teammate_id").unwrap_or_else(|| "teammate".to_string());
+        let summary = teammate_message_attr(tag, "summary");
+        let prefix = match summary {
+            Some(summary) if !summary.trim().is_empty() => format!("@{teammate} ({summary})"),
+            _ => format!("@{teammate}"),
+        };
+        if body.is_empty() {
+            lines.push(prefix);
+        } else {
+            lines.push(format!("{prefix}: {body}"));
+        }
+        rest = &after_tag[close_start + "</teammate-message>".len()..];
+    }
+    if lines.is_empty() {
+        text.to_string()
+    } else {
+        lines.join("\n\n")
+    }
+}
+
+fn teammate_message_attr(tag: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=\"");
+    let start = tag.find(&needle)? + needle.len();
+    let rest = &tag[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 impl ChatWidget {
@@ -1711,24 +1812,37 @@ impl ChatWidget {
     /// Inject a lead-inbox teammate reply as this process's own user turn.
     /// Mailbox text is model input, even if it starts with `!`, so it must not
     /// trigger the interactive TUI shell-command shortcut.
-    pub(crate) fn inject_teammate_reply(&mut self, text: String) {
+    pub(crate) fn inject_teammate_reply(&mut self, text: String) -> bool {
+        let history_record = teammate_reply_history_record(&text);
         let user_message = UserMessage::from(text);
         if self.is_user_turn_pending_or_running() {
-            self.queue_user_message_with_options(user_message, QueuedInputAction::PlainNoShell);
+            self.queue_user_message_with_history_record(
+                user_message,
+                QueuedInputAction::TeamsMailbox,
+                history_record,
+            )
         } else {
-            let _ = self.submit_user_message_as_plain_user_turn(user_message);
+            self.submit_teams_mailbox_message(user_message, history_record)
+                .0
         }
     }
 
     /// Inject a teammate-mode mailbox message as this process's own user turn.
     /// Mailbox text is model input, even if it starts with `!`, so it must not
     /// trigger the interactive TUI shell-command shortcut.
-    pub(crate) fn inject_teammate_inbox_message(&mut self, text: String) {
-        let user_message = UserMessage::from(text);
+    pub(crate) fn inject_teammate_inbox_message(&mut self, text: String) -> bool {
+        let model_text = sanitize_teammate_inbox_text_for_display(&text);
+        let history_record = teammate_inbox_history_record(&model_text);
+        let user_message = UserMessage::from(model_text);
         if self.is_user_turn_pending_or_running() {
-            self.queue_user_message_with_options(user_message, QueuedInputAction::PlainNoShell);
+            self.queue_user_message_with_history_record(
+                user_message,
+                QueuedInputAction::TeamsMailbox,
+                history_record,
+            )
         } else {
-            let _ = self.submit_user_message_as_plain_user_turn(user_message);
+            self.submit_teams_mailbox_message(user_message, history_record)
+                .0
         }
     }
 

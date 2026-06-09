@@ -158,6 +158,7 @@ pub(super) async fn spawn_review_thread(
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     let tc = Arc::new(review_turn_context);
     if tc.environments.single_local_environment_cwd().is_some() {

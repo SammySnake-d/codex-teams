@@ -23,6 +23,12 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use serde::Serialize;
 use serde_json::Value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum UserInputSource {
+    User,
+    TeamsMailbox,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) enum AppCommand {
@@ -52,6 +58,7 @@ pub(crate) enum AppCommand {
         final_output_json_schema: Option<Value>,
         collaboration_mode: Option<CollaborationMode>,
         personality: Option<Personality>,
+        user_input_source: UserInputSource,
     },
     OverrideTurnContext {
         cwd: Option<PathBuf>,
@@ -169,6 +176,37 @@ impl AppCommand {
         collaboration_mode: Option<CollaborationMode>,
         personality: Option<Personality>,
     ) -> Self {
+        Self::user_turn_with_source(
+            items,
+            cwd,
+            approval_policy,
+            active_permission_profile,
+            model,
+            effort,
+            summary,
+            service_tier,
+            final_output_json_schema,
+            collaboration_mode,
+            personality,
+            UserInputSource::User,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn user_turn_with_source(
+        items: Vec<UserInput>,
+        cwd: PathBuf,
+        approval_policy: AskForApproval,
+        active_permission_profile: Option<ActivePermissionProfile>,
+        model: String,
+        effort: Option<ReasoningEffortConfig>,
+        summary: Option<ReasoningSummaryConfig>,
+        service_tier: Option<Option<String>>,
+        final_output_json_schema: Option<Value>,
+        collaboration_mode: Option<CollaborationMode>,
+        personality: Option<Personality>,
+        user_input_source: UserInputSource,
+    ) -> Self {
         Self::UserTurn {
             items,
             cwd,
@@ -182,6 +220,7 @@ impl AppCommand {
             final_output_json_schema,
             collaboration_mode,
             personality,
+            user_input_source,
         }
     }
 

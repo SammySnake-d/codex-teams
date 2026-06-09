@@ -859,6 +859,79 @@ async fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_search_with_teams_feature_keeps_subagent_query_native() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "tool-search-subagents-with-teams";
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_tool_search_call(
+                    call_id,
+                    &json!({
+                        "query": "sub-agents",
+                        "limit": 8,
+                    }),
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        configure_search_capable_model(config);
+        config
+            .features
+            .enable(Feature::Teams)
+            .expect("test config should enable Teams");
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should enable v1 multi-agent tools");
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
+            .expect("test config should select v1 multi-agent tools");
+    });
+    let test = builder.build(&server).await?;
+    test.submit_turn_with_approval_and_permission_profile(
+        "Find a subagent tool",
+        AskForApproval::Never,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2);
+
+    let output = tool_search_output_item(&requests[1], call_id);
+    assert!(
+        namespace_child_tool(&output, "multi_agent_v1", "spawn_agent").is_some(),
+        "subagent search should return native multi_agent_v1.spawn_agent: {output:?}"
+    );
+    let rendered = output.to_string();
+    assert!(
+        !rendered.contains("create_team"),
+        "subagent search must not return Codex Teams create_team: {rendered}"
+    );
+    assert!(
+        !rendered.contains("team_spawn_member"),
+        "subagent search must not return Codex Teams team_spawn_member: {rendered}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_search_returns_deferred_dynamic_tool_and_routes_follow_up_call() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

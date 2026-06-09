@@ -3,6 +3,7 @@
 //! This module owns the typed JSON-RPC calls needed by the TUI and keeps
 //! request/response plumbing out of `App` and `ChatWidget`.
 
+use crate::app_command::UserInputSource;
 use crate::bottom_pane::FeedbackAudience;
 use crate::legacy_core::config::Config;
 use crate::permission_compat::legacy_compatible_permission_profile;
@@ -121,6 +122,8 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::openai_models::ModelUpgrade;
 use codex_protocol::openai_models::ReasoningEffortPreset;
+use codex_protocol::protocol::INTERNAL_USER_INPUT_SOURCE_METADATA_KEY;
+use codex_protocol::protocol::INTERNAL_USER_INPUT_SOURCE_TEAMS_MAILBOX;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::ContextCompat;
 use color_eyre::eyre::Result;
@@ -132,6 +135,18 @@ use uuid::Uuid;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const THREAD_SETTINGS_UPDATE_METHOD: &str = "thread/settings/update";
+
+fn responsesapi_client_metadata_for_source(
+    user_input_source: UserInputSource,
+) -> Option<HashMap<String, String>> {
+    match user_input_source {
+        UserInputSource::User => None,
+        UserInputSource::TeamsMailbox => Some(HashMap::from([(
+            INTERNAL_USER_INPUT_SOURCE_METADATA_KEY.to_string(),
+            INTERNAL_USER_INPUT_SOURCE_TEAMS_MAILBOX.to_string(),
+        )])),
+    }
+}
 
 fn bootstrap_request_error(context: &'static str, err: TypedRequestError) -> color_eyre::Report {
     color_eyre::eyre::eyre!("{context}: {err}")
@@ -693,10 +708,13 @@ impl AppServerSession {
         collaboration_mode: Option<codex_protocol::config_types::CollaborationMode>,
         personality: Option<codex_protocol::config_types::Personality>,
         output_schema: Option<serde_json::Value>,
+        user_input_source: UserInputSource,
     ) -> Result<TurnStartResponse> {
         let request_id = self.next_request_id();
         let (sandbox_policy, permissions) =
             turn_permissions_overrides(permissions_override, cwd.as_path());
+        let responsesapi_client_metadata =
+            responsesapi_client_metadata_for_source(user_input_source);
         self.client
             .request_typed(ClientRequest::TurnStart {
                 request_id,
@@ -704,7 +722,7 @@ impl AppServerSession {
                     thread_id: thread_id.to_string(),
                     client_user_message_id: None,
                     input: items,
-                    responsesapi_client_metadata: None,
+                    responsesapi_client_metadata,
                     additional_context: None,
                     environments: None,
                     cwd: Some(cwd),
@@ -760,8 +778,11 @@ impl AppServerSession {
         thread_id: ThreadId,
         turn_id: String,
         items: Vec<UserInput>,
+        user_input_source: UserInputSource,
     ) -> std::result::Result<TurnSteerResponse, TypedRequestError> {
         let request_id = self.next_request_id();
+        let responsesapi_client_metadata =
+            responsesapi_client_metadata_for_source(user_input_source);
         self.client
             .request_typed(ClientRequest::TurnSteer {
                 request_id,
@@ -769,7 +790,7 @@ impl AppServerSession {
                     thread_id: thread_id.to_string(),
                     client_user_message_id: None,
                     input: items,
-                    responsesapi_client_metadata: None,
+                    responsesapi_client_metadata,
                     additional_context: None,
                     expected_turn_id: turn_id,
                 },

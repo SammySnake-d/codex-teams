@@ -51,6 +51,10 @@ pub struct TeammateCommand {
     #[arg(long = "plan-mode-required", default_value_t = false)]
     pub plan_mode_required: bool,
 
+    /// Run enabled hooks without requiring persisted hook trust for this teammate launch.
+    #[arg(long = "dangerously-bypass-hook-trust", default_value_t = false)]
+    pub bypass_hook_trust: bool,
+
     /// Teammate launch-mode hint (`auto` | `tmux` | `in-process`).
     #[arg(long = "teammate-mode")]
     pub teammate_mode: Option<String>,
@@ -86,6 +90,7 @@ pub async fn run_main(cmd: TeammateCommand, arg0_paths: Arg0DispatchPaths) -> Re
     cli.agent_type = cmd.agent_type;
     cli.plan_mode_required = cmd.plan_mode_required;
     cli.teammate_mode = cmd.teammate_mode;
+    cli.bypass_hook_trust = cmd.bypass_hook_trust;
     // Teams must be enabled for the tool set; approval/sandbox behavior comes
     // from the lead's forwarded `-c` overrides. Plan-mode teammates must not be
     // silently forced into bypass.

@@ -37,7 +37,7 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
 }
 
 #[test]
-fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
+fn spawn_agent_tool_v2_supports_claude_style_teammate_branch_and_lists_visible_models() {
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
         available_models: vec![
             model_preset("visible", /*show_in_picker*/ true),
@@ -68,9 +68,13 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .as_ref()
         .expect("spawn_agent should use object params");
     assert!(description.contains("Spawns an agent to work on the specified task."));
-    assert!(description.contains("creates ordinary Codex subagents only"));
-    assert!(description.contains("does not create Codex Teams roster entries"));
-    assert!(description.contains("mailboxes, or split-pane teammates"));
+    assert!(description.contains("By default, `spawn_agent` creates an ordinary Codex subagent."));
+    assert!(description.contains(
+        "If a Codex Teams workspace is active and you pass `name`, `spawn_agent` instead spawns a named split-pane Teams teammate"
+    ));
+    assert!(
+        description.contains("Do not pass `name` or `team_name` for ordinary subagent delegation.")
+    );
     assert!(description.contains("The spawned agent will have the same tools as you"));
     assert!(description.contains("`max_concurrent_threads_per_session = 4`"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
@@ -84,20 +88,15 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(!description.contains("hidden-model"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
+    assert!(properties.contains_key("name"));
+    assert!(properties.contains_key("team_name"));
     assert!(properties.contains_key("fork_turns"));
     assert!(!properties.contains_key("items"));
     assert!(!properties.contains_key("fork_context"));
-    for forbidden_team_field in [
-        "team_id",
-        "team_name",
-        "name",
-        "tmux_pane_id",
-        "backend_type",
-        "use_splitpane",
-    ] {
+    for forbidden_team_field in ["team_id", "tmux_pane_id", "backend_type", "use_splitpane"] {
         assert!(
             !properties.contains_key(forbidden_team_field),
-            "native spawn_agent must not grow Teams split-pane field {forbidden_team_field}"
+            "spawn_agent should not expose low-level Teams split-pane field {forbidden_team_field}"
         );
     }
     assert_eq!(
@@ -118,12 +117,15 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         parameters.required.as_ref(),
-        Some(&vec!["task_name".to_string(), "message".to_string()])
+        Some(&vec!["message".to_string()])
     );
-    assert_eq!(
-        output_schema.expect("spawn_agent output schema")["required"],
-        json!(["task_name", "nickname"])
-    );
+    let output_schema = output_schema.expect("spawn_agent output schema");
+    let variants = output_schema["oneOf"]
+        .as_array()
+        .expect("spawn_agent output should be a native-or-teammate union");
+    assert_eq!(variants.len(), 2);
+    assert_eq!(variants[0]["required"], json!(["task_name", "nickname"]));
+    assert_eq!(variants[1]["required"], json!(["member", "tmux_pane_id"]));
 }
 
 #[test]

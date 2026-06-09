@@ -3,6 +3,17 @@ use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
 use std::collections::BTreeMap;
 
+const CODEX_TEAM_CREATE_DESCRIPTION: &str =
+    "Create a new Codex Teams workspace for coordinating named teammates";
+const CODEX_TEAM_SEND_DESCRIPTION: &str =
+    "Send a message to a Codex Teams teammate or the team lead";
+const CLAUDE_TEAM_CREATE_DESCRIPTION: &str = "Create a new Codex Teams workspace and task list. After TeamCreate, use Task tools for the team task board, spawn teammates through spawn_agent with name and optional team_name, and coordinate with SendMessage. Teammate messages are delivered automatically and queued while the receiver is busy.";
+const CLAUDE_SEND_MESSAGE_DESCRIPTION: &str = "Send a message to a named teammate. Plain assistant text is not visible to teammates or the lead; use SendMessage for Teams communication. Use bare teammate names, team-lead, or \"*\" for broadcast. Messages are delivered automatically and queued while the receiver is busy.";
+const CLAUDE_TASK_CREATE_DESCRIPTION: &str = "Create a task in the Codex Teams task list";
+const CLAUDE_TASK_UPDATE_DESCRIPTION: &str = "Update a task in the Codex Teams task list";
+const CLAUDE_TASK_LIST_DESCRIPTION: &str = "List all tasks in the Codex Teams task list";
+const CLAUDE_TASK_GET_DESCRIPTION: &str = "Get a Codex Teams task by ID";
+
 fn create_collab_input_items_schema() -> JsonSchema {
     let byte_range_properties = BTreeMap::from([
         (
@@ -94,15 +105,156 @@ fn function_tool(
     })
 }
 
+fn metadata_schema() -> JsonSchema {
+    JsonSchema::object(BTreeMap::new(), /*required*/ None, Some(true.into()))
+}
+
+fn string_enum_schema(values: &[&str], description: &str) -> JsonSchema {
+    JsonSchema::string_enum(
+        values
+            .iter()
+            .map(|value| serde_json::json!(value))
+            .collect(),
+        Some(description.to_string()),
+    )
+}
+
+fn structured_message_schema() -> JsonSchema {
+    let shutdown_request = JsonSchema::object(
+        BTreeMap::from([
+            (
+                "type".to_string(),
+                string_enum_schema(&["shutdown_request"], "Structured message discriminator."),
+            ),
+            (
+                "reason".to_string(),
+                JsonSchema::string(Some("Optional shutdown reason.".to_string())),
+            ),
+        ]),
+        Some(vec!["type".to_string()]),
+        Some(false.into()),
+    );
+    let shutdown_response = JsonSchema::object(
+        BTreeMap::from([
+            (
+                "type".to_string(),
+                string_enum_schema(&["shutdown_response"], "Structured message discriminator."),
+            ),
+            (
+                "request_id".to_string(),
+                JsonSchema::string(Some("Request id from the shutdown request.".to_string())),
+            ),
+            (
+                "approve".to_string(),
+                JsonSchema::boolean(Some("Whether to approve shutdown.".to_string())),
+            ),
+            (
+                "reason".to_string(),
+                JsonSchema::string(Some("Reason when rejecting shutdown.".to_string())),
+            ),
+        ]),
+        Some(vec![
+            "type".to_string(),
+            "request_id".to_string(),
+            "approve".to_string(),
+        ]),
+        Some(false.into()),
+    );
+    let plan_approval_response = JsonSchema::object(
+        BTreeMap::from([
+            (
+                "type".to_string(),
+                string_enum_schema(
+                    &["plan_approval_response"],
+                    "Structured message discriminator.",
+                ),
+            ),
+            (
+                "request_id".to_string(),
+                JsonSchema::string(Some(
+                    "Request id from the plan approval request.".to_string(),
+                )),
+            ),
+            (
+                "approve".to_string(),
+                JsonSchema::boolean(Some("Whether to approve the plan.".to_string())),
+            ),
+            (
+                "feedback".to_string(),
+                JsonSchema::string(Some("Feedback when rejecting the plan.".to_string())),
+            ),
+        ]),
+        Some(vec![
+            "type".to_string(),
+            "request_id".to_string(),
+            "approve".to_string(),
+        ]),
+        Some(false.into()),
+    );
+    JsonSchema::any_of(
+        vec![
+            JsonSchema::string(Some("Plain text message content.".to_string())),
+            shutdown_request,
+            shutdown_response,
+            plan_approval_response,
+        ],
+        Some("Plain text or structured swarm protocol message.".to_string()),
+    )
+}
+
 pub(crate) fn create_team_create_tool() -> ToolSpec {
     function_tool(
         "create_team",
-        "Create a live Codex Teams workspace and team context. This only creates the team registry, task board, and mailbox surface; it does not spawn teammates or open panes. Use it only for the explicit Codex Teams product path: a named team workspace, Teams roster, Teams task board, Teams mailbox, split-pane teammate sessions, or managing an existing Codex team.",
-        BTreeMap::from([(
-            "name".to_string(),
-            JsonSchema::string(Some("Human-readable team name.".to_string())),
-        )]),
-        Some(vec!["name".to_string()]),
+        CODEX_TEAM_CREATE_DESCRIPTION,
+        BTreeMap::from([
+            (
+                "team_name".to_string(),
+                JsonSchema::string(Some("Name for the new team to create.".to_string())),
+            ),
+            (
+                "description".to_string(),
+                JsonSchema::string(Some("Team description/purpose.".to_string())),
+            ),
+            (
+                "agent_type".to_string(),
+                JsonSchema::string(Some(
+                    "Type/role of the team lead (e.g., \"researcher\", \"test-runner\"). Used for the team file and teammate coordination."
+                        .to_string(),
+                )),
+            ),
+            (
+                "name".to_string(),
+                JsonSchema::string(Some(
+                    "Deprecated alias for team_name kept for existing Codex callers.".to_string(),
+                )),
+            ),
+        ]),
+        Some(vec!["team_name".to_string()]),
+    )
+}
+
+pub(crate) fn create_claude_team_create_tool() -> ToolSpec {
+    function_tool(
+        "TeamCreate",
+        CLAUDE_TEAM_CREATE_DESCRIPTION,
+        BTreeMap::from([
+            (
+                "team_name".to_string(),
+                JsonSchema::string(Some("Name for the new team to create.".to_string())),
+            ),
+            (
+                "description".to_string(),
+                JsonSchema::string(Some("Team description/purpose.".to_string())),
+            ),
+            (
+                "agent_type".to_string(),
+                JsonSchema::string(Some(
+                    "Type/role of the team lead (e.g., \"researcher\", \"test-runner\"). Used for the team file and teammate coordination."
+                        .to_string(),
+                )),
+            ),
+        ]),
+        Some(vec!["team_name".to_string()]),
     )
 }
 
@@ -130,7 +282,7 @@ pub(crate) fn create_team_status_tool() -> ToolSpec {
 pub(crate) fn create_team_spawn_member_tool() -> ToolSpec {
     function_tool(
         "team_spawn_member",
-        "Team-lead-only tool. Spawn one named Teams teammate inside an existing Codex team. This is the Teams product path: it requires a team_id from create_team, records the member in Teams state, requires a tmux/iTerm split-pane backend, and launches a codex teammate process.",
+        "Launch a new teammate in an existing team.",
         BTreeMap::from([
             (
                 "team_id".to_string(),
@@ -164,7 +316,7 @@ pub(crate) fn create_team_spawn_member_tool() -> ToolSpec {
             (
                 "message".to_string(),
                 JsonSchema::string(Some(
-                    "Initial plain-text spawn prompt for the teammate. Use either message or items; Teams will prepend generic team/member context."
+                    "Initial plain-text task for the teammate. Use either message or items. For split-pane teammates, this exact task text is delivered as the teammate's first mailbox turn; Teams identity is supplied by the teammate launch context, not by prepending visible metadata."
                         .to_string(),
                 )),
             ),
@@ -181,11 +333,28 @@ mod tests;
 pub(crate) fn create_team_send_tool() -> ToolSpec {
     function_tool(
         "team_send",
-        "Send a team message to a member agent or record a message to the team lead mailbox.",
+        CODEX_TEAM_SEND_DESCRIPTION,
         BTreeMap::from([
             (
                 "team_id".to_string(),
-                JsonSchema::string(Some("Team id from create_team.".to_string())),
+                JsonSchema::string(Some(
+                    "Team id from create_team. Required when the team lead calls team_send; a spawned teammate process may omit it because its team is resolved from launch context."
+                        .to_string(),
+                )),
+            ),
+            (
+                "to".to_string(),
+                JsonSchema::string(Some(
+                    "Recipient: teammate name, \"*\" for broadcast to all teammates, or team-lead."
+                        .to_string(),
+                )),
+            ),
+            (
+                "summary".to_string(),
+                JsonSchema::string(Some(
+                    "Short message summary for UI notifications when message is plain text."
+                        .to_string(),
+                )),
             ),
             (
                 "target".to_string(),
@@ -203,7 +372,7 @@ pub(crate) fn create_team_send_tool() -> ToolSpec {
             (
                 "member_name".to_string(),
                 JsonSchema::string(Some(
-                    "Display name of a split-pane teammate to message via its mailbox; use instead of member_id for teammates spawned into a pane."
+                    "Display name of a split-pane teammate to message via its mailbox; prefer the Claude-compatible to field for new calls."
                         .to_string(),
                 )),
             ),
@@ -220,13 +389,38 @@ pub(crate) fn create_team_send_tool() -> ToolSpec {
             (
                 "message".to_string(),
                 JsonSchema::string(Some(
-                    "Plain-text message to route to the target endpoint. Omit sender_member_id for lead-originated messages; set sender_member_id for member-originated messages. Use either message or items. Member-targeted delivery prepends a Teams message envelope."
+                    "Plain-text message to route to the target endpoint. Your plain text output is NOT visible to other teammates; use this tool to communicate. Refer to teammates by name, never by UUID. Use either message or items."
                         .to_string(),
                 )),
             ),
             ("items".to_string(), create_collab_input_items_schema()),
         ]),
-        Some(vec!["team_id".to_string()]),
+        None,
+    )
+}
+
+pub(crate) fn create_claude_send_message_tool() -> ToolSpec {
+    function_tool(
+        "SendMessage",
+        CLAUDE_SEND_MESSAGE_DESCRIPTION,
+        BTreeMap::from([
+            (
+                "to".to_string(),
+                JsonSchema::string(Some(
+                    "Recipient: teammate name, team-lead, or \"*\" for broadcast to all teammates."
+                        .to_string(),
+                )),
+            ),
+            (
+                "summary".to_string(),
+                JsonSchema::string(Some(
+                    "A 5-10 word summary shown as a preview in the UI (required when message is a string)."
+                        .to_string(),
+                )),
+            ),
+            ("message".to_string(), structured_message_schema()),
+        ]),
+        Some(vec!["to".to_string(), "message".to_string()]),
     )
 }
 
@@ -237,7 +431,10 @@ pub(crate) fn create_team_message_list_tool() -> ToolSpec {
         BTreeMap::from([
             (
                 "team_id".to_string(),
-                JsonSchema::string(Some("Team id from create_team or list_teams.".to_string())),
+                JsonSchema::string(Some(
+                    "Team id from create_team or list_teams. A spawned teammate process may omit it because its team is resolved from launch context."
+                        .to_string(),
+                )),
             ),
             (
                 "target".to_string(),
@@ -263,7 +460,10 @@ pub(crate) fn create_team_task_create_tool() -> ToolSpec {
         BTreeMap::from([
             (
                 "team_id".to_string(),
-                JsonSchema::string(Some("Team id from create_team or list_teams.".to_string())),
+                JsonSchema::string(Some(
+                    "Team id from create_team or list_teams. A spawned teammate process may omit it because its team is resolved from launch context."
+                        .to_string(),
+                )),
             ),
             (
                 "title".to_string(),
@@ -289,7 +489,33 @@ pub(crate) fn create_team_task_create_tool() -> ToolSpec {
                 JsonSchema::string(Some("Optional generic task note.".to_string())),
             ),
         ]),
-        Some(vec!["team_id".to_string(), "title".to_string()]),
+        Some(vec!["title".to_string()]),
+    )
+}
+
+pub(crate) fn create_claude_task_create_tool() -> ToolSpec {
+    function_tool(
+        "TaskCreate",
+        CLAUDE_TASK_CREATE_DESCRIPTION,
+        BTreeMap::from([
+            (
+                "subject".to_string(),
+                JsonSchema::string(Some("A brief title for the task.".to_string())),
+            ),
+            (
+                "description".to_string(),
+                JsonSchema::string(Some("What needs to be done.".to_string())),
+            ),
+            (
+                "activeForm".to_string(),
+                JsonSchema::string(Some(
+                    "Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")."
+                        .to_string(),
+                )),
+            ),
+            ("metadata".to_string(), metadata_schema()),
+        ]),
+        Some(vec!["subject".to_string(), "description".to_string()]),
     )
 }
 
@@ -300,7 +526,10 @@ pub(crate) fn create_team_task_update_tool() -> ToolSpec {
         BTreeMap::from([
             (
                 "team_id".to_string(),
-                JsonSchema::string(Some("Team id from create_team or list_teams.".to_string())),
+                JsonSchema::string(Some(
+                    "Team id from create_team or list_teams. A spawned teammate process may omit it because its team is resolved from launch context."
+                        .to_string(),
+                )),
             ),
             (
                 "task_id".to_string(),
@@ -351,7 +580,62 @@ pub(crate) fn create_team_task_update_tool() -> ToolSpec {
                 )),
             ),
         ]),
-        Some(vec!["team_id".to_string(), "task_id".to_string()]),
+        Some(vec!["task_id".to_string()]),
+    )
+}
+
+pub(crate) fn create_claude_task_update_tool() -> ToolSpec {
+    function_tool(
+        "TaskUpdate",
+        CLAUDE_TASK_UPDATE_DESCRIPTION,
+        BTreeMap::from([
+            (
+                "taskId".to_string(),
+                JsonSchema::string(Some("The ID of the task to update.".to_string())),
+            ),
+            (
+                "subject".to_string(),
+                JsonSchema::string(Some("New subject for the task.".to_string())),
+            ),
+            (
+                "description".to_string(),
+                JsonSchema::string(Some("New description for the task.".to_string())),
+            ),
+            (
+                "activeForm".to_string(),
+                JsonSchema::string(Some(
+                    "Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")."
+                        .to_string(),
+                )),
+            ),
+            (
+                "status".to_string(),
+                string_enum_schema(
+                    &["pending", "in_progress", "completed", "deleted"],
+                    "New status for the task.",
+                ),
+            ),
+            (
+                "addBlocks".to_string(),
+                JsonSchema::array(
+                    JsonSchema::string(None),
+                    Some("Task IDs that this task blocks.".to_string()),
+                ),
+            ),
+            (
+                "addBlockedBy".to_string(),
+                JsonSchema::array(
+                    JsonSchema::string(None),
+                    Some("Task IDs that block this task.".to_string()),
+                ),
+            ),
+            (
+                "owner".to_string(),
+                JsonSchema::string(Some("New owner for the task.".to_string())),
+            ),
+            ("metadata".to_string(), metadata_schema()),
+        ]),
+        Some(vec!["taskId".to_string()]),
     )
 }
 
@@ -362,7 +646,10 @@ pub(crate) fn create_team_task_claim_tool() -> ToolSpec {
         BTreeMap::from([
             (
                 "team_id".to_string(),
-                JsonSchema::string(Some("Team id from create_team or list_teams.".to_string())),
+                JsonSchema::string(Some(
+                    "Team id from create_team or list_teams. A spawned teammate process may omit it because its team is resolved from launch context."
+                        .to_string(),
+                )),
             ),
             (
                 "task_id".to_string(),
@@ -373,15 +660,12 @@ pub(crate) fn create_team_task_claim_tool() -> ToolSpec {
             (
                 "member_id".to_string(),
                 JsonSchema::string(Some(
-                    "Member id from team_spawn_member or team_status.".to_string(),
+                    "Member id from team_spawn_member or team_status. A spawned teammate process may omit it to claim as itself."
+                        .to_string(),
                 )),
             ),
         ]),
-        Some(vec![
-            "team_id".to_string(),
-            "task_id".to_string(),
-            "member_id".to_string(),
-        ]),
+        Some(vec!["task_id".to_string()]),
     )
 }
 
@@ -391,9 +675,33 @@ pub(crate) fn create_team_task_list_tool() -> ToolSpec {
         "List one team's shared task-board items.",
         BTreeMap::from([(
             "team_id".to_string(),
-            JsonSchema::string(Some("Team id from create_team or list_teams.".to_string())),
+            JsonSchema::string(Some(
+                "Team id from create_team or list_teams. A spawned teammate process may omit it because its team is resolved from launch context."
+                    .to_string(),
+            )),
         )]),
-        Some(vec!["team_id".to_string()]),
+        None,
+    )
+}
+
+pub(crate) fn create_claude_task_list_tool() -> ToolSpec {
+    function_tool(
+        "TaskList",
+        CLAUDE_TASK_LIST_DESCRIPTION,
+        BTreeMap::new(),
+        Some(Vec::new()),
+    )
+}
+
+pub(crate) fn create_claude_task_get_tool() -> ToolSpec {
+    function_tool(
+        "TaskGet",
+        CLAUDE_TASK_GET_DESCRIPTION,
+        BTreeMap::from([(
+            "taskId".to_string(),
+            JsonSchema::string(Some("The ID of the task to retrieve.".to_string())),
+        )]),
+        Some(vec!["taskId".to_string()]),
     )
 }
 
@@ -412,7 +720,7 @@ pub(crate) fn create_team_event_list_tool() -> ToolSpec {
 pub(crate) fn create_team_member_stop_tool() -> ToolSpec {
     function_tool(
         "team_member_stop",
-        "Team-lead-only tool. Stop one teammate agent while keeping the live team readable and active.",
+        "Team-lead-only tool. Stop one teammate process while keeping the live team readable and active.",
         BTreeMap::from([
             (
                 "team_id".to_string(),
@@ -432,7 +740,7 @@ pub(crate) fn create_team_member_stop_tool() -> ToolSpec {
 pub(crate) fn create_team_stop_tool() -> ToolSpec {
     function_tool(
         "team_stop",
-        "Team-lead-only tool. Stop a live Codex team and shut down its active teammate agents.",
+        "Team-lead-only tool. Stop a live Codex team and shut down its active teammate processes.",
         BTreeMap::from([(
             "team_id".to_string(),
             JsonSchema::string(Some("Team id from create_team or list_teams.".to_string())),

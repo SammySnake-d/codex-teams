@@ -321,6 +321,11 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub fn set_team_mentions(&mut self, team_mentions: Vec<String>) {
+        self.composer.set_team_mentions(team_mentions);
+        self.request_redraw();
+    }
+
     pub fn set_plugins_command_enabled(&mut self, enabled: bool) {
         self.composer.set_plugins_command_enabled(enabled);
         self.request_redraw();
@@ -376,6 +381,11 @@ impl BottomPane {
 
     pub fn set_collaboration_modes_enabled(&mut self, enabled: bool) {
         self.composer.set_collaboration_modes_enabled(enabled);
+        self.request_redraw();
+    }
+
+    pub fn set_teams_enabled(&mut self, enabled: bool) {
+        self.composer.set_teams_enabled(enabled);
         self.request_redraw();
     }
 

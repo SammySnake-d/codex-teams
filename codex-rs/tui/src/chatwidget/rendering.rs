@@ -1,6 +1,8 @@
 //! Render composition for the main chat widget surface.
 
 use super::*;
+use crate::wrapping::RtOptions;
+use crate::wrapping::word_wrap_lines;
 
 impl ChatWidget {
     pub(super) fn as_renderable(&self) -> RenderableItem<'_> {
@@ -24,6 +26,12 @@ impl ChatWidget {
             _ => RenderableItem::Owned(Box::new(())),
         };
         let mut flex = FlexRenderable::new();
+        if let Some(header) = self.team_teammate_view_header.as_ref() {
+            flex.push(
+                /*flex*/ 0,
+                RenderableItem::Owned(Box::new(TeammateViewHeaderRenderable { header })),
+            );
+        }
         flex.push(/*flex*/ 1, active_cell_renderable);
         flex.push(/*flex*/ 0, active_hook_cell_renderable);
         flex.push(
@@ -37,6 +45,30 @@ impl ChatWidget {
             )),
         );
         RenderableItem::Owned(Box::new(flex))
+    }
+}
+
+struct TeammateViewHeaderRenderable<'a> {
+    header: &'a TeamTeammateViewHeader,
+}
+
+impl Renderable for TeammateViewHeaderRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let lines = self.lines(area.width);
+        Paragraph::new(Text::from(lines)).render(area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.lines(width).len() as u16
+    }
+}
+
+impl TeammateViewHeaderRenderable<'_> {
+    fn lines(&self, width: u16) -> Vec<Line<'static>> {
+        word_wrap_lines(
+            self.header.lines(),
+            RtOptions::new(usize::from(width.max(/*other*/ 1))),
+        )
     }
 }
 

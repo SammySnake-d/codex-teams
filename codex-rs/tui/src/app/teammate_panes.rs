@@ -9,6 +9,8 @@
 
 use std::process::Command;
 use std::process::Stdio;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::terminal_info;
@@ -90,6 +92,92 @@ impl App {
             self.focus_teammate_pane(pane_id, /*backend_type*/ None);
         }
     }
+
+    pub(super) fn set_all_teammate_panes_hidden(&self, team: &str, hide: bool) {
+        let codex_home = self.config.codex_home.to_path_buf();
+        if let Err(err) = crate::legacy_core::team_store::update_config(&codex_home, team, |c| {
+            if hide {
+                c.hidden_pane_ids = c
+                    .members
+                    .iter()
+                    .map(|member| member.tmux_pane_id.trim())
+                    .filter(|pane_id| !pane_id.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+            } else {
+                c.hidden_pane_ids.clear();
+            }
+        }) {
+            tracing::warn!(error = %err, team, "failed to persist all teammate pane visibility");
+        }
+    }
+
+    pub(super) fn send_teammate_shutdown_request(&self, team: &str, teammate_name: &str) {
+        let request_id = format!("shutdown-{teammate_name}-{}", unix_millis());
+        if let Err(err) = crate::legacy_core::team_coord::send_shutdown_request(
+            &self.config.codex_home,
+            team,
+            teammate_name,
+            crate::legacy_core::team_store::TEAM_LEAD_NAME,
+            &request_id,
+            Some("Graceful shutdown requested by team lead".to_string()),
+            /*color*/ None,
+        ) {
+            tracing::warn!(error = %err, team, teammate_name, "failed to request teammate shutdown");
+        }
+    }
+
+    pub(super) fn kill_teammate_pane_and_remove_member(
+        &self,
+        team: &str,
+        pane_id: &str,
+        backend_type: Option<&str>,
+        agent_id: &str,
+    ) {
+        self.kill_teammate_pane(pane_id, backend_type);
+        let pane_id = pane_id.trim().to_string();
+        let agent_id = agent_id.to_string();
+        let codex_home = self.config.codex_home.to_path_buf();
+        if let Err(err) = crate::legacy_core::team_store::update_config(&codex_home, team, |c| {
+            c.members.retain(|member| {
+                member.tmux_pane_id.trim() != pane_id && member.agent_id != agent_id
+            });
+            c.hidden_pane_ids.retain(|hidden| hidden != &pane_id);
+        }) {
+            tracing::warn!(error = %err, team, pane_id, "failed to remove killed teammate from config");
+        }
+    }
+
+    fn kill_teammate_pane(&self, pane_id: &str, backend_type: Option<&str>) {
+        let pane_id = pane_id.trim();
+        if pane_id.is_empty() {
+            return;
+        }
+        if matches!(backend_type, Some("iterm") | Some("iterm2")) {
+            let mut command = Command::new("it2");
+            command.stdin(Stdio::null());
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::null());
+            command.args(["session", "close", "-f", "-s", pane_id]);
+            if let Err(err) = command.status() {
+                tracing::warn!(error = %err, pane_id, "failed to kill teammate iTerm pane");
+            }
+            return;
+        }
+
+        let mut command = Command::new("tmux");
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        if inside_tmux() {
+            command.args(["kill-pane", "-t", pane_id]);
+        } else {
+            command.args(["-L", &swarm_socket_name(), "kill-pane", "-t", pane_id]);
+        }
+        if let Err(err) = command.status() {
+            tracing::warn!(error = %err, pane_id, "failed to kill teammate tmux pane");
+        }
+    }
 }
 
 /// tmux `-L` socket name for the detached swarm server, analog of Claude's
@@ -100,4 +188,11 @@ fn swarm_socket_name() -> String {
 
 fn inside_tmux() -> bool {
     matches!(terminal_info().multiplexer, Some(Multiplexer::Tmux { .. }))
+}
+
+fn unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }

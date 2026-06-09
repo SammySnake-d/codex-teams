@@ -26,6 +26,7 @@ use crate::legacy_core::team_store::TeammateMessage;
 use crate::legacy_core::team_store::{self};
 
 use crate::app_event::AppEvent;
+use crate::app_event::TeammateInboxAck;
 use crate::app_event_sender::AppEventSender;
 
 /// Claude `INBOX_POLL_INTERVAL_MS`.
@@ -153,20 +154,35 @@ pub(crate) fn format_lead_teammate_messages(messages: &[TeammateMessage]) -> Str
 }
 
 pub(crate) fn format_teammate_inbox_message(message: TeammateMessage) -> String {
-    if message.from == TEAM_LEAD_NAME {
-        message.text
+    let text = if message.from == TEAM_LEAD_NAME {
+        strip_legacy_visible_team_context(&message.text)
     } else {
-        format_as_teammate_message(
-            &message.from,
-            &message.text,
-            message.color.as_deref(),
-            message.summary.as_deref(),
-        )
-    }
+        message.text.as_str()
+    };
+    format_as_teammate_message(
+        &message.from,
+        text,
+        message.color.as_deref(),
+        message.summary.as_deref(),
+    )
 }
 
 pub(crate) fn format_shutdown_inbox_message(from: String, raw: String) -> String {
     format_as_teammate_message(&from, &raw, None, None)
+}
+
+fn strip_legacy_visible_team_context(text: &str) -> &str {
+    const PREFIX: &str = "Codex Teams context:";
+    const END_MARKER: &str = "Do not create teams or spawn teammates from this teammate process.";
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with(PREFIX) {
+        return text;
+    }
+    let Some((_, task)) = trimmed.split_once(END_MARKER) else {
+        return text;
+    };
+    let task = task.trim_start();
+    if task.is_empty() { text } else { task }
 }
 
 fn summarize(message: &str) -> String {
@@ -178,12 +194,12 @@ fn summarize(message: &str) -> String {
 }
 
 /// Start polling the lead's inbox every second. On unread explicit teammate
-/// messages it emits [`AppEvent::InjectTeammateReplies`] and only THEN marks
-/// them read (so a crash between send and mark re-reads them next tick,
-/// matching Claude). Idle lifecycle notifications are consumed without
-/// injecting a lead user turn. The `team_store` calls take an advisory file lock
-/// with a blocking spin-sleep, so they run on `spawn_blocking` to avoid stalling
-/// a runtime worker.
+/// messages it emits [`AppEvent::InjectTeammateReplies`] with an ack payload.
+/// The app marks the snapshot read only after the chat widget accepts or queues
+/// the injected turn, matching Claude's delivery-before-read semantics. Idle
+/// lifecycle notifications are consumed without injecting a lead user turn. The
+/// `team_store` calls take an advisory file lock with a blocking spin-sleep, so
+/// they run on `spawn_blocking` to avoid stalling a runtime worker.
 pub(crate) fn start_lead_inbox_poller(
     codex_home: PathBuf,
     team: String,
@@ -199,7 +215,7 @@ pub(crate) fn start_lead_inbox_poller(
                 let team = team.clone();
                 let lead_name = lead_name.clone();
                 match tokio::task::spawn_blocking(move || {
-                    team_store::read_unread(&codex_home, &team, &lead_name)
+                    team_store::read_unread_with_indices(&codex_home, &team, &lead_name)
                 })
                 .await
                 {
@@ -212,26 +228,45 @@ pub(crate) fn start_lead_inbox_poller(
                 continue;
             }
 
-            let text = format_lead_teammate_messages(&unread);
-            if !text.is_empty() {
-                app_event_tx.send(AppEvent::InjectTeammateReplies { text });
+            let unread_messages = unread
+                .iter()
+                .map(|entry| entry.message.clone())
+                .collect::<Vec<_>>();
+            let indices = unread.iter().map(|entry| entry.index).collect::<Vec<_>>();
+            let text = format_lead_teammate_messages(&unread_messages);
+            if text.is_empty() {
+                let codex_home = codex_home.clone();
+                let team = team.clone();
+                let lead_name = lead_name.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    team_store::mark_messages_read_by_indices(
+                        &codex_home,
+                        &team,
+                        &lead_name,
+                        &indices,
+                    )
+                })
+                .await;
+                continue;
             }
-
-            let codex_home = codex_home.clone();
-            let team = team.clone();
-            let lead_name = lead_name.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                team_store::mark_messages_read(&codex_home, &team, &lead_name)
-            })
-            .await;
+            let ack = TeammateInboxAck {
+                codex_home: codex_home.clone(),
+                team: team.clone(),
+                agent_name: lead_name.clone(),
+                indices,
+            };
+            if !app_event_tx.send_checked(AppEvent::InjectTeammateReplies { text, ack }) {
+                continue;
+            }
         }
     });
     LeadInboxPoller { handle }
 }
 
-/// Start polling this teammate's own inbox. Lead-origin messages are injected
-/// verbatim because the lead already writes the Teams context envelope; peer
-/// messages and shutdown requests are wrapped as teammate messages.
+/// Start polling this teammate's own inbox. Lead-origin task text stays the
+/// message body of a `team-lead` teammate message; stale visible Teams metadata
+/// envelopes are stripped before wrapping. Peer messages and shutdown requests
+/// are wrapped as teammate messages.
 pub(crate) fn start_teammate_inbox_poller(
     codex_home: PathBuf,
     team: String,
@@ -275,15 +310,13 @@ pub(crate) fn start_teammate_inbox_poller(
                 }
                 NextInbox::Empty => continue,
             };
-            if app_event_tx.send_checked(AppEvent::InjectTeammateInboxMessage { text }) {
-                let codex_home = codex_home.clone();
-                let team = team.clone();
-                let agent_name = agent_name.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    team_store::mark_message_read_by_index(&codex_home, &team, &agent_name, index)
-                })
-                .await;
-            }
+            let ack = TeammateInboxAck {
+                codex_home: codex_home.clone(),
+                team: team.clone(),
+                agent_name: agent_name.clone(),
+                indices: vec![index],
+            };
+            app_event_tx.send(AppEvent::InjectTeammateInboxMessage { text, ack });
         }
     });
     TeammateInboxPoller { handle, lifecycle }
@@ -393,11 +426,18 @@ mod tests {
             .expect("poller event")
             .expect("event channel");
         match event {
-            AppEvent::InjectTeammateReplies { text } => {
+            AppEvent::InjectTeammateReplies { text, ack } => {
                 assert_eq!(
                     text,
                     "<teammate-message teammate_id=\"alice\" color=\"red\">\nfirst update\n</teammate-message>\n\n<teammate-message teammate_id=\"bob\" color=\"blue\" summary=\"done\">\nsecond update\n</teammate-message>"
                 );
+                team_store::mark_messages_read_by_indices(
+                    &ack.codex_home,
+                    &ack.team,
+                    &ack.agent_name,
+                    &ack.indices,
+                )
+                .expect("ack lead inbox messages");
             }
             other => panic!("expected lead inbox injection event, got {other:?}"),
         }
@@ -418,12 +458,85 @@ mod tests {
         drop(poller);
     }
 
-    #[test]
-    fn teammate_inbox_keeps_lead_message_verbatim() {
-        let out =
-            format_teammate_inbox_message(msg(TEAM_LEAD_NAME, "Codex Teams context", None, None));
+    #[tokio::test]
+    async fn lead_poller_keeps_replies_unread_when_injection_fails() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let team = "Rocket".to_string();
+        team_store::write_to_mailbox(
+            codex_home.path(),
+            &team,
+            TEAM_LEAD_NAME,
+            msg("alice", "first update", Some("red"), None),
+        )
+        .expect("write lead inbox message");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
 
-        assert_eq!(out, "Codex Teams context");
+        let poller = start_lead_inbox_poller(
+            codex_home.path().to_path_buf(),
+            team.clone(),
+            TEAM_LEAD_NAME.to_string(),
+            AppEventSender::new(tx),
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::time::sleep(Duration::from_millis(INBOX_POLL_INTERVAL_MS + 100)).await;
+            let messages = team_store::read_mailbox(codex_home.path(), &team, TEAM_LEAD_NAME)
+                .expect("read lead inbox");
+            assert_eq!(messages.len(), 1);
+            assert!(!messages[0].read);
+        })
+        .await
+        .expect("lead inbox stayed unread after failed injection");
+
+        drop(poller);
+    }
+
+    #[test]
+    fn teammate_inbox_wraps_lead_message() {
+        let out = format_teammate_inbox_message(msg(
+            TEAM_LEAD_NAME,
+            "Please inspect task 1.",
+            None,
+            None,
+        ));
+
+        assert_eq!(
+            out,
+            format!(
+                "<teammate-message teammate_id=\"{TEAM_LEAD_NAME}\">\nPlease inspect task 1.\n</teammate-message>"
+            )
+        );
+    }
+
+    #[test]
+    fn teammate_inbox_strips_legacy_visible_team_context_from_lead_message() {
+        let legacy = "\
+Codex Teams context:
+  - team_id: team-1
+  - team_name: Rocket
+  - lead_thread_id: lead-1
+  - member_id: member-1
+  - member_name: alice
+  - profile: Read-only locator
+  - capabilities: code-search
+  - permissions: read-only
+  - live_session_only: true
+
+You are an independent Codex Teams teammate. Do not assume you inherit the lead conversation history.
+Treat the spawn prompt/items after this context as your assigned task boundary.
+Use team_send to reply to the lead or another named teammate.
+Do not create teams or spawn teammates from this teammate process.
+
+Please inspect task 1.";
+        let out = format_teammate_inbox_message(msg(TEAM_LEAD_NAME, legacy, None, None));
+
+        assert_eq!(
+            out,
+            format!(
+                "<teammate-message teammate_id=\"{TEAM_LEAD_NAME}\">\nPlease inspect task 1.\n</teammate-message>"
+            )
+        );
     }
 
     #[test]
@@ -460,7 +573,7 @@ mod tests {
             codex_home.path(),
             &team,
             &agent_name,
-            msg(TEAM_LEAD_NAME, "Codex Teams context", None, None),
+            msg(TEAM_LEAD_NAME, "Please inspect task 1.", None, None),
         )
         .expect("write teammate inbox");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -477,8 +590,20 @@ mod tests {
             .expect("poller event")
             .expect("event channel");
         match event {
-            AppEvent::InjectTeammateInboxMessage { text } => {
-                assert_eq!(text, "Codex Teams context");
+            AppEvent::InjectTeammateInboxMessage { text, ack } => {
+                assert_eq!(
+                    text,
+                    format!(
+                        "<teammate-message teammate_id=\"{TEAM_LEAD_NAME}\">\nPlease inspect task 1.\n</teammate-message>"
+                    )
+                );
+                team_store::mark_messages_read_by_indices(
+                    &ack.codex_home,
+                    &ack.team,
+                    &ack.agent_name,
+                    &ack.indices,
+                )
+                .expect("ack teammate inbox message");
             }
             other => panic!("expected teammate inbox injection event, got {other:?}"),
         }
@@ -508,7 +633,7 @@ mod tests {
             codex_home.path(),
             &team,
             &agent_name,
-            msg(TEAM_LEAD_NAME, "Codex Teams context", None, None),
+            msg(TEAM_LEAD_NAME, "Please inspect task 1.", None, None),
         )
         .expect("write teammate inbox");
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

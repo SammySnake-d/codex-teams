@@ -11,8 +11,11 @@ use super::candidate::Selection;
 pub(crate) fn build_search_catalog(
     skills: Option<&[SkillMetadata]>,
     plugins: Option<&[PluginCapabilitySummary]>,
+    team_mentions: &[String],
 ) -> Vec<Candidate> {
     let mut candidates = Vec::new();
+    candidates.extend(team_mentions.iter().map(|name| team_candidate(name)));
+
     if let Some(skills) = skills {
         candidates.extend(skills.iter().map(skill_candidate));
     }
@@ -22,6 +25,20 @@ pub(crate) fn build_search_catalog(
     }
 
     candidates
+}
+
+fn team_candidate(name: &str) -> Candidate {
+    let display_name = format!("@{name}");
+    Candidate {
+        display_name: display_name.clone(),
+        description: Some("Codex Teams teammate".to_string()),
+        search_terms: vec![name.to_string(), display_name],
+        mention_type: MentionType::Team,
+        selection: Selection::Team {
+            insert_text: format!("@{name}"),
+            path: format!("team://{name}"),
+        },
+    }
 }
 
 fn skill_candidate(skill: &SkillMetadata) -> Candidate {
@@ -210,6 +227,22 @@ mod tests {
         assert_eq!(
             plugin_mention_name("browser-use", "Browser Use"),
             "Browser-Use"
+        );
+    }
+
+    #[test]
+    fn team_mentions_are_searchable_team_candidates() {
+        let candidates = build_search_catalog(None, None, &["alice".to_string()]);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].display_name, "@alice");
+        assert_eq!(candidates[0].mention_type, MentionType::Team);
+        assert_eq!(
+            candidates[0].selection,
+            Selection::Team {
+                insert_text: "@alice".to_string(),
+                path: "team://alice".to_string(),
+            }
         );
     }
 }

@@ -56,6 +56,7 @@ impl SlashCommandItem {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinCommandFlags {
     pub(crate) collaboration_modes_enabled: bool,
+    pub(crate) teams_enabled: bool,
     pub(crate) connectors_enabled: bool,
     pub(crate) plugins_command_enabled: bool,
     pub(crate) service_tier_commands_enabled: bool,
@@ -73,6 +74,7 @@ pub(crate) fn builtins_for_input(flags: BuiltinCommandFlags) -> Vec<(&'static st
         .into_iter()
         .filter(|(_, cmd)| flags.allow_elevate_sandbox || *cmd != SlashCommand::ElevateSandbox)
         .filter(|(_, cmd)| flags.collaboration_modes_enabled || *cmd != SlashCommand::Plan)
+        .filter(|(_, cmd)| flags.teams_enabled || *cmd != SlashCommand::Teams)
         .filter(|(_, cmd)| flags.connectors_enabled || *cmd != SlashCommand::Apps)
         .filter(|(_, cmd)| flags.plugins_command_enabled || *cmd != SlashCommand::Plugins)
         .filter(|(_, cmd)| flags.goal_command_enabled || *cmd != SlashCommand::Goal)
@@ -112,6 +114,9 @@ pub(crate) fn commands_for_input(
 /// typed command can produce a side-specific unavailable message while the popup still hides it.
 pub(crate) fn find_builtin_command(name: &str, flags: BuiltinCommandFlags) -> Option<SlashCommand> {
     let cmd = SlashCommand::from_str(name).ok()?;
+    if cmd == SlashCommand::Teams {
+        return Some(cmd);
+    }
     builtins_for_input(BuiltinCommandFlags {
         side_conversation_active: false,
         ..flags
@@ -161,6 +166,7 @@ mod tests {
     fn all_enabled_flags() -> BuiltinCommandFlags {
         BuiltinCommandFlags {
             collaboration_modes_enabled: true,
+            teams_enabled: true,
             connectors_enabled: true,
             plugins_command_enabled: true,
             service_tier_commands_enabled: true,
@@ -254,6 +260,32 @@ mod tests {
         let mut flags = all_enabled_flags();
         flags.goal_command_enabled = false;
         assert_eq!(find_builtin_command("goal", flags), None);
+    }
+
+    #[test]
+    fn teams_command_resolves_when_disabled() {
+        let mut flags = all_enabled_flags();
+        flags.teams_enabled = false;
+        assert_eq!(
+            find_builtin_command("teams", flags),
+            Some(SlashCommand::Teams)
+        );
+    }
+
+    #[test]
+    fn teams_command_resolves_when_enabled() {
+        assert_eq!(
+            find_builtin_command("teams", all_enabled_flags()),
+            Some(SlashCommand::Teams)
+        );
+    }
+
+    #[test]
+    fn team_command_alias_resolves_when_enabled() {
+        assert_eq!(
+            find_builtin_command("team", all_enabled_flags()),
+            Some(SlashCommand::Teams)
+        );
     }
 
     #[test]

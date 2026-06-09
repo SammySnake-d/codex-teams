@@ -10,6 +10,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 
 use super::tmux::AgentColor;
 
@@ -58,20 +59,90 @@ pub(crate) fn unique_teammate_name(base: &str, existing: &[String]) -> String {
 }
 
 /// Claude `getTeammateCommand`: honor the `CODEX_TEAMMATE_COMMAND` override,
-/// else launch this running executable.
-pub(crate) fn teammate_binary() -> std::io::Result<PathBuf> {
+/// else launch the configured Codex CLI executable. Codex.app can carry an
+/// older bundled CLI that treats `teammate` as a plain prompt, so candidates
+/// must prove they expose the hidden teammate subcommand before they are used.
+pub(crate) fn teammate_binary(codex_self_exe: Option<&Path>) -> std::io::Result<PathBuf> {
     if let Ok(value) = std::env::var("CODEX_TEAMMATE_COMMAND")
         && !value.is_empty()
     {
-        return Ok(PathBuf::from(value));
+        let candidate = PathBuf::from(value);
+        if supports_teammate_subcommand(&candidate) {
+            return Ok(candidate);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "CODEX_TEAMMATE_COMMAND does not support `codex teammate`: {}",
+                candidate.display()
+            ),
+        ));
     }
-    std::env::current_exe()
+
+    let mut candidates = Vec::new();
+    if let Some(path) = codex_self_exe {
+        candidates.push(teammate_binary_without_override(path));
+    }
+    if let Ok(path) = std::env::current_exe() {
+        candidates.push(teammate_binary_without_override(path.as_path()));
+    }
+    if let Some(path_env) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
+            if candidate.is_file() {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates.dedup();
+    for candidate in candidates {
+        if supports_teammate_subcommand(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no `codex` binary with `codex teammate` support found; set CODEX_TEAMMATE_COMMAND to a Teams-capable Codex CLI",
+    ))
 }
 
-/// Proxy / TLS-cert vars forwarded to a teammate process so it has the same
-/// network egress as the lead (the codex-relevant subset of Claude
-/// `TEAMMATE_ENV_VARS`).
-const FORWARDED_ENV_VARS: [&str; 11] = [
+fn teammate_binary_without_override(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Some(bin_dir) = (if parent.file_name().is_some_and(|name| name == "deps") {
+        parent.parent()
+    } else {
+        Some(parent)
+    }) else {
+        return path.to_path_buf();
+    };
+    let candidate = bin_dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
+    if candidate.is_file() {
+        candidate
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn supports_teammate_subcommand(path: &Path) -> bool {
+    let output = Command::new(path).arg("teammate").arg("--help").output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.contains("Usage: codex teammate") && stdout.contains("--agent-id")
+}
+
+/// Proxy / TLS-cert/auth vars forwarded to a teammate process so it has the
+/// same network egress and auth source as the lead (the codex-relevant subset
+/// of Claude `TEAMMATE_ENV_VARS`, plus Codex's own env auth entrypoints).
+const FORWARDED_ENV_VARS: [&str; 14] = [
     "HTTPS_PROXY",
     "https_proxy",
     "HTTP_PROXY",
@@ -83,11 +154,14 @@ const FORWARDED_ENV_VARS: [&str; 11] = [
     "NODE_EXTRA_CA_CERTS",
     "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE",
+    codex_login::CODEX_API_KEY_ENV_VAR,
+    codex_login::CODEX_ACCESS_TOKEN_ENV_VAR,
+    codex_login::OPENAI_API_KEY_ENV_VAR,
 ];
 
 /// Claude `buildInheritedEnvVars` analog: mark teammate mode, pin the same
 /// `$CODEX_HOME` (so the teammate reads the same team store + config), and
-/// forward proxy / cert / provider auth vars that are set and non-empty.
+/// forward proxy / cert / auth vars that are set and non-empty.
 pub(crate) fn build_inherited_env_vars(
     codex_home: &Path,
     provider_env_keys: &[&str],
@@ -159,5 +233,30 @@ mod tests {
         let env = build_inherited_env_vars(Path::new("/tmp/codex-home"), &["PATH"]);
 
         assert!(env.contains(&("PATH".to_string(), path)));
+    }
+
+    #[test]
+    fn codex_auth_env_vars_are_forwarded_by_default() {
+        assert!(FORWARDED_ENV_VARS.contains(&codex_login::CODEX_API_KEY_ENV_VAR));
+        assert!(FORWARDED_ENV_VARS.contains(&codex_login::CODEX_ACCESS_TOKEN_ENV_VAR));
+        assert!(FORWARDED_ENV_VARS.contains(&codex_login::OPENAI_API_KEY_ENV_VAR));
+    }
+
+    #[test]
+    fn teammate_binary_escapes_cargo_deps_test_binary() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let debug_dir = temp.path().join("target").join("debug");
+        let deps_dir = debug_dir.join("deps");
+        std::fs::create_dir_all(&deps_dir).expect("create deps");
+        let codex = debug_dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&codex, "").expect("create codex binary placeholder");
+        let test_binary = deps_dir.join("codex_core-53de15f594a0a30f");
+
+        assert_eq!(teammate_binary_without_override(&test_binary), codex);
+    }
+
+    #[test]
+    fn teammate_binary_rejects_non_teammate_cli() {
+        assert!(!supports_teammate_subcommand(Path::new("/bin/echo")));
     }
 }

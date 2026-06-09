@@ -42,7 +42,7 @@ pub(crate) struct TeammateRuntime {
 
 /// What [`wait_for_next_prompt_or_shutdown`] resolved to.
 enum WaitResult {
-    Shutdown { reason: Option<String> },
+    Shutdown { prompt: String },
     NewMessage { prompt: String },
 }
 
@@ -72,10 +72,10 @@ pub(crate) async fn run_teammate_loop(
         }
 
         match wait_for_next_prompt_or_shutdown(&rt).await? {
-            WaitResult::Shutdown { reason } => {
+            WaitResult::Shutdown { prompt } => {
                 // Feed the shutdown text to the model so it can acknowledge /
                 // wind down, then exit after that final turn (Claude §1.4).
-                let _ = run_one_turn(&thread, shutdown_prompt_text(reason)).await;
+                let _ = run_one_turn(&thread, prompt).await;
                 break;
             }
             WaitResult::NewMessage { prompt } => current_prompt = Some(prompt),
@@ -129,7 +129,7 @@ async fn wait_for_next_prompt_or_shutdown(rt: &TeammateRuntime) -> Result<WaitRe
     loop {
         let messages = team_store::read_mailbox(&rt.teams_root, &rt.team, &rt.agent_name)?;
         match team_coord::select_next_inbox(&messages) {
-            NextInbox::Shutdown { index, request, .. } => {
+            NextInbox::Shutdown { index, raw, .. } => {
                 team_store::mark_message_read_by_index(
                     &rt.teams_root,
                     &rt.team,
@@ -137,7 +137,12 @@ async fn wait_for_next_prompt_or_shutdown(rt: &TeammateRuntime) -> Result<WaitRe
                     index,
                 )?;
                 return Ok(WaitResult::Shutdown {
-                    reason: request.reason,
+                    prompt: team_coord::format_as_teammate_message(
+                        TEAM_LEAD_NAME,
+                        &raw,
+                        None,
+                        None,
+                    ),
                 });
             }
             NextInbox::Message { index, message } => {
@@ -147,18 +152,12 @@ async fn wait_for_next_prompt_or_shutdown(rt: &TeammateRuntime) -> Result<WaitRe
                     &rt.agent_name,
                     index,
                 )?;
-                // The lead relays the human → inject the text verbatim. Any other
-                // sender is a peer → wrap it as an XML teammate message (§1.2).
-                let prompt = if message.from == TEAM_LEAD_NAME {
-                    message.text
-                } else {
-                    team_coord::format_as_teammate_message(
-                        &message.from,
-                        &message.text,
-                        message.color.as_deref(),
-                        message.summary.as_deref(),
-                    )
-                };
+                let prompt = team_coord::format_as_teammate_message(
+                    &message.from,
+                    &message.text,
+                    message.color.as_deref(),
+                    message.summary.as_deref(),
+                );
                 return Ok(WaitResult::NewMessage { prompt });
             }
             NextInbox::Empty => {
@@ -192,17 +191,6 @@ fn mark_inactive(rt: &TeammateRuntime) {
             member.is_active = Some(false);
         }
     });
-}
-
-/// Build the prompt fed to the model when a shutdown request arrives, so it can
-/// acknowledge before the process exits.
-fn shutdown_prompt_text(reason: Option<String>) -> String {
-    match reason {
-        Some(reason) if !reason.trim().is_empty() => {
-            format!("The team lead requested shutdown: {reason}. Acknowledge briefly and stop.")
-        }
-        _ => "The team lead requested shutdown. Acknowledge briefly and stop.".to_string(),
-    }
 }
 
 /// `getLastPeerDmSummary` analog: a short (≤10-word) summary of the agent's last

@@ -34,6 +34,63 @@ the user explicitly says those agents should be Codex Teams teammates.
 
 That means Teams actions need model-callable tools in core. `/teams` can exist, but only as a manual control surface over the same substrate.
 
+## Claude-Style Trigger Routing Decision
+
+The current Codex Teams port must follow Claude Code's trigger architecture
+where it matters, but without replacing Codex's whole tool-search substrate in
+this slice.
+
+Source-backed Claude behavior:
+
+- Claude `AgentTool.searchHint` is `delegate work to a subagent`.
+- Claude teammate spawn is not a separately searched spawn tool. It is the
+  normal `AgentTool` branch when `resolveTeamName(...)` returns a team name and
+  `name` is present.
+- Claude `TeamCreate` remains a dedicated Teams tool with a Teams/swarm search
+  hint.
+- Claude `SendMessage` remains a dedicated Teams communication tool.
+- Claude `ToolSearchTool` uses its own keyword scoring and exact selection
+  design; Codex currently uses a global BM25 `SearchEngine(Language::English)`.
+
+Minimal-change Codex decision:
+
+- Keep the single global Codex BM25 `ToolSearch` substrate for now.
+- Do not add a second Teams-only search path. A duplicate search layer would
+  create two competing routing systems and would still need integration with
+  Codex's deferred tool loading.
+- Do not solve native subagent isolation with production user-language
+  classifiers in `tool_search.rs`.
+- Make `spawn_agent` the shared spawn surface: without Teams structure it stays
+  the native Codex subagent tool; with an active/explicit team and `name`, it
+  enters the Teams teammate branch.
+- Treat `team_spawn_member` as compatibility or exact Teams-control surface,
+  not as the primary natural-language route for teammate creation.
+- `team_spawn_member` search exposure must remain exact-name oriented. Teams
+  natural-language terms such as teammate/swarm/团队/队友 should load team
+  creation/status/message surfaces and let the shared `spawn_agent` tool take
+  the teammate branch when the model provides `name` plus an active or explicit
+  team.
+- Claude-compatible alias tools such as `TeamCreate`, `SendMessage`,
+  `TaskCreate`, `TaskUpdate`, `TaskList`, and `TaskGet` may exist as Teams API
+  compatibility surfaces, but they must not become a second spawn route or
+  blur native Codex subagents with Teams teammates.
+- Keep Teams search hints narrow. They may use Teams-specific terms such as
+  `team`, `teams`, `teammate`, `swarm`, `roster`, `mailbox`, `task board`,
+  `团队`, and `队友`, but must avoid generic native-subagent collision terms
+  such as `agent`, `subagent`, `work`, `parallel`, and broad delegation phrases.
+
+Required invariant:
+
+- A user request that says `subagent`, `spawn_agent`, or ordinary delegation
+  must load and execute the native Codex subagent path unless the model provides
+  the Teams teammate structure (`name` plus active/explicit team). Enabling
+  `features.teams` must not turn native subagents into split-pane teammates.
+- The runtime teammate binary must be the real `codex` CLI, not a Cargo
+  `target/debug/deps/*` test harness. Teammate spawn resolves
+  `CODEX_TEAMMATE_COMMAND`, then configured `codex_self_exe`, then `current_exe`,
+  and must escape a deps test binary to the sibling real `target/debug/codex`
+  when available.
+
 ## Minimal Vertical Slice
 
 First implementation should prove:

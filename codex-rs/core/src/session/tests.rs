@@ -6235,6 +6235,7 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
                     text_elements: Vec::new(),
                 }],
                 client_id: None,
+                source: TurnInputSource::User,
             }],
             TraceCaptureTask {
                 captured_trace: Arc::clone(&captured_trace),
@@ -7054,6 +7055,7 @@ async fn spawn_task_does_not_update_previous_turn_settings_for_non_run_turn_task
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
 
     sess.spawn_task(
@@ -8378,6 +8380,7 @@ async fn guardian_auto_review_interrupts_after_three_consecutive_denials() {
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     sess.spawn_task(Arc::clone(&tc), input, GuardianDeniedApprovalTask)
         .await;
@@ -8412,6 +8415,7 @@ async fn guardian_helper_review_interrupts_after_three_consecutive_denials() {
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     sess.spawn_task(
         Arc::clone(&tc),
@@ -8475,6 +8479,7 @@ async fn abort_regular_task_emits_marker_before_turn_aborted() {
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     sess.spawn_task(
         Arc::clone(&tc),
@@ -8516,6 +8521,7 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     sess.spawn_task(
         Arc::clone(&tc),
@@ -8557,6 +8563,7 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     sess.spawn_task(
         Arc::clone(&tc),
@@ -8808,6 +8815,7 @@ async fn steer_input_enforces_expected_turn_id() {
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     sess.spawn_task(
         Arc::clone(&tc),
@@ -8858,6 +8866,7 @@ async fn steer_input_rejects_non_regular_turns() {
                 text_elements: Vec::new(),
             }],
             client_id: None,
+            source: TurnInputSource::User,
         }];
         let turn_context = sess.new_default_turn_with_sub_id("turn".to_string()).await;
         sess.spawn_task(
@@ -8900,6 +8909,7 @@ async fn steer_input_returns_active_turn_id() {
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     sess.spawn_task(
         Arc::clone(&tc),
@@ -9915,7 +9925,8 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
                     text: "follow up".to_string(),
                     text_elements: Vec::new(),
                 }],
-                client_id: None
+                client_id: None,
+                source: TurnInputSource::User,
             },
             TurnInput::ResponseItem(ResponseItem::from(communication.to_response_input_item())),
         ],
@@ -9973,7 +9984,8 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
                     text: "follow up".to_string(),
                     text_elements: Vec::new(),
                 }],
-                client_id: None
+                client_id: None,
+                source: TurnInputSource::User,
             },
             TurnInput::ResponseItem(ResponseItem::from(communication.to_response_input_item())),
         ],
@@ -10045,6 +10057,7 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
             text_elements: Vec::new(),
         }],
         client_id: None,
+        source: TurnInputSource::User,
     }];
     sess.spawn_task(Arc::clone(&tc), input, ReviewTask::new())
         .await;

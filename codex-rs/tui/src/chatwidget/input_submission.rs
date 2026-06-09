@@ -1,6 +1,28 @@
 //! User-message and shell-prompt submission behavior for `ChatWidget`.
 
 use super::*;
+use crate::app_command::UserInputSource;
+use crate::legacy_core::team_store;
+
+struct TeamMentionDelivery {
+    team_name: String,
+    team_mentions: Vec<String>,
+    text: String,
+    text_elements: Vec<TextElement>,
+    mention_bindings: Vec<MentionBinding>,
+    history_record: UserMessageHistoryRecord,
+    render_in_history: bool,
+}
+
+struct RawTeamMessageDelivery {
+    team_name: String,
+    teammate_name: String,
+    message: String,
+    original_text: String,
+    original_text_elements: Vec<TextElement>,
+    history_record: UserMessageHistoryRecord,
+    render_in_history: bool,
+}
 
 impl ChatWidget {
     pub(super) fn user_message_from_submission(
@@ -103,9 +125,13 @@ impl ChatWidget {
     ) -> (bool, Option<AppCommand>) {
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
+            let action = match shell_escape_policy {
+                ShellEscapePolicy::Allow => QueuedInputAction::Plain,
+                ShellEscapePolicy::Disallow => QueuedInputAction::PlainNoShell,
+            };
             self.input_queue
                 .queued_user_messages
-                .push_front(QueuedUserMessage::from(user_message));
+                .push_front(QueuedUserMessage::new(user_message, action));
             self.input_queue
                 .queued_user_message_history_records
                 .push_front(history_record);
@@ -173,6 +199,74 @@ impl ChatWidget {
                 path: image.path.clone(),
                 detail: None,
             });
+        }
+
+        let team_mentions = team_mentions_from_bindings(&mention_bindings);
+        if !team_mentions.is_empty() {
+            let Some(active_team_name) = self.active_team_name_for_mailbox() else {
+                self.add_error_message(
+                    "No active Codex team is available for this teammate mention.".to_string(),
+                );
+                self.restore_user_message_to_composer(user_message_for_restore(
+                    UserMessage {
+                        text,
+                        local_images,
+                        remote_image_urls,
+                        text_elements,
+                        mention_bindings,
+                    },
+                    &history_record,
+                ));
+                return (false, None);
+            };
+            if !local_images.is_empty() || !remote_image_urls.is_empty() {
+                self.add_error_message(
+                    "Teammate mentions can only send text messages right now.".to_string(),
+                );
+                self.restore_user_message_to_composer(user_message_for_restore(
+                    UserMessage {
+                        text,
+                        local_images,
+                        remote_image_urls,
+                        text_elements,
+                        mention_bindings,
+                    },
+                    &history_record,
+                ));
+                return (false, None);
+            }
+            return self.deliver_team_mention_messages(TeamMentionDelivery {
+                team_name: active_team_name,
+                team_mentions,
+                text,
+                text_elements,
+                mention_bindings,
+                history_record,
+                render_in_history,
+            });
+        }
+
+        if let Some(direct_message) = parse_direct_team_message(&text)
+            && let Some(active_team_name) = self.active_team_name_for_mailbox()
+        {
+            let can_send_directly = local_images.is_empty()
+                && remote_image_urls.is_empty()
+                && team_member_exists(
+                    &self.config.codex_home,
+                    &active_team_name,
+                    direct_message.to,
+                );
+            if can_send_directly {
+                return self.deliver_raw_direct_team_message(RawTeamMessageDelivery {
+                    team_name: active_team_name,
+                    teammate_name: direct_message.to.to_string(),
+                    message: direct_message.message.to_string(),
+                    original_text: text,
+                    original_text_elements: text_elements,
+                    history_record,
+                    render_in_history,
+                });
+            }
         }
 
         if !text.is_empty() {
@@ -420,6 +514,332 @@ impl ChatWidget {
         (true, Some(op))
     }
 
+    fn active_team_name_for_mailbox(&self) -> Option<String> {
+        self.team_ui.active_team_name().or_else(|| {
+            self.team_footer_label
+                .as_deref()
+                .and_then(|label| label.strip_prefix("Team "))
+                .map(str::trim)
+                .filter(|team| !team.is_empty())
+                .map(ToString::to_string)
+        })
+    }
+
+    fn deliver_team_mention_messages(
+        &mut self,
+        delivery: TeamMentionDelivery,
+    ) -> (bool, Option<AppCommand>) {
+        let TeamMentionDelivery {
+            team_name,
+            team_mentions,
+            text,
+            text_elements,
+            mention_bindings,
+            history_record,
+            render_in_history,
+        } = delivery;
+        if text.trim().is_empty() {
+            self.add_error_message("Teammate message cannot be empty.".to_string());
+            self.restore_user_message_to_composer(user_message_for_restore(
+                UserMessage {
+                    text,
+                    local_images: Vec::new(),
+                    remote_image_urls: Vec::new(),
+                    text_elements,
+                    mention_bindings,
+                },
+                &history_record,
+            ));
+            return (false, None);
+        }
+
+        let config = match team_store::read_config(&self.config.codex_home, &team_name) {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                self.add_error_message(format!(
+                    "No on-disk Codex team config found for {team_name}."
+                ));
+                self.restore_user_message_to_composer(user_message_for_restore(
+                    UserMessage {
+                        text,
+                        local_images: Vec::new(),
+                        remote_image_urls: Vec::new(),
+                        text_elements,
+                        mention_bindings,
+                    },
+                    &history_record,
+                ));
+                return (false, None);
+            }
+            Err(err) => {
+                self.add_error_message(format!("Failed to read Codex team {team_name}: {err}"));
+                self.restore_user_message_to_composer(user_message_for_restore(
+                    UserMessage {
+                        text,
+                        local_images: Vec::new(),
+                        remote_image_urls: Vec::new(),
+                        text_elements,
+                        mention_bindings,
+                    },
+                    &history_record,
+                ));
+                return (false, None);
+            }
+        };
+
+        for teammate_name in &team_mentions {
+            if !config
+                .members
+                .iter()
+                .any(|member| member.name == *teammate_name)
+            {
+                self.add_error_message(format!(
+                    "Teammate @{teammate_name} is not in Codex team {team_name}."
+                ));
+                self.restore_user_message_to_composer(user_message_for_restore(
+                    UserMessage {
+                        text,
+                        local_images: Vec::new(),
+                        remote_image_urls: Vec::new(),
+                        text_elements,
+                        mention_bindings,
+                    },
+                    &history_record,
+                ));
+                return (false, None);
+            }
+        }
+
+        for teammate_name in &team_mentions {
+            let result = team_store::write_to_mailbox(
+                &self.config.codex_home,
+                &team_name,
+                teammate_name,
+                team_store::TeammateMessage {
+                    from: team_store::TEAM_LEAD_NAME.to_string(),
+                    text: text.clone(),
+                    timestamp: team_store::now_timestamp(),
+                    read: false,
+                    color: None,
+                    summary: None,
+                },
+            );
+            if let Err(err) = result {
+                self.add_error_message(format!(
+                    "Failed to send Teams message to @{teammate_name}: {err}"
+                ));
+                self.restore_user_message_to_composer(user_message_for_restore(
+                    UserMessage {
+                        text,
+                        local_images: Vec::new(),
+                        remote_image_urls: Vec::new(),
+                        text_elements,
+                        mention_bindings,
+                    },
+                    &history_record,
+                ));
+                return (false, None);
+            }
+        }
+
+        let encoded_mentions = mention_bindings
+            .iter()
+            .map(|binding| LinkedMention {
+                sigil: binding.sigil,
+                mention: binding.mention.clone(),
+                path: binding.path.clone(),
+            })
+            .collect::<Vec<_>>();
+        let history_text = match &history_record {
+            UserMessageHistoryRecord::UserMessageText => {
+                encode_history_mentions(&text, &encoded_mentions)
+            }
+            UserMessageHistoryRecord::Override(history) if !history.text.is_empty() => {
+                encode_history_mentions(&history.text, &encoded_mentions)
+            }
+            UserMessageHistoryRecord::Override(_) => String::new(),
+        };
+        if !history_text.is_empty() {
+            self.append_message_history_entry(history_text);
+        }
+
+        if render_in_history {
+            self.on_user_message_display(user_message_display_for_history(
+                UserMessage {
+                    text,
+                    local_images: Vec::new(),
+                    remote_image_urls: Vec::new(),
+                    text_elements,
+                    mention_bindings,
+                },
+                &history_record,
+            ));
+        }
+
+        self.add_info_message(
+            format!(
+                "Teams message sent to {}.",
+                team_mentions
+                    .iter()
+                    .map(|name| format!("@{name}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some("Delivered directly to the teammate inbox.".to_string()),
+        );
+        self.transcript.needs_final_message_separator = false;
+        (true, None)
+    }
+
+    fn deliver_raw_direct_team_message(
+        &mut self,
+        delivery: RawTeamMessageDelivery,
+    ) -> (bool, Option<AppCommand>) {
+        let RawTeamMessageDelivery {
+            team_name,
+            teammate_name,
+            message,
+            original_text,
+            original_text_elements,
+            history_record,
+            render_in_history,
+        } = delivery;
+        let result = team_store::write_to_mailbox(
+            &self.config.codex_home,
+            &team_name,
+            &teammate_name,
+            team_store::TeammateMessage {
+                from: "user".to_string(),
+                text: message,
+                timestamp: team_store::now_timestamp(),
+                read: false,
+                color: None,
+                summary: None,
+            },
+        );
+        if let Err(err) = result {
+            self.add_error_message(format!(
+                "Failed to send Teams message to @{teammate_name}: {err}"
+            ));
+            self.restore_user_message_to_composer(user_message_for_restore(
+                UserMessage {
+                    text: original_text,
+                    local_images: Vec::new(),
+                    remote_image_urls: Vec::new(),
+                    text_elements: original_text_elements,
+                    mention_bindings: Vec::new(),
+                },
+                &history_record,
+            ));
+            return (false, None);
+        }
+
+        let history_text = match &history_record {
+            UserMessageHistoryRecord::UserMessageText => original_text.clone(),
+            UserMessageHistoryRecord::Override(history) if !history.text.is_empty() => {
+                history.text.clone()
+            }
+            UserMessageHistoryRecord::Override(_) => String::new(),
+        };
+        if !history_text.is_empty() {
+            self.append_message_history_entry(history_text);
+        }
+
+        if render_in_history {
+            self.on_user_message_display(user_message_display_for_history(
+                UserMessage {
+                    text: original_text,
+                    local_images: Vec::new(),
+                    remote_image_urls: Vec::new(),
+                    text_elements: original_text_elements,
+                    mention_bindings: Vec::new(),
+                },
+                &history_record,
+            ));
+        }
+
+        self.add_info_message(
+            format!("Teams message sent to @{teammate_name}."),
+            Some("Delivered directly to the teammate inbox.".to_string()),
+        );
+        self.transcript.needs_final_message_separator = false;
+        (true, None)
+    }
+
+    pub(super) fn submit_teams_mailbox_message(
+        &mut self,
+        user_message: UserMessage,
+        history_record: UserMessageHistoryRecord,
+    ) -> (bool, Option<AppCommand>) {
+        if !self.is_session_configured() {
+            tracing::warn!(
+                "cannot submit Teams mailbox message before session is configured; queueing"
+            );
+            self.input_queue
+                .queued_user_messages
+                .push_back(QueuedUserMessage::new(
+                    user_message,
+                    QueuedInputAction::TeamsMailbox,
+                ));
+            self.input_queue
+                .queued_user_message_history_records
+                .push_back(history_record);
+            self.refresh_pending_input_preview();
+            return (true, None);
+        }
+        if user_message.text.is_empty() {
+            return (false, None);
+        }
+
+        let effective_mode = self.effective_collaboration_mode();
+        if effective_mode.model().trim().is_empty() {
+            self.add_error_message(
+                "Thread model is unavailable. Wait for the thread to finish syncing or choose a model before sending input.".to_string(),
+            );
+            return (false, None);
+        }
+
+        let collaboration_mode = if self.collaboration_modes_enabled() {
+            self.active_collaboration_mask
+                .as_ref()
+                .map(|_| effective_mode.clone())
+        } else {
+            None
+        };
+        let personality = self
+            .config
+            .personality
+            .filter(|_| self.config.features.enabled(Feature::Personality))
+            .filter(|_| self.current_model_supports_personality());
+        let service_tier = self.service_tier_update_for_core();
+        let active_permission_profile = self.config.permissions.active_permission_profile();
+        let op = AppCommand::user_turn_with_source(
+            vec![UserInput::Text {
+                text: user_message.text,
+                text_elements: Vec::new(),
+            }],
+            self.config.cwd.to_path_buf(),
+            AskForApproval::from(self.config.permissions.approval_policy.value()),
+            active_permission_profile,
+            effective_mode.model().to_string(),
+            effective_mode.reasoning_effort(),
+            /*summary*/ None,
+            service_tier,
+            /*final_output_json_schema*/ None,
+            collaboration_mode,
+            personality,
+            UserInputSource::TeamsMailbox,
+        );
+
+        if !self.submit_op(op.clone()) {
+            return (false, None);
+        }
+        if !self.turn_lifecycle.agent_turn_running {
+            self.input_queue.user_turn_pending_start = true;
+        }
+        (true, Some(op))
+    }
+
     /// Restore the blocked submission draft without losing mention resolution state.
     ///
     /// The blocked-image path intentionally keeps the draft in the composer so
@@ -449,4 +869,57 @@ impl ChatWidget {
         ));
         self.request_redraw();
     }
+}
+
+struct DirectTeamMessage<'a> {
+    to: &'a str,
+    message: &'a str,
+}
+
+fn parse_direct_team_message(text: &str) -> Option<DirectTeamMessage<'_>> {
+    let text = text.strip_prefix('@')?;
+    let recipient_len = text
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()?;
+    let recipient = &text[..recipient_len];
+    let rest = &text[recipient_len..];
+    if recipient.is_empty() || !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let message = rest.trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some(DirectTeamMessage {
+        to: recipient,
+        message,
+    })
+}
+
+fn team_mentions_from_bindings(mention_bindings: &[MentionBinding]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut mentions = Vec::new();
+    for binding in mention_bindings {
+        let Some(name) = binding
+            .path
+            .strip_prefix("team://")
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        if binding.sigil == '@' && seen.insert(name.to_string()) {
+            mentions.push(name.to_string());
+        }
+    }
+    mentions
+}
+
+fn team_member_exists(codex_home: &Path, team_name: &str, teammate_name: &str) -> bool {
+    matches!(
+        team_store::read_config(codex_home, team_name),
+        Ok(Some(config)) if config.members.iter().any(|member| member.name == teammate_name)
+    )
 }

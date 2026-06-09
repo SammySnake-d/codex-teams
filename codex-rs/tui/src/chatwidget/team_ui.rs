@@ -8,6 +8,11 @@ use std::collections::HashMap;
 
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
+use ratatui::style::Color;
+use ratatui::style::Style;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+use ratatui::text::Span;
 use serde_json::Value;
 
 use super::ChatWidget;
@@ -52,6 +57,14 @@ pub(super) struct TeamMemberUiSummary {
     agent_thread_id: String,
     /// Agent/profile label for thread navigation, for example `researcher`.
     agent_role: Option<String>,
+    prompt: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TeamTeammateViewHeader {
+    pub(crate) name: String,
+    pub(crate) color: Option<String>,
+    pub(crate) prompt: Option<String>,
 }
 
 #[derive(Debug)]
@@ -65,6 +78,10 @@ pub(super) enum TeamUiEvent {
         agent_role: Option<String>,
         tmux_pane_id: String,
         backend_type: Option<String>,
+        color: Option<String>,
+        mode: Option<String>,
+        is_active: Option<bool>,
+        prompt: Option<String>,
     },
     MessageSent,
     TeamStopped {
@@ -86,8 +103,17 @@ impl TeamUiState {
                 if namespace.is_some() {
                     return None;
                 }
-                let tool = TeamToolKind::from_name(name)?;
-                let team_id = parse_argument_string(arguments, "team_id");
+                let (tool, team_id) = if name == "spawn_agent" {
+                    (
+                        TeamToolKind::TeamSpawnMember,
+                        Some(self.spawn_agent_team_id(arguments)?),
+                    )
+                } else {
+                    (
+                        TeamToolKind::from_name(name)?,
+                        parse_argument_string(arguments, "team_id"),
+                    )
+                };
                 self.pending_calls
                     .insert(call_id.clone(), PendingTeamCall { tool, team_id });
                 None
@@ -142,6 +168,32 @@ impl TeamUiState {
                 let name = member.name.clone();
                 let agent_thread_id = member.agent_thread_id.clone();
                 let agent_role = member.agent_role.clone();
+                let prompt = value
+                    .get("prompt")
+                    .or_else(|| value.get("member")?.get("prompt"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|prompt| !prompt.is_empty())
+                    .map(ToString::to_string)
+                    .or_else(|| member.prompt.clone());
+                let color = value
+                    .get("color")
+                    .or_else(|| value.get("member")?.get("color"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|color| !color.is_empty())
+                    .map(ToString::to_string);
+                let mode = value
+                    .get("mode")
+                    .or_else(|| value.get("member")?.get("mode"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|mode| !mode.is_empty())
+                    .map(ToString::to_string);
+                let is_active = value
+                    .get("is_active")
+                    .or_else(|| value.get("member")?.get("is_active"))
+                    .and_then(Value::as_bool);
                 let team = self
                     .active_team
                     .as_mut()
@@ -153,6 +205,10 @@ impl TeamUiState {
                     agent_role,
                     tmux_pane_id,
                     backend_type,
+                    color,
+                    mode,
+                    is_active,
+                    prompt,
                 })
             }
             TeamToolKind::TeamSend => {
@@ -172,6 +228,24 @@ impl TeamUiState {
                 }
             }
         }
+    }
+
+    fn spawn_agent_team_id(&self, arguments: &str) -> Option<String> {
+        parse_argument_string(arguments, "name")
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())?;
+        let active_team = self
+            .active_team
+            .as_ref()
+            .filter(|team| team.status != "stopped")?;
+        if let Some(team_name) = parse_argument_string(arguments, "team_name")
+            .map(|team_name| team_name.trim().to_string())
+            .filter(|team_name| !team_name.is_empty())
+            && team_name != active_team.name
+        {
+            return None;
+        }
+        Some(active_team.id.clone())
     }
 
     /// Name of the active (non-stopped) team, for opening the Teams dialog.
@@ -207,20 +281,17 @@ impl ChatWidget {
         // The observer updates active team metadata and emits live side effects.
         // Footer roster pills are owned by App-level Teams navigation state so
         // generic subagents and raw tool summaries cannot become roster items.
-        // Transcript notices and external panes are live-only side effects: replaying
-        // historical tool output must not re-announce teams or re-open teammate panes.
-        if from_replay {
-            return;
-        }
         match event {
             TeamUiEvent::TeamCreated { name } => {
-                self.add_info_message(
-                    format!("Codex team started: {name}"),
-                    Some(
-                        "Spawn teammates to make them appear in the footer and teammate picker."
-                            .to_string(),
-                    ),
-                );
+                if !from_replay {
+                    self.add_info_message(
+                        format!("Codex team started: {name}"),
+                        Some(
+                            "Spawn teammates to make them appear in the footer and teammate picker."
+                                .to_string(),
+                        ),
+                    );
+                }
                 self.app_event_tx
                     .send(AppEvent::TeamBecameActive { team: name });
             }
@@ -230,13 +301,19 @@ impl ChatWidget {
                 agent_role,
                 tmux_pane_id,
                 backend_type,
+                color,
+                mode,
+                is_active,
+                prompt,
             } => {
-                self.add_info_message(
-                    format!("Teammate @{name} started"),
-                    Some(format!(
-                        "Agent thread {agent_thread_id}; use Shift+Up/Down then Enter to switch, Esc to return to lead, or @{name} to message them."
-                    )),
-                );
+                if !from_replay {
+                    self.add_info_message(
+                        format!("Teammate @{name} started"),
+                        Some(format!(
+                            "Teammate thread {agent_thread_id}; select the Teams footer status or run /teams to view and manage teammates, or @{name} to message them."
+                        )),
+                    );
+                }
                 match ThreadId::from_string(&agent_thread_id) {
                     Ok(agent_thread_id) => {
                         self.app_event_tx.send(AppEvent::RegisterTeammateThread {
@@ -245,6 +322,10 @@ impl ChatWidget {
                             agent_role,
                             tmux_pane_id: Some(tmux_pane_id),
                             backend_type,
+                            color,
+                            mode,
+                            is_active,
+                            prompt,
                         });
                     }
                     Err(err) => {
@@ -256,17 +337,18 @@ impl ChatWidget {
                     }
                 }
             }
-            TeamUiEvent::MessageSent => {
-                self.add_info_message(
-                    "Teams message routed".to_string(),
-                    Some("The Teams roster is updated from teammate spawn events.".to_string()),
-                );
-            }
+            TeamUiEvent::MessageSent => {}
             TeamUiEvent::TeamStopped { name } => {
-                self.add_info_message(format!("Codex team stopped: {name}"), None);
+                if !from_replay {
+                    self.add_info_message(format!("Codex team stopped: {name}"), None);
+                }
                 self.app_event_tx.send(AppEvent::TeamBecameInactive);
             }
-            TeamUiEvent::Updated => {}
+            TeamUiEvent::Updated => {
+                if let Some(team) = self.team_ui.active_team_name() {
+                    self.app_event_tx.send(AppEvent::TeamBecameActive { team });
+                }
+            }
         }
     }
 
@@ -274,9 +356,11 @@ impl ChatWidget {
         &mut self,
         team_label: Option<String>,
         team_spans: Option<Vec<ratatui::text::Span<'static>>>,
+        team_mentions: Vec<String>,
     ) {
         self.team_footer_label = team_label;
         self.team_footer_spans = team_spans;
+        self.bottom_pane.set_team_mentions(team_mentions);
         self.sync_footer_context_label();
     }
 
@@ -301,11 +385,11 @@ impl ChatWidget {
 impl TeamToolKind {
     fn from_name(name: &str) -> Option<Self> {
         match name {
-            "create_team" => Some(Self::CreateTeam),
+            "create_team" | "TeamCreate" => Some(Self::CreateTeam),
             "list_teams" => Some(Self::ListTeams),
             "team_status" => Some(Self::TeamStatus),
             "team_spawn_member" => Some(Self::TeamSpawnMember),
-            "team_send" => Some(Self::TeamSend),
+            "team_send" | "SendMessage" => Some(Self::TeamSend),
             "team_member_stop" => Some(Self::TeamMemberStop),
             "team_stop" => Some(Self::TeamStop),
             _ => None,
@@ -344,7 +428,50 @@ fn parse_member(value: &Value) -> Option<TeamMemberUiSummary> {
             .map(str::trim)
             .filter(|role| !role.is_empty())
             .map(ToString::to_string),
+        prompt: value
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(ToString::to_string),
     })
+}
+
+impl ChatWidget {
+    pub(crate) fn set_team_teammate_view_header(&mut self, header: Option<TeamTeammateViewHeader>) {
+        self.team_teammate_view_header = header;
+    }
+}
+
+impl TeamTeammateViewHeader {
+    pub(crate) fn lines(&self) -> Vec<Line<'static>> {
+        let title = vec![
+            "Viewing ".into(),
+            Span::styled(
+                format!("@{}", self.name),
+                teammate_header_color_style(self.color.as_deref().unwrap_or_default()).bold(),
+            ),
+            " · ".dim(),
+            "esc return".dim(),
+        ];
+        let mut lines = vec![Line::from(title)];
+        if let Some(prompt) = self.prompt.as_deref() {
+            lines.push(Line::from(prompt.to_string()).dim());
+        }
+        lines
+    }
+}
+
+fn teammate_header_color_style(color: &str) -> Style {
+    match color {
+        "red" => Style::default().fg(Color::Red),
+        "blue" => Style::default().fg(Color::Blue),
+        "green" => Style::default().fg(Color::Green),
+        "yellow" | "orange" => Style::default().fg(Color::Yellow),
+        "purple" | "pink" => Style::default().fg(Color::Magenta),
+        "cyan" => Style::default().fg(Color::Cyan),
+        _ => Style::default(),
+    }
 }
 
 fn parse_argument_string(arguments: &str, key: &str) -> Option<String> {
@@ -368,6 +495,19 @@ mod tests {
     use super::*;
     use codex_protocol::models::FunctionCallOutputPayload;
 
+    fn plain_line_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn call(name: &str, call_id: &str, arguments: &str) -> ResponseItem {
         ResponseItem::FunctionCall {
             id: None,
@@ -386,6 +526,20 @@ mod tests {
     }
 
     #[test]
+    fn teammate_view_header_renders_claude_style_text() {
+        let header = TeamTeammateViewHeader {
+            name: "alice".to_string(),
+            color: Some("red".to_string()),
+            prompt: Some("Inspect issue #15 and report the proof path.".to_string()),
+        };
+
+        insta::assert_snapshot!(
+            "teammate_view_header_claude_style_text",
+            plain_line_text(&header.lines())
+        );
+    }
+
+    #[test]
     fn active_team_metadata_tracks_team_tool_output() {
         let mut state = TeamUiState::default();
         assert_eq!(state.active_team_name(), None);
@@ -401,7 +555,7 @@ mod tests {
         state.observe_response_item(&call("team_spawn_member", "c2", r#"{"team_id":"team-1"}"#));
         let spawned = state.observe_response_item(&output(
             "c2",
-            r#"{"member":{"id":"m1","name":"alice","agent_thread_id":"thr-1","profile":"researcher","status":"active","agent_status":"running"},"tmux_pane_id":"%9","backend_type":"tmux"}"#,
+            r#"{"member":{"id":"m1","name":"alice","agent_thread_id":"thr-1","profile":"researcher","status":"active","agent_status":"running"},"tmux_pane_id":"%9","backend_type":"tmux","color":"red","mode":"plan","is_active":true,"prompt":"Inspect issue #15."}"#,
         ));
         assert!(matches!(
             spawned,
@@ -411,11 +565,20 @@ mod tests {
                 agent_role,
                 tmux_pane_id,
                 backend_type,
+                color,
+                mode,
+                is_active,
+                prompt,
+                ..
             }) if name == "alice"
                 && agent_thread_id == "thr-1"
                 && agent_role.as_deref() == Some("researcher")
                 && tmux_pane_id == "%9"
                 && backend_type.as_deref() == Some("tmux")
+                && color.as_deref() == Some("red")
+                && mode.as_deref() == Some("plan")
+                && is_active == Some(true)
+                && prompt.as_deref() == Some("Inspect issue #15.")
         ));
         assert_eq!(
             state.active_team.as_ref().map(|team| team.members.len()),
@@ -429,6 +592,30 @@ mod tests {
             r#"{"snapshot":{"team":{"id":"team-1","name":"Rocket","status":"stopped","members":[]}}}"#,
         ));
         assert_eq!(state.active_team_name(), None);
+    }
+
+    #[test]
+    fn claude_named_team_tools_update_team_ui_state() {
+        let mut state = TeamUiState::default();
+
+        state.observe_response_item(&call("TeamCreate", "c1", "{}"));
+        let created = state.observe_response_item(&output(
+            "c1",
+            r#"{"team":{"id":"team-1","name":"Rocket","status":"active","members":[]}}"#,
+        ));
+        assert!(matches!(created, Some(TeamUiEvent::TeamCreated { name }) if name == "Rocket"));
+        assert_eq!(state.active_team_name(), Some("Rocket".to_string()));
+
+        state.observe_response_item(&call(
+            "SendMessage",
+            "c2",
+            r#"{"to":"alice","summary":"done","message":"done"}"#,
+        ));
+        let sent = state.observe_response_item(&output(
+            "c2",
+            r#"{"message":{"id":"msg-1","team_id":"team-1","sender_member_id":"m-lead","target":"member","member_id":"m1","content":"done","status":"delivered","created_at_ms":1,"delivery_mode":"queue"}}"#,
+        ));
+        assert!(matches!(sent, Some(TeamUiEvent::MessageSent)));
     }
 
     #[test]

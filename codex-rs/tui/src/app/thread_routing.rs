@@ -187,9 +187,14 @@ impl App {
             .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id);
         self.chat_widget.set_active_agent_label(label);
         self.chat_widget.set_team_footer_context(
-            self.team_roster_navigation.footer_label(),
+            None,
             self.team_roster_navigation
                 .footer_spans(self.current_displayed_thread_id(), self.primary_thread_id),
+            self.team_roster_navigation.teammate_mention_names(),
+        );
+        self.chat_widget.set_team_teammate_view_header(
+            self.team_roster_navigation
+                .teammate_view_header(self.current_displayed_thread_id()),
         );
         self.sync_side_thread_ui();
     }
@@ -524,6 +529,7 @@ impl App {
                 final_output_json_schema,
                 collaboration_mode,
                 personality,
+                user_input_source,
             } => {
                 let mut should_start_turn = true;
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
@@ -531,7 +537,12 @@ impl App {
                     let mut retried_after_turn_mismatch = false;
                     loop {
                         match app_server
-                            .turn_steer(thread_id, steer_turn_id.clone(), items.to_vec())
+                            .turn_steer(
+                                thread_id,
+                                steer_turn_id.clone(),
+                                items.to_vec(),
+                                *user_input_source,
+                            )
                             .await
                         {
                             Ok(_) => return Ok(true),
@@ -617,6 +628,7 @@ impl App {
                             collaboration_mode.clone(),
                             *personality,
                             final_output_json_schema.clone(),
+                            *user_input_source,
                         )
                         .await?;
                 }

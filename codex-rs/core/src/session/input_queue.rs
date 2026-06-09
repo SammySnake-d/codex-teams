@@ -2,20 +2,46 @@ use crate::state::ActiveTurn;
 use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::INTERNAL_USER_INPUT_SOURCE_METADATA_KEY;
+use codex_protocol::protocol::INTERNAL_USER_INPUT_SOURCE_TEAMS_MAILBOX;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::user_input::UserInput;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnInputSource {
+    User,
+    TeamsMailbox,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TurnInput {
     UserInput {
         content: Vec<UserInput>,
         client_id: Option<String>,
+        source: TurnInputSource,
     },
     ResponseItem(ResponseItem),
+}
+
+pub(crate) fn split_internal_user_input_source_metadata(
+    responsesapi_client_metadata: Option<HashMap<String, String>>,
+) -> (TurnInputSource, Option<HashMap<String, String>>) {
+    let Some(mut metadata) = responsesapi_client_metadata else {
+        return (TurnInputSource::User, None);
+    };
+    let source = match metadata.remove(INTERNAL_USER_INPUT_SOURCE_METADATA_KEY) {
+        Some(value) if value == INTERNAL_USER_INPUT_SOURCE_TEAMS_MAILBOX => {
+            TurnInputSource::TeamsMailbox
+        }
+        Some(_) | None => TurnInputSource::User,
+    };
+    let metadata = (!metadata.is_empty()).then_some(metadata);
+    (source, metadata)
 }
 
 /// Turn-local pending input storage owned by the input queue flow.

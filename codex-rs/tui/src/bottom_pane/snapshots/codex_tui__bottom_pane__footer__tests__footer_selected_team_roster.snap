@@ -1,0 +1,6 @@
+---
+source: tui/src/bottom_pane/footer.rs
+assertion_line: 1533
+expression: terminal.backend()
+---
+"  main @alice hide · Enter to view                           100% context left  "

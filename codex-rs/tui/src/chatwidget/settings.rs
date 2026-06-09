@@ -100,6 +100,9 @@ impl ChatWidget {
             self.sync_plugins_command_enabled();
             self.refresh_plugin_mentions();
         }
+        if feature == Feature::Teams {
+            self.sync_teams_enabled();
+        }
         if feature == Feature::Goals {
             self.sync_goal_command_enabled();
             if !enabled {
@@ -307,6 +310,11 @@ impl ChatWidget {
     pub(super) fn sync_plugins_command_enabled(&mut self) {
         self.bottom_pane
             .set_plugins_command_enabled(self.config.features.enabled(Feature::Plugins));
+    }
+
+    pub(super) fn sync_teams_enabled(&mut self) {
+        self.bottom_pane
+            .set_teams_enabled(self.config.features.enabled(Feature::Teams));
     }
 
     pub(super) fn sync_goal_command_enabled(&mut self) {

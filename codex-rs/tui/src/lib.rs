@@ -303,6 +303,7 @@ async fn start_embedded_app_server(
     log_db: Option<log_db::LogDbLayer>,
     state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
+    enable_codex_api_key_env: bool,
 ) -> color_eyre::Result<InProcessAppServerClient> {
     start_embedded_app_server_with(
         arg0_paths,
@@ -315,6 +316,7 @@ async fn start_embedded_app_server(
         log_db,
         state_db,
         environment_manager,
+        enable_codex_api_key_env,
         InProcessAppServerClient::start,
     )
     .await
@@ -515,6 +517,7 @@ async fn start_app_server(
     log_db: Option<log_db::LogDbLayer>,
     state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
+    enable_codex_api_key_env: bool,
 ) -> color_eyre::Result<AppServerClient> {
     match target {
         AppServerTarget::Embedded => start_embedded_app_server(
@@ -528,6 +531,7 @@ async fn start_app_server(
             log_db,
             state_db,
             environment_manager,
+            enable_codex_api_key_env,
         )
         .await
         .map(AppServerClient::InProcess),
@@ -555,6 +559,7 @@ pub(crate) async fn start_app_server_for_picker(
         /*log_db*/ None,
         state_db,
         environment_manager,
+        /*enable_codex_api_key_env*/ false,
     )
     .await?;
     Ok(AppServerSession::new(
@@ -589,6 +594,7 @@ async fn start_embedded_app_server_with<F, Fut>(
     log_db: Option<log_db::LogDbLayer>,
     state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
+    enable_codex_api_key_env: bool,
     start_client: F,
 ) -> color_eyre::Result<InProcessAppServerClient>
 where
@@ -619,7 +625,7 @@ where
         config_warnings,
         session_source: serde_json::from_value(serde_json::json!("cli"))
             .unwrap_or_else(|err| panic!("cli session source should deserialize: {err}")),
-        enable_codex_api_key_env: false,
+        enable_codex_api_key_env,
         client_name: "codex-tui".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
         experimental_api: true,
@@ -1366,6 +1372,7 @@ async fn run_ratatui_app(
     // Initialize high-fidelity session event logging if enabled.
     session_log::maybe_init(&initial_config);
 
+    let is_teammate_process = cli.team_name.is_some() && cli.agent_name.is_some();
     let app_server_session = match start_app_server(
         &app_server_target,
         arg0_paths.clone(),
@@ -1378,6 +1385,7 @@ async fn run_ratatui_app(
         log_db.clone(),
         state_db.clone(),
         environment_manager.clone(),
+        is_teammate_process,
     )
     .await
     {
@@ -1405,7 +1413,7 @@ async fn run_ratatui_app(
     let mut app_server = Some(app_server_session);
 
     let should_show_trust_screen_flag =
-        !uses_remote_workspace && should_show_trust_screen(&initial_config);
+        !is_teammate_process && !uses_remote_workspace && should_show_trust_screen(&initial_config);
     #[cfg(target_os = "windows")]
     let mut trust_decision_was_made = false;
     let login_status = if initial_config.model_provider.requires_openai_auth {
@@ -1416,8 +1424,12 @@ async fn run_ratatui_app(
     } else {
         LoginStatus::NotAuthenticated
     };
-    let should_show_onboarding =
-        should_show_onboarding(login_status, &initial_config, should_show_trust_screen_flag);
+    let should_show_onboarding = should_show_onboarding_for_startup(
+        is_teammate_process,
+        login_status,
+        &initial_config,
+        should_show_trust_screen_flag,
+    );
 
     let config = if should_show_onboarding {
         let show_login_screen = should_show_login_screen(login_status, &initial_config);
@@ -1759,6 +1771,7 @@ async fn run_ratatui_app(
             log_db.clone(),
             state_db.clone(),
             environment_manager.clone(),
+            is_teammate_process,
         )
         .await
         {
@@ -2010,6 +2023,19 @@ fn should_show_onboarding(
     should_show_login_screen(login_status, config)
 }
 
+fn should_show_onboarding_for_startup(
+    is_teammate_process: bool,
+    login_status: LoginStatus,
+    config: &Config,
+    show_trust_screen: bool,
+) -> bool {
+    if is_teammate_process {
+        return false;
+    }
+
+    should_show_onboarding(login_status, config, show_trust_screen)
+}
+
 fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
     // Only show the login screen for providers that actually require OpenAI auth
     // (OpenAI or equivalents). For OSS/other providers, skip login entirely.
@@ -2072,6 +2098,7 @@ mod tests {
             /*log_db*/ None,
             state_db,
             Arc::new(EnvironmentManager::default_for_tests()),
+            /*enable_codex_api_key_env*/ false,
         )
         .await
     }
@@ -2726,6 +2753,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn teammate_startup_skips_onboarding_even_when_login_or_trust_would_show()
+    -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut config = build_config(&temp_dir).await?;
+        config.active_project = ProjectConfig { trust_level: None };
+        config.model_provider.requires_openai_auth = true;
+
+        assert!(should_show_onboarding(
+            LoginStatus::NotAuthenticated,
+            &config,
+            /*show_trust_screen*/ true,
+        ));
+        assert!(!should_show_onboarding_for_startup(
+            /*is_teammate_process*/ true,
+            LoginStatus::NotAuthenticated,
+            &config,
+            /*show_trust_screen*/ true,
+        ));
+        assert!(should_show_onboarding_for_startup(
+            /*is_teammate_process*/ false,
+            LoginStatus::NotAuthenticated,
+            &config,
+            /*show_trust_screen*/ true,
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn embedded_app_server_supports_thread_start_rpc() -> color_eyre::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
@@ -2826,6 +2881,7 @@ mod tests {
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::new(EnvironmentManager::default_for_tests()),
+            /*enable_codex_api_key_env*/ false,
             |_args| async { Err(std::io::Error::other("boom")) },
         )
         .await;
@@ -2839,6 +2895,42 @@ mod tests {
                 .contains("failed to start embedded app server"),
             "error should preserve the embedded app server startup context"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn embedded_app_server_forwards_codex_api_key_env_toggle() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let saw_toggle = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_toggle_for_start = saw_toggle.clone();
+        let result = start_embedded_app_server_with(
+            Arg0DispatchPaths::default(),
+            config,
+            Vec::new(),
+            LoaderOverrides::default(),
+            /*strict_config*/ false,
+            CloudConfigBundleLoader::default(),
+            codex_feedback::CodexFeedback::new(),
+            /*log_db*/ None,
+            /*state_db*/ None,
+            Arc::new(EnvironmentManager::default_for_tests()),
+            /*enable_codex_api_key_env*/ true,
+            move |args| {
+                let saw_toggle_for_start = saw_toggle_for_start.clone();
+                async move {
+                    saw_toggle_for_start.store(
+                        args.enable_codex_api_key_env,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    Err(std::io::Error::other("stop after capture"))
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(saw_toggle.load(std::sync::atomic::Ordering::SeqCst));
         Ok(())
     }
 

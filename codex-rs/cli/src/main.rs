@@ -2706,6 +2706,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn teammate_parses_bypass_hook_trust_flag() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "teammate",
+            "--agent-id",
+            "alice@rocket",
+            "--agent-name",
+            "alice",
+            "--team-name",
+            "rocket",
+            "--dangerously-bypass-hook-trust",
+        ])
+        .expect("parse");
+
+        let Some(Subcommand::Teammate(teammate)) = cli.subcommand else {
+            panic!("expected teammate subcommand");
+        };
+        assert!(teammate.bypass_hook_trust);
+    }
+
     fn help_from_args(args: &[&str]) -> String {
         let err = MultitoolCli::try_parse_from(args).expect_err("help should short-circuit");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);

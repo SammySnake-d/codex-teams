@@ -104,6 +104,7 @@ impl ChatWidget {
         self.sync_service_tier_commands();
         self.sync_personality_command_enabled();
         self.sync_plugins_command_enabled();
+        self.sync_teams_enabled();
         self.sync_goal_command_enabled();
         self.refresh_plugin_mentions();
         let model_for_header = self.current_model().to_string();

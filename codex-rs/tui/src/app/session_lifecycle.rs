@@ -126,29 +126,20 @@ impl App {
 
     pub(super) fn register_teammate_thread(
         &mut self,
-        thread_id: ThreadId,
-        member_name: String,
+        member: TeamRosterMemberInput,
         _agent_role: Option<String>,
-        tmux_pane_id: Option<String>,
-        backend_type: Option<String>,
     ) {
-        let has_external_pane = tmux_pane_id
-            .as_deref()
-            .is_some_and(|pane_id| !pane_id.trim().is_empty());
-        if !has_external_pane {
+        let member_name = member.name.clone();
+        let thread_id = member.thread_id;
+        let Some(member) = TeamRosterMember::new(member) else {
             tracing::warn!(
                 member_name,
                 thread_id = %thread_id,
                 "ignoring Teams teammate registration without pane metadata"
             );
             return;
-        }
-        self.team_roster_navigation.register_member(
-            thread_id,
-            member_name,
-            tmux_pane_id,
-            backend_type,
-        );
+        };
+        self.team_roster_navigation.register_member(member);
         self.sync_active_agent_label();
     }
 

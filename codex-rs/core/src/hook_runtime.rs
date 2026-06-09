@@ -23,6 +23,7 @@ use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -41,6 +42,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
 use crate::event_mapping::parse_turn_item;
 use crate::session::TurnInput;
+use crate::session::TurnInputSource;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::hook_names::HookToolName;
@@ -500,7 +502,11 @@ pub(crate) async fn inspect_pending_input(
     pending_input_item: &TurnInput,
 ) -> HookRuntimeOutcome {
     match pending_input_item {
-        TurnInput::UserInput { content, .. } => {
+        TurnInput::UserInput {
+            content,
+            source: TurnInputSource::User,
+            ..
+        } => {
             let request = UserPromptSubmitRequest {
                 session_id: sess.session_id().into(),
                 turn_id: turn_context.sub_id.clone(),
@@ -522,7 +528,11 @@ pub(crate) async fn inspect_pending_input(
             )
             .await
         }
-        TurnInput::ResponseItem(_) => HookRuntimeOutcome {
+        TurnInput::UserInput {
+            source: TurnInputSource::TeamsMailbox,
+            ..
+        }
+        | TurnInput::ResponseItem(_) => HookRuntimeOutcome {
             should_stop: false,
             additional_contexts: Vec::new(),
         },
@@ -536,14 +546,26 @@ pub(crate) async fn record_pending_input(
     additional_contexts: Vec<String>,
 ) {
     match pending_input {
-        TurnInput::UserInput { content, client_id } => {
-            sess.record_user_prompt_and_emit_turn_item(
-                turn_context.as_ref(),
-                content.as_slice(),
-                client_id,
-            )
-            .await;
-        }
+        TurnInput::UserInput {
+            content,
+            client_id,
+            source,
+        } => match source {
+            TurnInputSource::User => {
+                sess.record_user_prompt_and_emit_turn_item(
+                    turn_context.as_ref(),
+                    content.as_slice(),
+                    client_id,
+                )
+                .await;
+            }
+            TurnInputSource::TeamsMailbox => {
+                let response_item = ResponseItem::from(ResponseInputItem::from(content));
+                sess.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
+                    .await;
+                sess.ensure_rollout_materialized().await;
+            }
+        },
         TurnInput::ResponseItem(item) => {
             sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
                 .await;

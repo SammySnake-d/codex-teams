@@ -172,31 +172,29 @@ impl MockTeamsSmokeState {
         }
 
         let texts = collect_text_values(body);
-        if contains_text(&texts, "Codex Teams message:") {
-            self.record_member_context(&texts);
+        if contains_text(
+            &texts,
+            "Lead-to-member smoke message from local mock Responses provider.",
+        ) || contains_text(
+            &texts,
+            "Send one acknowledgement to the team lead with team_send",
+        ) {
             return self.function_call_response(
                 "mock-member-to-lead",
                 "team_send",
                 serde_json::json!({
-                    "team_id": self.required_team_id()?,
-                    "target": "lead",
-                    "sender_member_id": self.required_member_id()?,
+                    "to": "team-lead",
+                    "summary": "smoke acknowledgement",
                     "message": "Member-to-lead smoke acknowledgement from local mock Responses provider.",
                 }),
             );
-        }
-
-        if contains_text(&texts, "Codex Teams context:") {
-            self.record_member_context(&texts);
-            return self
-                .assistant_response("TEAMS_SMOKE_MEMBER_READY waiting_for_lead_message=true");
         }
 
         self.function_call_response(
             "mock-create-team",
             "create_team",
             serde_json::json!({
-                "name": "local tmux teams smoke",
+                "team_name": "local tmux teams smoke",
             }),
         )
     }
@@ -270,15 +268,6 @@ impl MockTeamsSmokeState {
         self.member_id
             .as_deref()
             .ok_or_else(|| anyhow!("mock Teams smoke is missing member_id"))
-    }
-
-    fn record_member_context(&mut self, texts: &[String]) {
-        if let Some(team_id) = first_context_value(texts, "team_id") {
-            self.team_id = Some(team_id);
-        }
-        if let Some(member_id) = first_context_value(texts, "member_id") {
-            self.member_id = Some(member_id);
-        }
     }
 }
 
@@ -427,7 +416,10 @@ fn mock_teams_smoke_request(
         if should_pause_for_member_reply(&state, &body_json) {
             std::thread::sleep(Duration::from_millis(500));
         }
-        let response = state.lock().unwrap().next_sse_response(&body_json)?;
+        let response = state
+            .lock()
+            .map_err(|err| anyhow!("mock Teams smoke state lock poisoned: {err}"))?
+            .next_sse_response(&body_json)?;
         respond_with_body(
             req,
             StatusCode(200),
@@ -667,20 +659,18 @@ fn contains_text(texts: &[String], needle: &str) -> bool {
     texts.iter().any(|text| text.contains(needle))
 }
 
-fn first_context_value(texts: &[String], key: &str) -> Option<String> {
-    let prefix = format!("- {key}: ");
-    texts.iter().find_map(|text| {
-        text.lines()
-            .find_map(|line| line.trim().strip_prefix(&prefix).map(str::to_string))
-    })
-}
-
 fn should_pause_for_member_reply(state: &Arc<Mutex<MockTeamsSmokeState>>, body: &Value) -> bool {
     if !latest_function_output_call_id_starts_with(body, "mock-message-list-") {
         return false;
     }
 
-    !state.lock().unwrap().member_to_lead_completed
+    match state.lock() {
+        Ok(state) => !state.member_to_lead_completed,
+        Err(err) => {
+            eprintln!("mock Teams smoke state lock poisoned: {err}");
+            false
+        }
+    }
 }
 
 fn latest_function_output_call_id_starts_with(body: &Value, call_id_prefix: &str) -> bool {

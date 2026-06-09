@@ -42,6 +42,7 @@ pub(crate) struct CommandPopup {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CommandPopupFlags {
     pub(crate) collaboration_modes_enabled: bool,
+    pub(crate) teams_enabled: bool,
     pub(crate) connectors_enabled: bool,
     pub(crate) plugins_command_enabled: bool,
     pub(crate) service_tier_commands_enabled: bool,
@@ -57,6 +58,7 @@ impl From<CommandPopupFlags> for BuiltinCommandFlags {
     fn from(value: CommandPopupFlags) -> Self {
         Self {
             collaboration_modes_enabled: value.collaboration_modes_enabled,
+            teams_enabled: value.teams_enabled,
             connectors_enabled: value.connectors_enabled,
             plugins_command_enabled: value.plugins_command_enabled,
             service_tier_commands_enabled: value.service_tier_commands_enabled,
@@ -492,6 +494,7 @@ mod tests {
         let mut popup = CommandPopup::new(
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
+                teams_enabled: false,
                 connectors_enabled: false,
                 plugins_command_enabled: false,
                 service_tier_commands_enabled: false,
@@ -516,10 +519,50 @@ mod tests {
     }
 
     #[test]
+    fn teams_command_hidden_when_disabled() {
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
+        popup.on_composer_text_change("/teams".to_string());
+
+        let cmds: Vec<String> = popup
+            .filtered_items()
+            .into_iter()
+            .map(|item| match item {
+                CommandItem::Builtin(cmd) => cmd.command().to_string(),
+                CommandItem::ServiceTier(command) => command.name,
+            })
+            .collect();
+        assert!(
+            !cmds.iter().any(|cmd| cmd == "teams"),
+            "expected '/teams' to be hidden when disabled, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn teams_command_visible_when_enabled() {
+        let mut popup = CommandPopup::new(
+            CommandPopupFlags {
+                teams_enabled: true,
+                ..CommandPopupFlags::default()
+            },
+            Vec::new(),
+        );
+        popup.on_composer_text_change("/teams".to_string());
+
+        match popup.selected_item() {
+            Some(CommandItem::Builtin(cmd)) => assert_eq!(cmd.command(), "teams"),
+            Some(CommandItem::ServiceTier(command)) => {
+                panic!("expected teams command, got service tier {command:?}")
+            }
+            other => panic!("expected teams to be selected for exact match, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn personality_command_hidden_when_disabled() {
         let mut popup = CommandPopup::new(
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
+                teams_enabled: false,
                 connectors_enabled: false,
                 plugins_command_enabled: false,
                 service_tier_commands_enabled: false,
@@ -553,6 +596,7 @@ mod tests {
         let mut popup = CommandPopup::new(
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
+                teams_enabled: false,
                 connectors_enabled: false,
                 plugins_command_enabled: false,
                 service_tier_commands_enabled: false,
@@ -581,6 +625,7 @@ mod tests {
         let mut popup = CommandPopup::new(
             CommandPopupFlags {
                 collaboration_modes_enabled: false,
+                teams_enabled: false,
                 connectors_enabled: false,
                 plugins_command_enabled: false,
                 service_tier_commands_enabled: false,

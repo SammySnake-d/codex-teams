@@ -13,6 +13,7 @@ use crate::session::SteerInputError;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::session::SessionSettingsUpdate;
+use crate::session::split_internal_user_input_source_metadata;
 
 use crate::config::Config;
 use crate::realtime_context::REALTIME_TURN_TOKEN_BUDGET;
@@ -231,13 +232,16 @@ pub(super) async fn user_input_or_turn_inner(
     }
     sess.maybe_emit_unknown_model_warning_for_turn(current_context.as_ref())
         .await;
+    let (user_input_source, responsesapi_client_metadata) =
+        split_internal_user_input_source_metadata(responsesapi_client_metadata);
     let accepted_items = match sess
-        .steer_input(
+        .steer_input_with_source(
             items.clone(),
             additional_context.clone(),
             /*expected_turn_id*/ None,
             client_user_message_id.clone(),
             responsesapi_client_metadata.clone(),
+            user_input_source,
         )
         .await
     {
@@ -271,6 +275,7 @@ pub(super) async fn user_input_or_turn_inner(
                 task_input.push(TurnInput::UserInput {
                     content: items,
                     client_id: client_user_message_id,
+                    source: user_input_source,
                 });
             }
             sess.spawn_task(

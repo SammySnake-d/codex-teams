@@ -214,6 +214,8 @@ use self::handlers::submission_dispatch_span;
 use self::handlers::submission_loop;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
+pub(crate) use self::input_queue::TurnInputSource;
+pub(crate) use self::input_queue::split_internal_user_input_source_metadata;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -1162,9 +1164,12 @@ impl Session {
 
     pub(crate) async fn get_base_instructions(&self) -> BaseInstructions {
         let state = self.state.lock().await;
-        BaseInstructions {
-            text: state.session_configuration.base_instructions.clone(),
+        let mut text = state.session_configuration.base_instructions.clone();
+        if let Some(addendum) = crate::team::teammate_system_prompt_addendum() {
+            text.push_str("\n\n");
+            text.push_str(addendum);
         }
+        BaseInstructions { text }
     }
 
     // Merges connector IDs into the session-level explicit connector selection.
@@ -3205,10 +3210,6 @@ impl Session {
     /// Inject additional user input into the currently active turn.
     ///
     /// Returns the active turn id when accepted.
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub async fn steer_input(
         &self,
         input: Vec<UserInput>,
@@ -3216,6 +3217,32 @@ impl Session {
         expected_turn_id: Option<&str>,
         client_user_message_id: Option<String>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
+    ) -> Result<String, SteerInputError> {
+        let (user_input_source, responsesapi_client_metadata) =
+            split_internal_user_input_source_metadata(responsesapi_client_metadata);
+        self.steer_input_with_source(
+            input,
+            additional_context,
+            expected_turn_id,
+            client_user_message_id,
+            responsesapi_client_metadata,
+            user_input_source,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub async fn steer_input_with_source(
+        &self,
+        input: Vec<UserInput>,
+        additional_context: BTreeMap<String, AdditionalContextEntry>,
+        expected_turn_id: Option<&str>,
+        client_user_message_id: Option<String>,
+        responsesapi_client_metadata: Option<HashMap<String, String>>,
+        user_input_source: TurnInputSource,
     ) -> Result<String, SteerInputError> {
         let mut active = self.active_turn.lock().await;
         let Some(active_turn) = active.as_mut() else {
@@ -3274,6 +3301,7 @@ impl Session {
         pending_input.push(TurnInput::UserInput {
             content: input,
             client_id: client_user_message_id,
+            source: user_input_source,
         });
         self.input_queue
             .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(

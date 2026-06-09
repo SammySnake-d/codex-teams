@@ -1,0 +1,28 @@
+{
+  "id": "claude-teams-fidelity-gaps",
+  "name": "claude-teams-fidelity-gaps",
+  "title": "Close Claude Code Teams fidelity gaps",
+  "description": "Port the remaining Codex Teams behavior from Claude Code source-backed semantics: prompt envelope, Teams tool prompts, status/header/navigation, reply queue, and native subagent isolation.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": "codex-rs",
+  "priority": "P1",
+  "creator": "snakesammy",
+  "assignee": "snakesammy",
+  "createdAt": "2026-06-09",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "feat/codex-teams-infra",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "fix-teams-user-entrypoint",
+  "relatedFiles": [],
+  "notes": "Open. 2026-06-09 17:04 CST: latest architecture landed in .trellis/spec/codex-rs/backend/teams-architecture.md and this session active task was corrected to 06-09-claude-teams-fidelity-gaps. Keep one Codex BM25 ToolSearch substrate; do not add Teams-only search; do not solve isolation with broad tool_search.rs language classifiers. Shared spawn_agent is the primary route: no name => native Codex subagent; active/explicit team plus name => Teams teammate. team_spawn_member is exact-name compatibility/control surface, not broad natural-language teammate spawn. Runtime --agent-id blocker was fixed by launching the real codex CLI via CODEX_TEAMMATE_COMMAND/configured codex_self_exe/current_exe with target/debug/deps test-harness escape. Verified so far: just fmt, codex-core teammate_binary_escapes_cargo_deps_test_binary, codex-cli teammate_parses_bypass_hook_trust_flag, codex-tui team_ui (19 passed, 1 leaky), core Teams/subagent isolation tests from handoff, multi_agent_v2_spawn_name_uses_active_team_teammate_branch, git diff --check. Remaining proof: exact team_spawn_member callable path, lead-only/defer core tests, Claude-style footer/header/navigation snapshots, and real create/spawn/mailbox/reply/lead receipt/navigation/native subagent-isolation E2E before package/link.",
+  "meta": {
+    "source_reference": "https://github.com/ChinaSiro/claude-code-sourcemap"
+  }
+}

@@ -319,6 +319,7 @@ async fn start_app_server_for_archive_command(
         /*log_db*/ None,
         state_db,
         environment_manager,
+        /*enable_codex_api_key_env*/ false,
     )
     .await?;
     Ok(

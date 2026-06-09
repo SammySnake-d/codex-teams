@@ -1214,6 +1214,93 @@ async fn slash_logout_requests_app_server_logout() {
 }
 
 #[tokio::test]
+async fn slash_teams_reports_disabled_when_feature_disabled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::Teams, /*enabled*/ false);
+
+    chat.dispatch_command(SlashCommand::Teams);
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .iter()
+        .map(|cell| lines_to_single_string(cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Codex Teams is disabled."),
+        "expected disabled Teams message, got: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("--enable teams"),
+        "expected enable hint, got: {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn slash_teams_input_reports_disabled_instead_of_unknown_command() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::Teams, /*enabled*/ false);
+
+    submit_composer_text(&mut chat, "/teams");
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .iter()
+        .map(|cell| lines_to_single_string(cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Codex Teams is disabled."),
+        "expected disabled Teams message, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Unrecognized command '/teams'"),
+        "typed /teams must not be treated as unknown: {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn slash_teams_opens_teams_dialog_when_feature_enabled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::Teams, /*enabled*/ true);
+
+    chat.dispatch_command(SlashCommand::Teams);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTeamsDialog));
+}
+
+#[tokio::test]
+async fn slash_teams_input_opens_teams_dialog_when_feature_enabled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::Teams, /*enabled*/ true);
+
+    submit_composer_text(&mut chat, "/teams");
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTeamsDialog));
+}
+
+#[tokio::test]
+async fn slash_team_alias_opens_teams_dialog_when_feature_enabled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::Teams, /*enabled*/ true);
+
+    submit_composer_text(&mut chat, "/team");
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTeamsDialog));
+}
+
+#[tokio::test]
+async fn slash_subagents_opens_agent_picker_not_teams_dialog() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::Teams, /*enabled*/ true);
+
+    submit_composer_text(&mut chat, "/subagents");
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAgentPicker));
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
 async fn slash_copy_state_tracks_turn_complete_final_reply() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

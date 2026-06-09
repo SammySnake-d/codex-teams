@@ -21,6 +21,7 @@ use crate::config::Constrained;
 use crate::review_format::format_review_findings_block;
 use crate::review_format::render_review_output_text;
 use crate::session::TurnInput;
+use crate::session::TurnInputSource;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
@@ -64,7 +65,15 @@ impl SessionTask for ReviewTask {
         let mut user_input = Vec::new();
         for item in input {
             match item {
-                TurnInput::UserInput { mut content, .. } => user_input.append(&mut content),
+                TurnInput::UserInput {
+                    mut content,
+                    source: TurnInputSource::User,
+                    ..
+                } => user_input.append(&mut content),
+                TurnInput::UserInput {
+                    source: TurnInputSource::TeamsMailbox,
+                    ..
+                } => {}
                 TurnInput::ResponseItem(_) => {}
             }
         }
