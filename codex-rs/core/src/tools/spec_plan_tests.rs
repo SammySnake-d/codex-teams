@@ -1451,9 +1451,7 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
         );
         if tool_name == "spawn_agent" {
             assert_eq!(
-                properties
-                    .get("prompt")
-                    .and_then(|schema| schema.encrypted),
+                properties.get("prompt").and_then(|schema| schema.encrypted),
                 Some(true)
             );
         }

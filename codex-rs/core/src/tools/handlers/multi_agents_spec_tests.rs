@@ -89,9 +89,7 @@ fn spawn_agent_tool_v2_supports_claude_style_teammate_branch_and_lists_visible_m
     assert!(properties.contains_key("message"));
     assert!(properties.contains_key("prompt"));
     assert_eq!(
-        properties
-            .get("prompt")
-            .and_then(|schema| schema.encrypted),
+        properties.get("prompt").and_then(|schema| schema.encrypted),
         Some(true)
     );
     assert!(properties.contains_key("name"));
