@@ -441,6 +441,10 @@ impl ChatWidget {
     pub(crate) fn set_team_teammate_view_header(&mut self, header: Option<TeamTeammateViewHeader>) {
         self.team_teammate_view_header = header;
     }
+
+    pub(crate) fn set_team_roster_tree_lines(&mut self, lines: Option<Vec<Line<'static>>>) {
+        self.team_roster_tree_lines = lines;
+    }
 }
 
 impl TeamTeammateViewHeader {
@@ -452,7 +456,7 @@ impl TeamTeammateViewHeader {
                 teammate_header_color_style(self.color.as_deref().unwrap_or_default()).bold(),
             ),
             " · ".dim(),
-            "esc return".dim(),
+            "esc to return".dim(),
         ];
         let mut lines = vec![Line::from(title)];
         if let Some(prompt) = self.prompt.as_deref() {

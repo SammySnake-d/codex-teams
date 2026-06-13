@@ -196,6 +196,10 @@ impl App {
             self.team_roster_navigation
                 .teammate_view_header(self.current_displayed_thread_id()),
         );
+        self.chat_widget.set_team_roster_tree_lines(
+            self.team_roster_navigation
+                .roster_tree_lines(self.current_displayed_thread_id(), self.primary_thread_id),
+        );
         self.sync_side_thread_ui();
     }
 

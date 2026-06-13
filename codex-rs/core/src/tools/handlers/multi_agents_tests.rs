@@ -1067,7 +1067,114 @@ async fn multi_agent_v2_spawn_requires_task_name() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_spawn_name_uses_active_team_teammate_branch() {
+async fn multi_agent_v2_spawn_name_and_team_name_uses_teammate_branch() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    session
+        .services
+        .agent_control
+        .team_registry()
+        .create_team("rocket".to_string(), root.thread_id)
+        .await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Teams)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "prompt": "inspect this repo",
+            "description": "Inspect the repository",
+            "name": "alice",
+            "team_name": "rocket",
+            "subagent_type": "researcher",
+            "mode": "plan",
+            "model": "inherit"
+        })),
+    );
+    match SpawnAgentHandlerV2::default().handle(invocation).await {
+        Ok(output) => {
+            let (content, success) = expect_text_output(output);
+            let result: serde_json::Value =
+                serde_json::from_str(&content).expect("spawn_agent teammate result should be json");
+            assert_eq!(success, Some(true));
+            assert_eq!(result["status"], "teammate_spawned");
+            assert_eq!(result["prompt"], "inspect this repo");
+            assert_eq!(result["name"], "alice");
+            assert_eq!(result["agent_type"], "researcher");
+            assert!(result["model"].is_string());
+            assert_eq!(result["team_name"], "rocket");
+            assert_eq!(result["is_splitpane"], true);
+            assert_eq!(result["plan_mode_required"], true);
+            assert!(result["teammate_id"].is_string());
+            assert_eq!(result["teammate_id"], result["agent_id"]);
+            assert!(result["tmux_pane_id"].is_string());
+            assert!(result.get("task_name").is_none());
+        }
+        Err(FunctionCallError::RespondToModel(message)) => {
+            assert!(message.contains("requires a tmux or iTerm2 pane backend"));
+            assert!(
+                !message.contains("task_name is required"),
+                "name/team_name should route to the Teams teammate branch before native task_name validation"
+            );
+        }
+        Err(err) => panic!("unexpected teammate spawn error: {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_rejects_message_and_prompt_together() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "prompt": "inspect something else",
+            "task_name": "worker"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
+        panic!("message+prompt should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("message+prompt should surface as a model-facing error");
+    };
+    assert_eq!(message, "Provide either message or prompt, but not both");
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_unknown_team_name_does_not_fallback_to_native_task_name() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -1100,8 +1207,100 @@ async fn multi_agent_v2_spawn_name_uses_active_team_teammate_branch() {
         function_payload(json!({
             "message": "inspect this repo",
             "name": "alice",
-            "team_name": "rocket",
-            "model": "inherit"
+            "team_name": "missing"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
+        panic!("unknown team_name should be rejected by the Teams teammate branch");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("unknown team_name should surface as a model-facing error");
+    };
+    assert!(message.contains("No active Codex team named \"missing\""));
+    assert!(
+        !message.contains("task_name is required"),
+        "unknown team_name with name should not fall back to native task_name validation"
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_name_and_team_name_with_teams_disabled_uses_native_task_validation() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    session
+        .services
+        .agent_control
+        .team_registry()
+        .create_team("rocket".to_string(), root.thread_id)
+        .await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    let _ = config.features.disable(Feature::Teams);
+    set_turn_config(&mut turn, config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "name": "alice",
+            "team_name": "rocket"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
+        panic!("Teams-disabled name/team_name should stay on the native subagent path");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("native task validation should surface as a model-facing error");
+    };
+    assert!(message.contains("task_name is required"));
+    assert!(message.contains("name with optional team_name"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_name_without_team_name_uses_active_team_teammate_branch() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    session
+        .services
+        .agent_control
+        .team_registry()
+        .create_team("rocket".to_string(), root.thread_id)
+        .await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Teams)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "prompt": "inspect this repo",
+            "name": "alice"
         })),
     );
     match SpawnAgentHandlerV2::default().handle(invocation).await {
@@ -1110,21 +1309,204 @@ async fn multi_agent_v2_spawn_name_uses_active_team_teammate_branch() {
             let result: serde_json::Value =
                 serde_json::from_str(&content).expect("spawn_agent teammate result should be json");
             assert_eq!(success, Some(true));
-            assert_eq!(result["member"]["name"], json!("alice"));
-            assert!(result["member"]["id"].is_string());
-            assert!(result["member"]["agent_thread_id"].is_string());
-            assert!(result["tmux_pane_id"].is_string());
+            assert_eq!(result["status"], "teammate_spawned");
+            assert_eq!(result["prompt"], "inspect this repo");
+            assert_eq!(result["name"], "alice");
+            assert_eq!(result["team_name"], "rocket");
             assert!(result.get("task_name").is_none());
         }
         Err(FunctionCallError::RespondToModel(message)) => {
             assert!(message.contains("requires a tmux or iTerm2 pane backend"));
             assert!(
                 !message.contains("task_name is required"),
-                "name/team_name should route to the Teams teammate branch before native task_name validation"
+                "single active team plus name should route to the Teams teammate branch"
             );
         }
         Err(err) => panic!("unexpected teammate spawn error: {err:?}"),
     }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_name_without_active_team_uses_native_task_validation() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Teams)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "name": "alice"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
+        panic!("name without an active team should stay on the native subagent path");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("native task validation should surface as a model-facing error");
+    };
+    assert!(message.contains("task_name is required"));
+    assert!(message.contains("name with optional team_name"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_name_with_multiple_active_teams_uses_native_task_validation() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let registry = session.services.agent_control.team_registry();
+    registry
+        .create_team("rocket".to_string(), root.thread_id)
+        .await;
+    registry
+        .create_team("apollo".to_string(), root.thread_id)
+        .await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Teams)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "name": "alice"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
+        panic!("ambiguous active teams should keep name-only spawn on native task validation");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("native task validation should surface as a model-facing error");
+    };
+    assert!(message.contains("task_name is required"));
+    assert!(message.contains("name with optional team_name"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_team_name_without_name_uses_native_task_validation() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    session
+        .services
+        .agent_control
+        .team_registry()
+        .create_team("rocket".to_string(), root.thread_id)
+        .await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Teams)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "team_name": "rocket"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
+        panic!("team_name without name should stay on the native subagent path");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("native task validation should surface as a model-facing error");
+    };
+    assert!(message.contains("task_name is required"));
+    assert!(message.contains("name with optional team_name"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_name_without_team_name_with_task_name_spawns_native_agent() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    session
+        .services
+        .agent_control
+        .team_registry()
+        .create_team("rocket".to_string(), root.thread_id)
+        .await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Teams)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "name": "alice",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("name without team_name should not enter the Teams teammate branch");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent native result should be json");
+
+    assert_eq!(success, Some(true));
+    assert_eq!(result["task_name"], "/root/worker");
+    assert!(result.get("member").is_none());
+    assert!(result.get("tmux_pane_id").is_none());
 }
 
 #[tokio::test]

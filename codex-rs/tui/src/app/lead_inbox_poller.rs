@@ -174,6 +174,26 @@ pub(crate) fn format_shutdown_inbox_message(from: String, raw: String) -> String
 fn strip_legacy_visible_team_context(text: &str) -> &str {
     const PREFIX: &str = "Codex Teams context:";
     const END_MARKER: &str = "Do not create teams or spawn teammates from this teammate process.";
+    const CLAUDE_CONTEXT_PREFIX: &str = "# Agent Teammate Communication";
+    const CLAUDE_CONTEXT_MARKER: &str = "The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.";
+    const CODEX_CONTEXT_PREFIX: &str = "# Codex Teams Teammate Communication";
+    const CODEX_CONTEXT_MARKER: &str = "The user interacts primarily with the team lead. Your work is coordinated through Teams tasks and teammate messaging.";
+    let trimmed_addendum = text.trim_start();
+    for (prefix, marker) in [
+        (CLAUDE_CONTEXT_PREFIX, CLAUDE_CONTEXT_MARKER),
+        (CODEX_CONTEXT_PREFIX, CODEX_CONTEXT_MARKER),
+    ] {
+        if !trimmed_addendum.starts_with(prefix) {
+            continue;
+        }
+        let Some((_, task)) = trimmed_addendum.split_once(marker) else {
+            continue;
+        };
+        let task = task.trim_start();
+        if !task.is_empty() {
+            return task;
+        }
+    }
     let trimmed = text.trim_start();
     if !trimmed.starts_with(PREFIX) {
         return text;
@@ -535,6 +555,66 @@ Please inspect task 1.";
             out,
             format!(
                 "<teammate-message teammate_id=\"{TEAM_LEAD_NAME}\">\nPlease inspect task 1.\n</teammate-message>"
+            )
+        );
+    }
+
+    #[test]
+    fn teammate_inbox_strips_legacy_codex_addendum_context_from_lead_message() {
+        let legacy = "\
+# Codex Teams Teammate Communication
+
+Plain assistant text is not visible to other teammates or the lead.
+
+The user interacts primarily with the team lead. Your work is coordinated through Teams tasks and teammate messaging.
+
+Please inspect task 1.";
+        let out = format_teammate_inbox_message(msg(TEAM_LEAD_NAME, legacy, None, None));
+
+        assert_eq!(
+            out,
+            format!(
+                "<teammate-message teammate_id=\"{TEAM_LEAD_NAME}\">\nPlease inspect task 1.\n</teammate-message>"
+            )
+        );
+    }
+
+    #[test]
+    fn teammate_inbox_strips_current_claude_addendum_context_from_lead_message() {
+        let legacy = "\
+# Agent Teammate Communication
+
+IMPORTANT: You are running as an agent in a team. To communicate with anyone on your team:
+- Use the SendMessage tool with `to: \"<name>\"` to send messages to specific teammates
+- Use the SendMessage tool with `to: \"*\"` sparingly for team-wide broadcasts
+
+Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool.
+
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.
+
+Please inspect task 1.";
+        let out = format_teammate_inbox_message(msg(TEAM_LEAD_NAME, legacy, None, None));
+
+        assert_eq!(
+            out,
+            format!(
+                "<teammate-message teammate_id=\"{TEAM_LEAD_NAME}\">\nPlease inspect task 1.\n</teammate-message>"
+            )
+        );
+    }
+
+    #[test]
+    fn teammate_inbox_preserves_quoted_claude_addendum_marker() {
+        let text = "\
+Please verify this exact sentence remains visible:
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.
+Then continue.";
+        let out = format_teammate_inbox_message(msg(TEAM_LEAD_NAME, text, None, None));
+
+        assert_eq!(
+            out,
+            format!(
+                "<teammate-message teammate_id=\"{TEAM_LEAD_NAME}\">\n{text}\n</teammate-message>"
             )
         );
     }

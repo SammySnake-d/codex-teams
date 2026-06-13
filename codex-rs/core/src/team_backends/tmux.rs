@@ -785,6 +785,7 @@ mod tests {
             &[("CODEX_API_KEY".to_string(), "abc123".to_string())],
             &PathBuf::from("/usr/local/bin/codex"),
             &[
+                "teammate".to_string(),
                 "--agent-id".to_string(),
                 "alice@rocket".to_string(),
                 "--agent-color".to_string(),
@@ -795,7 +796,7 @@ mod tests {
         assert_eq!(
             line,
             "cd /home/user/project && env CODEX_API_KEY=abc123 \
-             /usr/local/bin/codex --agent-id alice@rocket --agent-color green"
+             /usr/local/bin/codex teammate --agent-id alice@rocket --agent-color green"
         );
     }
 

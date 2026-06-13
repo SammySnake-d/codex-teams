@@ -17,7 +17,12 @@ mod runner;
 use anyhow::Result;
 use clap::Parser;
 use codex_arg0::Arg0DispatchPaths;
+use codex_config::LoaderOverrides;
 use codex_utils_cli::CliConfigOverrides;
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
 
 /// Hidden: run this `codex` process as a team member. The lead emits exactly
 /// these flags when spawning a teammate process (the spawn contract).
@@ -69,28 +74,36 @@ pub struct TeammateCommand {
 }
 
 /// Launch the interactive codex TUI as this teammate.
-pub async fn run_main(cmd: TeammateCommand, arg0_paths: Arg0DispatchPaths) -> Result<()> {
+pub async fn run_main(
+    cmd: TeammateCommand,
+    base_cli: codex_tui::Cli,
+    arg0_paths: Arg0DispatchPaths,
+    loader_overrides: LoaderOverrides,
+) -> Result<()> {
     // Mark this process as a Codex Teams teammate FIRST so core team tools route
     // cross-process via the on-disk file mailbox (a teammate's in-memory team
     // registry is empty — it never ran `create_team`).
     codex_core::set_teammate_identity(cmd.team_name.clone(), cmd.agent_name.clone());
 
-    // Build a normal interactive TUI Cli carrying the teammate identity. The TUI
-    // boots its standard REPL in the pane; teammate mode (inbox poll + team
-    // context) keys off these identity fields.
-    let mut cli = codex_tui::Cli::parse_from(["codex"]);
+    let cli = build_teammate_tui_cli(&cmd, base_cli);
+
+    codex_tui::run_main(cli, arg0_paths, loader_overrides, None).await?;
+    Ok(())
+}
+
+fn build_teammate_tui_cli(cmd: &TeammateCommand, mut cli: codex_tui::Cli) -> codex_tui::Cli {
     // The first turn arrives via the mailbox (delivered by the lead after spawn),
     // never via the command line, so do not seed a prompt here.
     cli.prompt = None;
-    cli.team_name = Some(cmd.team_name);
-    cli.agent_id = Some(cmd.agent_id);
-    cli.agent_name = Some(cmd.agent_name);
-    cli.agent_color = cmd.agent_color;
-    cli.parent_session_id = cmd.parent_session_id;
-    cli.agent_type = cmd.agent_type;
+    cli.team_name = Some(cmd.team_name.clone());
+    cli.agent_id = Some(cmd.agent_id.clone());
+    cli.agent_name = Some(cmd.agent_name.clone());
+    cli.agent_color = cmd.agent_color.clone();
+    cli.parent_session_id = cmd.parent_session_id.clone();
+    cli.agent_type = cmd.agent_type.clone();
     cli.plan_mode_required = cmd.plan_mode_required;
-    cli.teammate_mode = cmd.teammate_mode;
-    cli.bypass_hook_trust = cmd.bypass_hook_trust;
+    cli.teammate_mode.clone_from(&cmd.teammate_mode);
+    cli.bypass_hook_trust |= cmd.bypass_hook_trust;
     // Teams must be enabled for the tool set; approval/sandbox behavior comes
     // from the lead's forwarded `-c` overrides. Plan-mode teammates must not be
     // silently forced into bypass.
@@ -99,14 +112,6 @@ pub async fn run_main(cmd: TeammateCommand, arg0_paths: Arg0DispatchPaths) -> Re
         .push("features.teams=true".to_string());
     cli.config_overrides
         .raw_overrides
-        .extend(cmd.config_overrides.raw_overrides);
-
-    codex_tui::run_main(
-        cli,
-        arg0_paths,
-        codex_config::LoaderOverrides::default(),
-        None,
-    )
-    .await?;
-    Ok(())
+        .extend(cmd.config_overrides.raw_overrides.clone());
+    cli
 }

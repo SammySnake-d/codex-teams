@@ -204,6 +204,7 @@ async fn start_app_server_for_archive_command(
         &launch_loader_overrides,
         strict_config,
         cli.bypass_hook_trust,
+        /*is_teammate_process*/ false,
     );
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
         super::maybe_probe_default_daemon_socket(codex_home.as_path()).await

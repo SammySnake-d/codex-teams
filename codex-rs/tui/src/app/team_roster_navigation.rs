@@ -10,6 +10,7 @@ use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
+use ratatui::text::Line;
 use ratatui::text::Span;
 
 use crate::chatwidget::TeamTeammateViewHeader;
@@ -87,7 +88,22 @@ pub(crate) enum TeamRosterDirection {
 pub(crate) enum TeamRosterSelectionAction {
     SelectThread(ThreadId),
     ViewTeammate(ThreadId),
+    KillTeammate {
+        team_name: String,
+        name: String,
+        pane_id: String,
+        backend_type: Option<String>,
+    },
     CollapseRoster,
+}
+
+struct RosterTreeLine {
+    label: String,
+    index: usize,
+    viewed: bool,
+    color: Option<String>,
+    idle: bool,
+    hide_row: bool,
 }
 
 impl TeamRosterNavigationState {
@@ -155,55 +171,82 @@ impl TeamRosterNavigationState {
         current_thread_id: Option<ThreadId>,
         primary_thread_id: Option<ThreadId>,
     ) -> Option<Vec<Span<'static>>> {
-        if self.members.is_empty() || self.roster_collapsed {
+        let _ = (current_thread_id, primary_thread_id);
+        if self.members.is_empty() {
             return None;
         }
 
-        if self.selected_footer_index.is_none() {
-            let teammate_count = self.members.len();
-            let suffix = if teammate_count == 1 {
-                "teammate"
-            } else {
-                "teammates"
-            };
-            return Some(vec![format!("{teammate_count} {suffix}").into()]);
+        let teammate_count = self.members.len();
+        let suffix = if teammate_count == 1 {
+            "teammate"
+        } else {
+            "teammates"
+        };
+        let mut spans = Vec::new();
+        let label = format!("{teammate_count} {suffix}");
+        let mut status = Span::from(label.clone());
+        if self.selected_footer_index.is_some() && !self.roster_collapsed {
+            status = Span::styled(label, Style::default().add_modifier(Modifier::REVERSED));
+        }
+        spans.push(status);
+        if self.selected_footer_index.is_some() && !self.roster_collapsed {
+            spans.push(" · ".dim());
+            spans.push("Enter to view".dim());
+        }
+        Some(spans)
+    }
+
+    pub(crate) fn roster_tree_lines(
+        &self,
+        current_thread_id: Option<ThreadId>,
+        primary_thread_id: Option<ThreadId>,
+    ) -> Option<Vec<Line<'static>>> {
+        if self.members.is_empty() || self.selected_footer_index.is_none() || self.roster_collapsed
+        {
+            return None;
         }
 
-        let mut spans = Vec::new();
+        let mut lines = Vec::new();
         let viewed_member_thread_id = self.viewed_member_thread_id.or_else(|| {
             current_thread_id.filter(|thread_id| Some(*thread_id) != primary_thread_id)
         });
-        self.push_footer_item(
-            &mut spans,
-            "main".to_string(),
-            /*index*/ 0,
-            self.viewed_member_thread_id.is_none() && current_thread_id == primary_thread_id,
-            None,
-            false,
+        self.push_roster_tree_line(
+            &mut lines,
+            RosterTreeLine {
+                label: "team-lead".to_string(),
+                index: 0,
+                viewed: self.viewed_member_thread_id.is_none()
+                    && current_thread_id == primary_thread_id,
+                color: None,
+                idle: false,
+                hide_row: false,
+            },
         );
         for (member_index, member) in self.members.iter().enumerate() {
-            self.push_footer_item(
-                &mut spans,
-                format!("@{}", member.name),
-                member_index + 1,
-                Some(member.thread_id) == viewed_member_thread_id,
-                member.color.as_deref(),
-                member.is_active == Some(false),
+            self.push_roster_tree_line(
+                &mut lines,
+                RosterTreeLine {
+                    label: format!("@{}", member.name),
+                    index: member_index + 1,
+                    viewed: Some(member.thread_id) == viewed_member_thread_id,
+                    color: member.color.clone(),
+                    idle: member.is_active == Some(false),
+                    hide_row: false,
+                },
             );
         }
-        self.push_footer_item(
-            &mut spans,
-            "hide".to_string(),
-            self.members.len() + 1,
-            false,
-            None,
-            false,
+        self.push_roster_tree_line(
+            &mut lines,
+            RosterTreeLine {
+                label: "hide".to_string(),
+                index: self.members.len() + 1,
+                viewed: false,
+                color: None,
+                idle: false,
+                hide_row: true,
+            },
         );
-        if self.selected_footer_index.is_some() {
-            spans.push(" · ".into());
-            spans.push(Span::from("Enter to view").dim());
-        }
-        Some(spans)
+        Some(lines)
     }
 
     pub(crate) fn selected_footer_index(&self) -> Option<usize> {
@@ -240,6 +283,40 @@ impl TeamRosterNavigationState {
         let member = self.members.get(selected_index - 1)?;
         self.viewed_member_thread_id = Some(member.thread_id);
         Some(TeamRosterSelectionAction::ViewTeammate(member.thread_id))
+    }
+
+    pub(crate) fn activate_selected_teammate_view(&mut self) -> Option<TeamRosterSelectionAction> {
+        let selected_index = self.selected_footer_index?;
+        if selected_index == 0 || selected_index == self.members.len() + 1 {
+            return None;
+        }
+        let member = self.members.get(selected_index - 1)?;
+        self.selected_footer_index = None;
+        self.viewed_member_thread_id = Some(member.thread_id);
+        Some(TeamRosterSelectionAction::ViewTeammate(member.thread_id))
+    }
+
+    pub(crate) fn kill_selected_teammate(&mut self) -> Option<TeamRosterSelectionAction> {
+        let team_name = self.team_name.clone()?;
+        let selected_index = self.selected_footer_index?;
+        if selected_index == 0 || selected_index == self.members.len() + 1 {
+            return None;
+        }
+        let member = self.members.get(selected_index - 1)?;
+        if member.is_active != Some(true) {
+            return None;
+        }
+        let action = TeamRosterSelectionAction::KillTeammate {
+            team_name,
+            name: member.name.clone(),
+            pane_id: member.tmux_pane_id.clone(),
+            backend_type: member.backend_type.clone(),
+        };
+        self.selected_footer_index = None;
+        if self.viewed_member_thread_id == Some(member.thread_id) {
+            self.viewed_member_thread_id = None;
+        }
+        Some(action)
     }
 
     #[cfg(test)]
@@ -333,30 +410,34 @@ impl TeamRosterNavigationState {
         }
     }
 
-    fn push_footer_item(
-        &self,
-        spans: &mut Vec<Span<'static>>,
-        label: String,
-        index: usize,
-        viewed: bool,
-        color: Option<&str>,
-        idle: bool,
-    ) {
-        if !spans.is_empty() {
-            spans.push(" ".into());
-        }
-        let selected = self.selected_footer_index == Some(index);
-        let mut style = color.map(color_style).unwrap_or_default();
+    fn push_roster_tree_line(&self, lines: &mut Vec<Line<'static>>, row: RosterTreeLine) {
+        let selected = self.selected_footer_index == Some(row.index);
+        let mut style = row.color.as_deref().map(color_style).unwrap_or_default();
         if selected {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        if viewed {
             style = style.add_modifier(Modifier::BOLD);
         }
-        if idle && !selected && !viewed {
+        if row.viewed {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if row.idle && !selected && !row.viewed {
             style = style.dim();
         }
-        spans.push(Span::styled(label, style));
+
+        let mut spans = vec![
+            if selected { "› " } else { "  " }.into(),
+            if row.hide_row { "└─ " } else { "├─ " }.dim(),
+            Span::styled(row.label, style),
+        ];
+        if selected {
+            spans.push(" · ".dim());
+            let hint = if row.hide_row {
+                "enter to collapse"
+            } else {
+                "Enter to view"
+            };
+            spans.push(hint.dim());
+        }
+        lines.push(Line::from(spans));
     }
 }
 

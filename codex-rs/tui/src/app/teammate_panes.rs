@@ -71,9 +71,10 @@ impl App {
         if pane_id.is_empty() {
             return;
         }
-        let codex_home = self.config.codex_home.to_path_buf();
+        let teams_root =
+            crate::legacy_core::team_store::root_from_env_or(self.config.codex_home.as_path());
         let id = pane_id.to_string();
-        if let Err(err) = crate::legacy_core::team_store::update_config(&codex_home, team, |c| {
+        if let Err(err) = crate::legacy_core::team_store::update_config(&teams_root, team, |c| {
             if hide {
                 if !c.hidden_pane_ids.contains(&id) {
                     c.hidden_pane_ids.push(id.clone());
@@ -94,8 +95,9 @@ impl App {
     }
 
     pub(super) fn set_all_teammate_panes_hidden(&self, team: &str, hide: bool) {
-        let codex_home = self.config.codex_home.to_path_buf();
-        if let Err(err) = crate::legacy_core::team_store::update_config(&codex_home, team, |c| {
+        let teams_root =
+            crate::legacy_core::team_store::root_from_env_or(self.config.codex_home.as_path());
+        if let Err(err) = crate::legacy_core::team_store::update_config(&teams_root, team, |c| {
             if hide {
                 c.hidden_pane_ids = c
                     .members
@@ -114,8 +116,10 @@ impl App {
 
     pub(super) fn send_teammate_shutdown_request(&self, team: &str, teammate_name: &str) {
         let request_id = format!("shutdown-{teammate_name}-{}", unix_millis());
+        let teams_root =
+            crate::legacy_core::team_store::root_from_env_or(self.config.codex_home.as_path());
         if let Err(err) = crate::legacy_core::team_coord::send_shutdown_request(
-            &self.config.codex_home,
+            &teams_root,
             team,
             teammate_name,
             crate::legacy_core::team_store::TEAM_LEAD_NAME,
@@ -137,8 +141,9 @@ impl App {
         self.kill_teammate_pane(pane_id, backend_type);
         let pane_id = pane_id.trim().to_string();
         let agent_id = agent_id.to_string();
-        let codex_home = self.config.codex_home.to_path_buf();
-        if let Err(err) = crate::legacy_core::team_store::update_config(&codex_home, team, |c| {
+        let teams_root =
+            crate::legacy_core::team_store::root_from_env_or(self.config.codex_home.as_path());
+        if let Err(err) = crate::legacy_core::team_store::update_config(&teams_root, team, |c| {
             c.members.retain(|member| {
                 member.tmux_pane_id.trim() != pane_id && member.agent_id != agent_id
             });

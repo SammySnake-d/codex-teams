@@ -23,12 +23,50 @@ use crate::wrapping::adaptive_wrap_lines;
 pub(crate) struct PendingInputPreview {
     pub pending_steers: Vec<String>,
     pub rejected_steers: Vec<String>,
-    pub queued_messages: Vec<String>,
+    pub queued_messages: Vec<QueuedInputPreviewItem>,
     /// Key combination rendered in the hint line.  Defaults to Alt+Up but may
     /// be overridden for terminals where that chord is unavailable.
     edit_binding: Option<key_hint::KeyBinding>,
     /// Key combination rendered for immediately interrupting and sending steers.
     interrupt_binding: Option<key_hint::KeyBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QueuedInputPreviewItem {
+    text: String,
+    kind: QueuedInputPreviewKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueuedInputPreviewKind {
+    User,
+    TeamsMailbox,
+}
+
+impl QueuedInputPreviewItem {
+    pub(crate) fn user(text: String) -> Self {
+        Self {
+            text,
+            kind: QueuedInputPreviewKind::User,
+        }
+    }
+
+    pub(crate) fn teams_mailbox(text: String) -> Self {
+        Self {
+            text,
+            kind: QueuedInputPreviewKind::TeamsMailbox,
+        }
+    }
+
+    fn is_teams_mailbox(&self) -> bool {
+        self.kind == QueuedInputPreviewKind::TeamsMailbox
+    }
+}
+
+impl From<String> for QueuedInputPreviewItem {
+    fn from(text: String) -> Self {
+        Self::user(text)
+    }
 }
 
 const PREVIEW_LINE_LIMIT: usize = 3;
@@ -130,25 +168,35 @@ impl PendingInputPreview {
             }
         }
 
-        if !self.queued_messages.is_empty() {
-            if !lines.is_empty() {
-                lines.push(Line::from(""));
+        let mut last_queued_kind = None;
+        for message in &self.queued_messages {
+            if last_queued_kind != Some(message.kind) {
+                if !lines.is_empty() {
+                    lines.push(Line::from(""));
+                }
+                let header = if message.is_teams_mailbox() {
+                    "Queued Teams mailbox replies"
+                } else {
+                    "Queued follow-up inputs"
+                };
+                Self::push_section_header(&mut lines, width, header.into());
+                last_queued_kind = Some(message.kind);
             }
-            Self::push_section_header(&mut lines, width, "Queued follow-up inputs".into());
 
-            for message in &self.queued_messages {
-                let wrapped = adaptive_wrap_lines(
-                    message.lines().map(|line| Line::from(line.dim().italic())),
-                    RtOptions::new(width as usize)
-                        .initial_indent(Line::from("  ↳ ".dim()))
-                        .subsequent_indent(Line::from("    ")),
-                );
-                Self::push_truncated_preview_lines(
-                    &mut lines,
-                    wrapped,
-                    Line::from("    …".dim().italic()),
-                );
-            }
+            let wrapped = adaptive_wrap_lines(
+                message
+                    .text
+                    .lines()
+                    .map(|line| Line::from(line.dim().italic())),
+                RtOptions::new(width as usize)
+                    .initial_indent(Line::from("  ↳ ".dim()))
+                    .subsequent_indent(Line::from("    ")),
+            );
+            Self::push_truncated_preview_lines(
+                &mut lines,
+                wrapped,
+                Line::from("    …".dim().italic()),
+            );
         }
 
         if !self.queued_messages.is_empty()
@@ -197,14 +245,18 @@ mod tests {
     #[test]
     fn desired_height_one_message() {
         let mut queue = PendingInputPreview::new();
-        queue.queued_messages.push("Hello, world!".to_string());
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::user("Hello, world!".to_string()));
         assert_eq!(queue.desired_height(/*width*/ 40), 3);
     }
 
     #[test]
     fn render_one_message() {
         let mut queue = PendingInputPreview::new();
-        queue.queued_messages.push("Hello, world!".to_string());
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::user("Hello, world!".to_string()));
         let width = 40;
         let height = queue.desired_height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
@@ -215,7 +267,9 @@ mod tests {
     #[test]
     fn render_one_message_with_shift_left_binding() {
         let mut queue = PendingInputPreview::new();
-        queue.queued_messages.push("Hello, world!".to_string());
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::user("Hello, world!".to_string()));
         queue.set_edit_binding(Some(key_hint::shift(KeyCode::Left)));
         let width = 40;
         let height = queue.desired_height(width);
@@ -230,10 +284,12 @@ mod tests {
     #[test]
     fn render_two_messages() {
         let mut queue = PendingInputPreview::new();
-        queue.queued_messages.push("Hello, world!".to_string());
         queue
             .queued_messages
-            .push("This is another message".to_string());
+            .push(QueuedInputPreviewItem::user("Hello, world!".to_string()));
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "This is another message".to_string(),
+        ));
         let width = 40;
         let height = queue.desired_height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
@@ -242,18 +298,98 @@ mod tests {
     }
 
     #[test]
+    fn render_teams_mailbox_queued_reply() {
+        let mut queue = PendingInputPreview::new();
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::teams_mailbox(
+                "@alice: done".to_string(),
+            ));
+        let width = 48;
+        let height = queue.desired_height(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        queue.render(Rect::new(0, 0, width, height), &mut buf);
+        assert_snapshot!("render_teams_mailbox_queued_reply", format!("{buf:?}"));
+    }
+
+    #[test]
+    fn render_mixed_queued_inputs_and_teams_mailbox_reply() {
+        let mut queue = PendingInputPreview::new();
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::user("Queued follow-up".to_string()));
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::teams_mailbox(
+                "@alice: done".to_string(),
+            ));
+        let width = 48;
+        let height = queue.desired_height(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        queue.render(Rect::new(0, 0, width, height), &mut buf);
+        assert_snapshot!(
+            "render_mixed_queued_inputs_and_teams_mailbox_reply",
+            format!("{buf:?}")
+        );
+    }
+
+    #[test]
+    fn plain_message_with_teams_mailbox_prefix_stays_plain() {
+        let mut queue = PendingInputPreview::new();
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "Teams mailbox: literal user text".to_string(),
+        ));
+        let width = 48;
+        let height = queue.desired_height(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        queue.render(Rect::new(0, 0, width, height), &mut buf);
+        let rendered = format!("{buf:?}");
+
+        assert!(rendered.contains("Queued follow-up inputs"));
+        assert!(!rendered.contains("Queued Teams mailbox replies"));
+    }
+
+    #[test]
+    fn queued_messages_render_in_fifo_order_across_kinds() {
+        let mut queue = PendingInputPreview::new();
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::teams_mailbox(
+                "@alice: first".to_string(),
+            ));
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::user("regular second".to_string()));
+        let width = 48;
+        let height = queue.desired_height(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        queue.render(Rect::new(0, 0, width, height), &mut buf);
+        let rendered = format!("{buf:?}");
+
+        let mailbox_index = rendered
+            .find("Queued Teams mailbox replies")
+            .expect("mailbox section rendered");
+        let regular_index = rendered
+            .find("Queued follow-up inputs")
+            .expect("regular section rendered");
+        assert!(mailbox_index < regular_index);
+    }
+
+    #[test]
     fn render_more_than_three_messages() {
         let mut queue = PendingInputPreview::new();
-        queue.queued_messages.push("Hello, world!".to_string());
         queue
             .queued_messages
-            .push("This is another message".to_string());
-        queue
-            .queued_messages
-            .push("This is a third message".to_string());
-        queue
-            .queued_messages
-            .push("This is a fourth message".to_string());
+            .push(QueuedInputPreviewItem::user("Hello, world!".to_string()));
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "This is another message".to_string(),
+        ));
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "This is a third message".to_string(),
+        ));
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "This is a fourth message".to_string(),
+        ));
         let width = 40;
         let height = queue.desired_height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
@@ -264,12 +400,12 @@ mod tests {
     #[test]
     fn render_wrapped_message() {
         let mut queue = PendingInputPreview::new();
-        queue
-            .queued_messages
-            .push("This is a longer message that should be wrapped".to_string());
-        queue
-            .queued_messages
-            .push("This is another message".to_string());
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "This is a longer message that should be wrapped".to_string(),
+        ));
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "This is another message".to_string(),
+        ));
         let width = 40;
         let height = queue.desired_height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
@@ -280,9 +416,9 @@ mod tests {
     #[test]
     fn render_many_line_message() {
         let mut queue = PendingInputPreview::new();
-        queue
-            .queued_messages
-            .push("This is\na message\nwith many\nlines".to_string());
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "This is\na message\nwith many\nlines".to_string(),
+        ));
         let width = 40;
         let height = queue.desired_height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
@@ -293,10 +429,12 @@ mod tests {
     #[test]
     fn long_url_like_message_does_not_expand_into_wrapped_ellipsis_rows() {
         let mut queue = PendingInputPreview::new();
-        queue.queued_messages.push(
-            "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/artifacts/reports/performance/summary/detail/session_id=abc123def456ghi789"
-                .to_string(),
-        );
+        queue
+            .queued_messages
+            .push(QueuedInputPreviewItem::user(
+                "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/artifacts/reports/performance/summary/detail/session_id=abc123def456ghi789"
+                    .to_string(),
+            ));
 
         let width = 36;
         let height = queue.desired_height(width);
@@ -358,9 +496,9 @@ mod tests {
         queue
             .rejected_steers
             .push("Rejected steer that will be retried.".to_string());
-        queue
-            .queued_messages
-            .push("Queued follow-up question".to_string());
+        queue.queued_messages.push(QueuedInputPreviewItem::user(
+            "Queued follow-up question".to_string(),
+        ));
         let width = 52;
         let height = queue.desired_height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));

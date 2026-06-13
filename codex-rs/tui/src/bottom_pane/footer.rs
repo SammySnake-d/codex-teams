@@ -723,7 +723,7 @@ fn footer_from_props_lines(
     if let Some(status_line) = passive_footer_status_line(props) {
         return vec![status_line];
     }
-    match props.mode {
+    let lines = match props.mode {
         FooterMode::QuitShortcutReminder => {
             vec![quit_shortcut_reminder_line(props.quit_shortcut_key)]
         }
@@ -773,7 +773,32 @@ fn footer_from_props_lines(
                 key_hints,
             )]
         }
+    };
+    append_non_passive_team_pills(lines, props)
+}
+
+fn append_non_passive_team_pills(
+    mut lines: Vec<Line<'static>>,
+    props: &FooterProps,
+) -> Vec<Line<'static>> {
+    if shows_passive_footer_line(props) {
+        return lines;
     }
+    let Some(pills) = props
+        .active_team_pills
+        .as_ref()
+        .filter(|pills| !pills.is_empty())
+    else {
+        return lines;
+    };
+    let Some(last) = lines.last_mut() else {
+        return vec![Line::from(pills.clone())];
+    };
+    if last.width() > 0 {
+        last.spans.push(" · ".dim());
+    }
+    last.spans.extend(pills.iter().cloned());
+    lines
 }
 
 /// Returns the contextual footer row when the footer is not busy showing an instructional hint.
@@ -1392,6 +1417,11 @@ mod tests {
                         show_queue_hint,
                     )
                 };
+                let non_passive_team_pills_visible = !shows_passive_footer_line(props)
+                    && props
+                        .active_team_pills
+                        .as_ref()
+                        .is_some_and(|pills| !pills.is_empty());
                 let right_line = if status_line_active {
                     let full = status_line_right_indicator_line(
                         collaboration_mode_indicator,
@@ -1411,6 +1441,8 @@ mod tests {
                     } else {
                         compact
                     }
+                } else if non_passive_team_pills_visible {
+                    None
                 } else {
                     Some(context_line.clone())
                 };
@@ -2041,6 +2073,24 @@ mod tests {
         snapshot_footer("footer_active_team_pills", props);
 
         let props = FooterProps {
+            mode: FooterMode::ComposerHasDraft,
+            esc_backtrack_hint: false,
+            use_shift_enter_hint: false,
+            is_task_running: true,
+            queue_submissions: false,
+            collaboration_modes_enabled: false,
+            is_wsl: false,
+            quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
+            status_line_value: None,
+            status_line_enabled: false,
+            key_hints: FooterKeyHints::default_bindings(),
+            active_agent_label: None,
+            active_team_pills: Some(vec!["2 teammates".into()]),
+        };
+
+        snapshot_footer("footer_queue_hint_with_active_team_pills", props);
+
+        let props = FooterProps {
             mode: FooterMode::ComposerEmpty,
             esc_backtrack_hint: false,
             use_shift_enter_hint: false,
@@ -2053,10 +2103,14 @@ mod tests {
             status_line_enabled: false,
             key_hints: FooterKeyHints::default_bindings(),
             active_agent_label: None,
-            active_team_pills: Some(vec!["main @alice hide · Enter to view".into()]),
+            active_team_pills: Some(vec![
+                "1 teammate".into(),
+                " · ".dim(),
+                "Enter to view".dim(),
+            ]),
         };
 
-        snapshot_footer("footer_selected_team_roster", props);
+        snapshot_footer("footer_selected_team_status", props);
 
         let props = FooterProps {
             mode: FooterMode::ComposerEmpty,

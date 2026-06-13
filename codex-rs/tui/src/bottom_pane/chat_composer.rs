@@ -180,6 +180,7 @@ use super::footer::render_footer_from_props;
 use super::footer::render_footer_hint_items;
 use super::footer::render_footer_line;
 use super::footer::reset_mode_after_activity;
+use super::footer::shows_passive_footer_line;
 use super::footer::side_conversation_context_line;
 use super::footer::single_line_footer_layout;
 use super::footer::status_line_right_indicator_line;
@@ -370,6 +371,7 @@ pub(crate) struct ChatComposer {
     collaboration_modes_enabled: bool,
     teams_enabled: bool,
     config: ChatComposerConfig,
+    literal_submission_mode: bool,
     connectors_enabled: bool,
     plugins_command_enabled: bool,
     service_tier_commands_enabled: bool,
@@ -542,6 +544,7 @@ impl ChatComposer {
             collaboration_modes_enabled: false,
             teams_enabled: false,
             config,
+            literal_submission_mode: false,
             connectors_enabled: false,
             plugins_command_enabled: false,
             service_tier_commands_enabled: false,
@@ -731,11 +734,19 @@ impl ChatComposer {
     }
 
     fn slash_commands_enabled(&self) -> bool {
-        self.config.slash_commands_enabled
+        self.config.slash_commands_enabled && !self.literal_submission_mode
     }
 
     fn image_paste_enabled(&self) -> bool {
         self.config.image_paste_enabled
+    }
+
+    pub(crate) fn set_literal_submission_mode(&mut self, enabled: bool) {
+        if self.literal_submission_mode == enabled {
+            return;
+        }
+        self.literal_submission_mode = enabled;
+        self.sync_popups();
     }
     #[cfg(target_os = "windows")]
     pub fn set_windows_degraded_sandbox_active(&mut self, enabled: bool) {
@@ -1385,7 +1396,9 @@ impl ChatComposer {
         text: String,
         text_elements: Vec<TextElement>,
     ) -> (String, Vec<TextElement>) {
-        if let Some(stripped) = text.strip_prefix('!') {
+        if !self.literal_submission_mode
+            && let Some(stripped) = text.strip_prefix('!')
+        {
             self.draft.is_bash_mode = true;
             (
                 stripped.to_string(),
@@ -3362,6 +3375,9 @@ impl ChatComposer {
     }
 
     fn sync_bash_mode_from_text(&mut self) {
+        if self.literal_submission_mode {
+            return;
+        }
         if !self.draft.is_bash_mode && self.draft.textarea.text().starts_with('!') {
             self.draft.textarea.replace_range(0..1, "");
             self.draft.is_bash_mode = true;
@@ -4295,6 +4311,11 @@ impl ChatComposer {
                             show_queue_hint,
                         )
                     };
+                    let non_passive_team_pills_visible = !shows_passive_footer_line(&footer_props)
+                        && footer_props
+                            .active_team_pills
+                            .as_ref()
+                            .is_some_and(|pills| !pills.is_empty());
                     let right_line =
                         if let Some(label) = self.footer.side_conversation_context_label.as_ref() {
                             Some(side_conversation_context_line(label))
@@ -4309,6 +4330,8 @@ impl ChatComposer {
                             } else {
                                 compact
                             }
+                        } else if non_passive_team_pills_visible {
+                            None
                         } else {
                             Some(self.right_footer_line_with_context())
                         };

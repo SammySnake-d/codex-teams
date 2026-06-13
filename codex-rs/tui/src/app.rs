@@ -1065,8 +1065,10 @@ See the Codex keymap documentation for supported actions and examples."
             teams_dialog: None,
         };
         if let Some((team, agent_name)) = crate::legacy_core::teammate_identity_parts() {
+            let teams_root =
+                crate::legacy_core::team_store::root_from_env_or(app.config.codex_home.as_path());
             app.teammate_inbox_poller = Some(lead_inbox_poller::start_teammate_inbox_poller(
-                app.config.codex_home.to_path_buf(),
+                teams_root,
                 team,
                 agent_name,
                 app.app_event_tx.clone(),
@@ -1420,7 +1422,9 @@ See the Codex keymap documentation for supported actions and examples."
         let Some(dialog) = self.teams_dialog.as_mut() else {
             return;
         };
-        dialog.refresh(&self.config.codex_home);
+        let teams_root =
+            crate::legacy_core::team_store::root_from_env_or(self.config.codex_home.as_path());
+        dialog.refresh(&teams_root);
         if let Some(action) = dialog.handle_key(key_event) {
             self.app_event_tx.send(AppEvent::TeamsDialogAction(action));
         }

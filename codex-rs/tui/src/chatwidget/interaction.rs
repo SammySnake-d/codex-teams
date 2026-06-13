@@ -357,6 +357,10 @@ impl ChatWidget {
         }
         let modal_or_popup_active = !self.bottom_pane.no_modal_or_popup_active();
         if self.bottom_pane.on_ctrl_c() == CancellationEvent::Handled {
+            if self.queued_teams_mailbox_edit_pending && self.bottom_pane.composer_text().is_empty()
+            {
+                self.clear_queued_teams_mailbox_edit_pending();
+            }
             if DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
                 if modal_or_popup_active {
                     self.quit_shortcut_expires_at = None;

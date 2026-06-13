@@ -5,6 +5,9 @@
 
 use std::collections::VecDeque;
 
+use crate::bottom_pane::QueuedInputAction;
+use crate::bottom_pane::QueuedInputPreviewItem;
+
 use super::PendingSteer;
 use super::QueuedUserMessage;
 use super::UserMessage;
@@ -13,7 +16,7 @@ use super::user_message_preview_text;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct PendingInputPreview {
-    pub(super) queued_messages: Vec<String>,
+    pub(super) queued_messages: Vec<QueuedInputPreviewItem>,
     pub(super) pending_steers: Vec<String>,
     pub(super) rejected_steers: Vec<String>,
 }
@@ -65,10 +68,15 @@ impl InputQueueState {
             .iter()
             .enumerate()
             .map(|(idx, message)| {
-                user_message_preview_text(
+                let preview = user_message_preview_text(
                     message,
                     self.queued_user_message_history_records.get(idx),
-                )
+                );
+                if message.action == QueuedInputAction::TeamsMailbox {
+                    QueuedInputPreviewItem::teams_mailbox(preview)
+                } else {
+                    QueuedInputPreviewItem::user(preview)
+                }
             })
             .collect();
         let pending_steers = self
@@ -100,6 +108,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::chatwidget::UserMessageHistoryOverride;
 
     #[test]
     fn preview_keeps_queue_categories_separate() {
@@ -122,10 +131,34 @@ mod tests {
         assert_eq!(
             state.preview(),
             PendingInputPreview {
-                queued_messages: vec!["queued".to_string()],
+                queued_messages: vec![QueuedInputPreviewItem::user("queued".to_string())],
                 pending_steers: vec!["pending".to_string()],
                 rejected_steers: vec!["rejected".to_string()],
             }
+        );
+    }
+
+    #[test]
+    fn preview_labels_queued_teams_mailbox_inputs() {
+        let mut state = InputQueueState::default();
+        state.queued_user_messages.push_back(QueuedUserMessage::new(
+            UserMessage::from("<teammate-message teammate_id=\"alice\">done</teammate-message>"),
+            QueuedInputAction::TeamsMailbox,
+        ));
+        state
+            .queued_user_message_history_records
+            .push_back(UserMessageHistoryRecord::Override(
+                UserMessageHistoryOverride {
+                    text: "@alice: done".to_string(),
+                    text_elements: Vec::new(),
+                },
+            ));
+
+        assert_eq!(
+            state.preview().queued_messages,
+            vec![QueuedInputPreviewItem::teams_mailbox(
+                "@alice: done".to_string()
+            )]
         );
     }
 

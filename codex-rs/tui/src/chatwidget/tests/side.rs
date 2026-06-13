@@ -337,6 +337,51 @@ Please inspect task 1.";
 }
 
 #[test]
+fn teammate_inbox_history_strips_legacy_codex_addendum_context() {
+    let legacy = "\
+# Codex Teams Teammate Communication
+
+Plain assistant text is not visible to other teammates or the lead.
+
+The user interacts primarily with the team lead. Your work is coordinated through Teams tasks and teammate messaging.
+
+Please inspect task 1.";
+
+    let rendered = teammate_inbox_display_text(legacy);
+    assert_eq!(rendered, "Please inspect task 1.");
+}
+
+#[test]
+fn teammate_inbox_history_strips_current_claude_addendum_context() {
+    let legacy = "\
+# Agent Teammate Communication
+
+IMPORTANT: You are running as an agent in a team. To communicate with anyone on your team:
+- Use the SendMessage tool with `to: \"<name>\"` to send messages to specific teammates
+- Use the SendMessage tool with `to: \"*\"` sparingly for team-wide broadcasts
+
+Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool.
+
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.
+
+Please inspect task 1.";
+
+    let rendered = teammate_inbox_display_text(legacy);
+    assert_eq!(rendered, "Please inspect task 1.");
+}
+
+#[test]
+fn teammate_inbox_history_preserves_quoted_claude_addendum_marker() {
+    let text = "\
+Please verify this exact sentence remains visible:
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.
+Then continue.";
+
+    let rendered = teammate_inbox_display_text(text);
+    assert_eq!(rendered, text);
+}
+
+#[test]
 fn teammate_inbox_history_strips_xml_wrapped_legacy_visible_team_context() {
     let legacy = "\
 <teammate-message teammate_id=\"team-lead\">
@@ -354,6 +399,27 @@ Please inspect task 1.
     assert!(!rendered.contains("Codex Teams context:"));
     assert!(!rendered.contains("member_id:"));
     assert!(!rendered.contains("</teammate-message>"));
+}
+
+#[test]
+fn teammate_inbox_history_strips_xml_wrapped_current_claude_addendum_context() {
+    let legacy = "\
+<teammate-message teammate_id=\"team-lead\">
+# Agent Teammate Communication
+
+IMPORTANT: You are running as an agent in a team. To communicate with anyone on your team:
+- Use the SendMessage tool with `to: \"<name>\"` to send messages to specific teammates
+- Use the SendMessage tool with `to: \"*\"` sparingly for team-wide broadcasts
+
+Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool.
+
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.
+
+Please inspect task 1.
+</teammate-message>";
+
+    let rendered = teammate_inbox_display_text(legacy);
+    assert_eq!(rendered, "Please inspect task 1.");
 }
 
 #[tokio::test]
@@ -413,6 +479,64 @@ Please inspect task 1.
             );
         }
         other => panic!("expected Op::UserTurn for legacy teammate inbox input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn teammate_inbox_injection_strips_current_claude_addendum_from_model_turn() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let legacy = "\
+# Agent Teammate Communication
+
+IMPORTANT: You are running as an agent in a team. To communicate with anyone on your team:
+- Use the SendMessage tool with `to: \"<name>\"` to send messages to specific teammates
+- Use the SendMessage tool with `to: \"*\"` sparingly for team-wide broadcasts
+
+Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool.
+
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.
+
+Please inspect task 1.";
+
+    chat.inject_teammate_inbox_message(legacy.to_string());
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "Please inspect task 1.".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected Op::UserTurn for Claude teammate inbox input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn teammate_inbox_injection_preserves_quoted_claude_addendum_marker() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let text = "\
+Please verify this exact sentence remains visible:
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.
+Then continue.";
+
+    chat.inject_teammate_inbox_message(text.to_string());
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: text.to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected Op::UserTurn for teammate inbox input, got {other:?}"),
     }
 }
 
@@ -540,6 +664,58 @@ async fn queued_teammate_inbox_injection_does_not_run_shell_commands() {
                 "expected queued Op::UserTurn for teammate inbox shell-like input, got {other:?}"
             )
         }
+    }
+}
+
+#[tokio::test]
+async fn edited_queued_teammate_inbox_injection_preserves_teams_mailbox_source() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    handle_turn_started(&mut chat, "turn-1");
+
+    chat.inject_teammate_inbox_message("!echo hello".to_string());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+
+    assert_eq!(chat.bottom_pane.composer_text(), "!echo hello");
+    assert!(chat.input_queue.queued_user_messages.is_empty());
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.bottom_pane
+        .set_composer_text("!echo edited".to_string(), Vec::new(), Vec::new());
+    assert_eq!(chat.bottom_pane.composer_text(), "!echo edited");
+    chat.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    assert_eq!(
+        chat.input_queue
+            .queued_user_messages
+            .front()
+            .unwrap()
+            .action,
+        QueuedInputAction::TeamsMailbox
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    handle_turn_completed(&mut chat, "turn-1", None);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            items,
+            user_input_source,
+            ..
+        } => {
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "!echo edited".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+            assert_eq!(
+                user_input_source,
+                crate::app_command::UserInputSource::TeamsMailbox
+            );
+        }
+        other => panic!("expected edited queued teammate inbox turn, got {other:?}"),
     }
 }
 

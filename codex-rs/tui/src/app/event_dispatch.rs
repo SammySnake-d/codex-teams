@@ -84,9 +84,12 @@ impl App {
                 self.sync_team_roster_from_config(&team);
                 self.sync_active_agent_label();
                 if self.lead_inbox_poller.is_none() {
+                    let teams_root = crate::legacy_core::team_store::root_from_env_or(
+                        self.config.codex_home.as_path(),
+                    );
                     self.lead_inbox_poller =
                         Some(super::lead_inbox_poller::start_lead_inbox_poller(
-                            self.config.codex_home.to_path_buf(),
+                            teams_root,
                             team,
                             crate::legacy_core::team_store::TEAM_LEAD_NAME.to_string(),
                             self.app_event_tx.clone(),
@@ -110,7 +113,10 @@ impl App {
                     .or_else(|| self.team_roster_navigation.active_team_name());
                 if let Some(team) = active_team {
                     let mut dialog = crate::chatwidget::teams_dialog::TeamsDialog::open(team);
-                    dialog.refresh(&self.config.codex_home);
+                    let teams_root = crate::legacy_core::team_store::root_from_env_or(
+                        self.config.codex_home.as_path(),
+                    );
+                    dialog.refresh(&teams_root);
                     self.teams_dialog = Some(Box::new(dialog));
                     tui.frame_requester().schedule_frame();
                 } else {
@@ -139,14 +145,20 @@ impl App {
                         hide,
                     } => {
                         self.set_teammate_pane_hidden(&team, &pane_id, hide);
+                        let teams_root = crate::legacy_core::team_store::root_from_env_or(
+                            self.config.codex_home.as_path(),
+                        );
                         if let Some(dialog) = self.teams_dialog.as_mut() {
-                            dialog.refresh(&self.config.codex_home);
+                            dialog.refresh(&teams_root);
                         }
                     }
                     TeamsDialogAction::ToggleAllVisibility { team, hide } => {
                         self.set_all_teammate_panes_hidden(&team, hide);
+                        let teams_root = crate::legacy_core::team_store::root_from_env_or(
+                            self.config.codex_home.as_path(),
+                        );
                         if let Some(dialog) = self.teams_dialog.as_mut() {
-                            dialog.refresh(&self.config.codex_home);
+                            dialog.refresh(&teams_root);
                         }
                     }
                     TeamsDialogAction::KillTeammate { team, teammate } => {
@@ -158,14 +170,20 @@ impl App {
                         );
                         self.sync_team_roster_from_config(&team);
                         self.sync_active_agent_label();
+                        let teams_root = crate::legacy_core::team_store::root_from_env_or(
+                            self.config.codex_home.as_path(),
+                        );
                         if let Some(dialog) = self.teams_dialog.as_mut() {
-                            dialog.refresh(&self.config.codex_home);
+                            dialog.refresh(&teams_root);
                         }
                     }
                     TeamsDialogAction::ShutdownTeammate { team, name } => {
                         self.send_teammate_shutdown_request(&team, &name);
+                        let teams_root = crate::legacy_core::team_store::root_from_env_or(
+                            self.config.codex_home.as_path(),
+                        );
                         if let Some(dialog) = self.teams_dialog.as_mut() {
-                            dialog.refresh(&self.config.codex_home);
+                            dialog.refresh(&teams_root);
                         }
                     }
                     TeamsDialogAction::PruneIdle { team, teammates } => {
@@ -179,8 +197,11 @@ impl App {
                         }
                         self.sync_team_roster_from_config(&team);
                         self.sync_active_agent_label();
+                        let teams_root = crate::legacy_core::team_store::root_from_env_or(
+                            self.config.codex_home.as_path(),
+                        );
                         if let Some(dialog) = self.teams_dialog.as_mut() {
-                            dialog.refresh(&self.config.codex_home);
+                            dialog.refresh(&teams_root);
                         }
                     }
                     TeamsDialogAction::Close => {
@@ -2381,30 +2402,31 @@ impl App {
         }
     }
 
-    fn sync_team_roster_from_config(&mut self, team: &str) {
-        let members =
-            match crate::legacy_core::team_store::read_config(&self.config.codex_home, team) {
-                Ok(Some(config)) => config
-                    .members
-                    .into_iter()
-                    .filter_map(|member| {
-                        let member_id = member.member_id?;
-                        let tmux_pane_id = member.tmux_pane_id.trim().to_string();
-                        let thread_id = ThreadId::from_string(&member_id).ok()?;
-                        TeamRosterMember::new(TeamRosterMemberInput {
-                            thread_id,
-                            name: member.name,
-                            tmux_pane_id: Some(tmux_pane_id),
-                            backend_type: member.backend_type,
-                            color: member.color,
-                            mode: member.mode,
-                            is_active: member.is_active,
-                            prompt: member.prompt,
-                        })
+    pub(super) fn sync_team_roster_from_config(&mut self, team: &str) {
+        let teams_root =
+            crate::legacy_core::team_store::root_from_env_or(self.config.codex_home.as_path());
+        let members = match crate::legacy_core::team_store::read_config(&teams_root, team) {
+            Ok(Some(config)) => config
+                .members
+                .into_iter()
+                .filter_map(|member| {
+                    let member_id = member.member_id?;
+                    let tmux_pane_id = member.tmux_pane_id.trim().to_string();
+                    let thread_id = ThreadId::from_string(&member_id).ok()?;
+                    TeamRosterMember::new(TeamRosterMemberInput {
+                        thread_id,
+                        name: member.name,
+                        tmux_pane_id: Some(tmux_pane_id),
+                        backend_type: member.backend_type,
+                        color: member.color,
+                        mode: member.mode,
+                        is_active: member.is_active,
+                        prompt: member.prompt,
                     })
-                    .collect(),
-                Ok(None) | Err(_) => Vec::new(),
-            };
+                })
+                .collect(),
+            Ok(None) | Err(_) => Vec::new(),
+        };
         self.team_roster_navigation.replace_members(members);
     }
 }

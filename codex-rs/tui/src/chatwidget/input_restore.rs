@@ -94,11 +94,15 @@ impl ChatWidget {
 
     pub(super) fn pop_latest_queued_user_message(&mut self) -> Option<UserMessage> {
         if let Some(user_message) = self.input_queue.queued_user_messages.pop_back() {
+            let action = user_message.action;
             let history_record = self
                 .input_queue
                 .queued_user_message_history_records
                 .pop_back()
                 .unwrap_or(UserMessageHistoryRecord::UserMessageText);
+            self.queued_teams_mailbox_edit_pending = action == QueuedInputAction::TeamsMailbox;
+            self.bottom_pane
+                .set_literal_submission_mode(self.queued_teams_mailbox_edit_pending);
             Some(user_message_for_restore(
                 user_message.into_user_message(),
                 &history_record,
@@ -110,6 +114,7 @@ impl ChatWidget {
                 .rejected_steer_history_records
                 .pop_back()
                 .unwrap_or(UserMessageHistoryRecord::UserMessageText);
+            self.clear_queued_teams_mailbox_edit_pending();
             Some(user_message_for_restore(user_message, &history_record))
         }
     }
@@ -328,6 +333,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn restore_thread_input_state(&mut self, input_state: Option<ThreadInputState>) {
+        self.clear_queued_teams_mailbox_edit_pending();
         let restored_task_running = input_state.as_ref().is_some_and(|state| state.task_running);
         if let Some(input_state) = input_state {
             self.current_collaboration_mode = input_state.current_collaboration_mode;

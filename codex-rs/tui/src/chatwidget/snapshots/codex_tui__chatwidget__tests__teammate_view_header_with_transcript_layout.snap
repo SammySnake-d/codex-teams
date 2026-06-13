@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/team_ui.rs
+expression: normalized_backend_snapshot(terminal.backend())
+---
+"Viewing @alice · esc to return                                                  "
+"Inspect issue #15 and report the proof path.                                    "
+"                                                                                "
+"                                                                                "
+"› Ask Codex to do anything                                                      "
+"                                                                                "
+"  gpt-5.5 default · /tmp/project                                                "

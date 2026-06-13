@@ -1488,13 +1488,25 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             let socket_path = cmd.socket_path;
             codex_stdio_to_uds::run(socket_path.as_path()).await?;
         }
-        Some(Subcommand::Teammate(teammate_cli)) => {
+        Some(Subcommand::Teammate(mut teammate_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
                 root_remote_auth_token_env.as_deref(),
                 "teammate",
             )?;
-            crate::teammate::run_main(teammate_cli, arg0_paths.clone()).await?;
+            prepend_config_flags(
+                &mut teammate_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            let loader_overrides =
+                loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
+            crate::teammate::run_main(
+                teammate_cli,
+                interactive,
+                arg0_paths.clone(),
+                loader_overrides,
+            )
+            .await?;
         }
         Some(Subcommand::ExecServer(cmd)) => {
             reject_remote_mode_for_subcommand(
@@ -1584,6 +1596,7 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Unarchive(_)
         | Subcommand::Fork(_)
         | Subcommand::Mcp(_)
+        | Subcommand::Teammate(_)
         | Subcommand::Sandbox(_)
         | Subcommand::Debug(DebugCommand {
             subcommand: DebugSubcommand::PromptInput(_),
@@ -2567,6 +2580,23 @@ mod tests {
                 .as_deref(),
             Some("work")
         );
+        assert_eq!(
+            profile_v2_for_args(&[
+                "codex",
+                "--profile",
+                "work",
+                "teammate",
+                "--agent-id",
+                "alice@rocket",
+                "--agent-name",
+                "alice",
+                "--team-name",
+                "rocket",
+            ])
+            .expect("teammate supports config profile")
+            .as_deref(),
+            Some("work")
+        );
     }
 
     #[test]
@@ -2725,6 +2755,41 @@ mod tests {
             panic!("expected teammate subcommand");
         };
         assert!(teammate.bypass_hook_trust);
+    }
+
+    #[test]
+    fn teammate_inherits_root_config_overrides() {
+        let MultitoolCli {
+            config_overrides: mut root_config_overrides,
+            feature_toggles,
+            subcommand,
+            ..
+        } = MultitoolCli::try_parse_from([
+            "codex",
+            "--enable",
+            "teams",
+            "teammate",
+            "--agent-id",
+            "alice@rocket",
+            "--agent-name",
+            "alice",
+            "--team-name",
+            "rocket",
+        ])
+        .expect("parse");
+        root_config_overrides
+            .raw_overrides
+            .extend(feature_toggles.to_overrides().expect("valid features"));
+
+        let Some(Subcommand::Teammate(mut teammate)) = subcommand else {
+            panic!("expected teammate subcommand");
+        };
+        prepend_config_flags(&mut teammate.config_overrides, root_config_overrides);
+
+        assert_eq!(
+            teammate.config_overrides.raw_overrides,
+            vec!["features.teams=true".to_string()]
+        );
     }
 
     fn help_from_args(args: &[&str]) -> String {

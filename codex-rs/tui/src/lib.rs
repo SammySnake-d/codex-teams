@@ -45,6 +45,7 @@ use codex_config::LoaderOverrides;
 use codex_config::format_config_error_with_source;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
+use codex_features::Feature;
 use codex_login::AuthConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
@@ -817,6 +818,29 @@ fn should_load_configured_environments(
     !loader_overrides.ignore_user_config && !app_server_target.uses_remote_workspace()
 }
 
+fn config_toml_enables_teams(config_toml: &codex_config::config_toml::ConfigToml) -> bool {
+    config_toml.features.as_ref().is_some_and(|features| {
+        features
+            .entries()
+            .get(Feature::Teams.key())
+            .copied()
+            .unwrap_or(false)
+    })
+}
+
+fn app_server_target_after_bootstrap_config(
+    app_server_target: AppServerTarget,
+    config_toml: &codex_config::config_toml::ConfigToml,
+) -> AppServerTarget {
+    if matches!(app_server_target, AppServerTarget::LocalDaemon { .. })
+        && config_toml_enables_teams(config_toml)
+    {
+        AppServerTarget::Embedded
+    } else {
+        app_server_target
+    }
+}
+
 fn latest_session_cwd_filter<'a>(
     uses_remote_workspace: bool,
     remote_cwd_override: Option<&'a Path>,
@@ -875,12 +899,21 @@ fn can_reuse_implicit_local_daemon(
     loader_overrides: &LoaderOverrides,
     strict_config: bool,
     has_non_replayable_launch_overrides: bool,
+    is_teammate_process: bool,
 ) -> bool {
     // A reused daemon cannot adopt this invocation's full launch config state.
+    if is_teammate_process {
+        return false;
+    }
+
     cli_kv_overrides.is_empty()
         && loader_overrides_are_default(loader_overrides)
         && !strict_config
         && !has_non_replayable_launch_overrides
+}
+
+fn is_teammate_process(cli: &Cli) -> bool {
+    cli.team_name.is_some() && cli.agent_name.is_some()
 }
 
 pub async fn run_main(
@@ -940,18 +973,20 @@ pub async fn run_main(
         launch_loader_overrides.user_config_path = Some(user_config_path);
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
+    let is_teammate_process = is_teammate_process(&cli);
     let reuse_implicit_local_daemon = can_reuse_implicit_local_daemon(
         &cli_kv_overrides,
         &launch_loader_overrides,
         strict_config,
         cli.bypass_hook_trust,
+        is_teammate_process,
     );
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
         maybe_probe_default_daemon_socket(&codex_home).await
     } else {
         None
     };
-    let app_server_target = app_server_target_for_launch(
+    let mut app_server_target = app_server_target_for_launch(
         explicit_remote_endpoint,
         default_daemon,
         reuse_implicit_local_daemon,
@@ -992,6 +1027,8 @@ pub async fn run_main(
         CloudConfigBundleLoader::default(),
     )
     .await;
+    app_server_target =
+        app_server_target_after_bootstrap_config(app_server_target, &bootstrap_config_toml);
 
     let chatgpt_base_url = bootstrap_config_toml
         .chatgpt_base_url
@@ -999,7 +1036,7 @@ pub async fn run_main(
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
-        /*enable_codex_api_key_env*/ false,
+        is_teammate_process,
         bootstrap_config_toml
             .cli_auth_credentials_store
             .unwrap_or_default(),
@@ -1372,7 +1409,7 @@ async fn run_ratatui_app(
     // Initialize high-fidelity session event logging if enabled.
     session_log::maybe_init(&initial_config);
 
-    let is_teammate_process = cli.team_name.is_some() && cli.agent_name.is_some();
+    let is_teammate_process = is_teammate_process(&cli);
     let app_server_session = match start_app_server(
         &app_server_target,
         arg0_paths.clone(),
@@ -1416,14 +1453,15 @@ async fn run_ratatui_app(
         !is_teammate_process && !uses_remote_workspace && should_show_trust_screen(&initial_config);
     #[cfg(target_os = "windows")]
     let mut trust_decision_was_made = false;
-    let login_status = if initial_config.model_provider.requires_openai_auth {
-        let Some(app_server) = app_server.as_mut() else {
-            unreachable!("app server should exist when auth is required");
+    let login_status =
+        if should_check_login_status_for_startup(is_teammate_process, &initial_config) {
+            let Some(app_server) = app_server.as_mut() else {
+                unreachable!("app server should exist when auth is required");
+            };
+            get_login_status(app_server, &initial_config).await?
+        } else {
+            LoginStatus::NotAuthenticated
         };
-        get_login_status(app_server, &initial_config).await?
-    } else {
-        LoginStatus::NotAuthenticated
-    };
     let should_show_onboarding = should_show_onboarding_for_startup(
         is_teammate_process,
         login_status,
@@ -2036,6 +2074,10 @@ fn should_show_onboarding_for_startup(
     should_show_onboarding(login_status, config, show_trust_screen)
 }
 
+fn should_check_login_status_for_startup(is_teammate_process: bool, config: &Config) -> bool {
+    !is_teammate_process && config.model_provider.requires_openai_auth
+}
+
 fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
     // Only show the login screen for providers that actually require OpenAI auth
     // (OpenAI or equivalents). For OSS/other providers, skip login entirely.
@@ -2051,6 +2093,7 @@ mod tests {
     use super::*;
     use crate::legacy_core::config::ConfigBuilder;
     use crate::legacy_core::config::ConfigOverrides;
+    use clap::Parser;
     use codex_app_server_protocol::AskForApproval;
     use codex_app_server_protocol::ClientRequest;
     use codex_app_server_protocol::RequestId;
@@ -2292,6 +2335,45 @@ mod tests {
     }
 
     #[test]
+    fn teams_config_uses_embedded_app_server_instead_of_implicit_daemon() -> color_eyre::Result<()>
+    {
+        let socket_path = AbsolutePathBuf::relative_to_current_dir("codex.sock")?;
+        let local_daemon = AppServerTarget::LocalDaemon {
+            endpoint: RemoteAppServerEndpoint::UnixSocket {
+                socket_path: socket_path.clone(),
+            },
+        };
+        let default_config = codex_config::config_toml::ConfigToml::default();
+
+        assert!(!config_toml_enables_teams(&default_config));
+        assert_eq!(
+            app_server_target_after_bootstrap_config(local_daemon.clone(), &default_config),
+            local_daemon
+        );
+
+        let teams_config = codex_config::config_toml::ConfigToml {
+            features: Some(codex_features::FeaturesToml::from(
+                std::collections::BTreeMap::from([(Feature::Teams.key().to_string(), true)]),
+            )),
+            ..Default::default()
+        };
+        assert!(config_toml_enables_teams(&teams_config));
+        assert_eq!(
+            app_server_target_after_bootstrap_config(local_daemon, &teams_config),
+            AppServerTarget::Embedded
+        );
+
+        let explicit_remote = AppServerTarget::Remote {
+            endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+        };
+        assert_eq!(
+            app_server_target_after_bootstrap_config(explicit_remote.clone(), &teams_config),
+            explicit_remote
+        );
+        Ok(())
+    }
+
+    #[test]
     fn can_reuse_implicit_local_daemon_requires_default_launch_config() -> color_eyre::Result<()> {
         let mut loader_overrides = LoaderOverrides::default();
         let cli_kv_overrides = vec![("web_search".to_string(), toml::Value::String("live".into()))];
@@ -2301,12 +2383,14 @@ mod tests {
             &LoaderOverrides::default(),
             /*strict_config*/ false,
             /*has_non_replayable_launch_overrides*/ false,
+            /*is_teammate_process*/ false,
         ));
         assert!(!can_reuse_implicit_local_daemon(
             &cli_kv_overrides,
             &LoaderOverrides::default(),
             /*strict_config*/ false,
             /*has_non_replayable_launch_overrides*/ false,
+            /*is_teammate_process*/ false,
         ));
         loader_overrides.ignore_user_config = true;
         assert!(!can_reuse_implicit_local_daemon(
@@ -2314,20 +2398,45 @@ mod tests {
             &loader_overrides,
             /*strict_config*/ false,
             /*has_non_replayable_launch_overrides*/ false,
+            /*is_teammate_process*/ false,
         ));
         assert!(!can_reuse_implicit_local_daemon(
             &[],
             &LoaderOverrides::default(),
             /*strict_config*/ true,
             /*has_non_replayable_launch_overrides*/ false,
+            /*is_teammate_process*/ false,
         ));
         assert!(!can_reuse_implicit_local_daemon(
             &[],
             &LoaderOverrides::default(),
             /*strict_config*/ false,
             /*has_non_replayable_launch_overrides*/ true,
+            /*is_teammate_process*/ false,
+        ));
+        assert!(!can_reuse_implicit_local_daemon(
+            &[],
+            &LoaderOverrides::default(),
+            /*strict_config*/ false,
+            /*has_non_replayable_launch_overrides*/ false,
+            /*is_teammate_process*/ true,
         ));
         Ok(())
+    }
+
+    #[test]
+    fn teammate_startup_identity_requires_team_and_agent_name() {
+        let mut cli = Cli::parse_from(["codex"]);
+        assert!(!is_teammate_process(&cli));
+
+        cli.team_name = Some("rocket".to_string());
+        assert!(!is_teammate_process(&cli));
+
+        cli.agent_name = Some("alice".to_string());
+        assert!(is_teammate_process(&cli));
+
+        cli.team_name = None;
+        assert!(!is_teammate_process(&cli));
     }
 
     #[test]
@@ -2777,6 +2886,12 @@ mod tests {
             &config,
             /*show_trust_screen*/ true,
         ));
+        assert!(!should_check_login_status_for_startup(
+            /*is_teammate_process*/ true, &config,
+        ));
+        assert!(should_check_login_status_for_startup(
+            /*is_teammate_process*/ false, &config,
+        ));
         Ok(())
     }
 
@@ -2917,7 +3032,7 @@ mod tests {
             Arc::new(EnvironmentManager::default_for_tests()),
             /*enable_codex_api_key_env*/ true,
             move |args| {
-                let saw_toggle_for_start = saw_toggle_for_start.clone();
+                let saw_toggle_for_start = saw_toggle_for_start;
                 async move {
                     saw_toggle_for_start.store(
                         args.enable_codex_api_key_env,

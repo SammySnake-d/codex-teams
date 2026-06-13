@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/team_ui.rs
+expression: normalized_backend_snapshot(terminal.backend())
+---
+"› ├─ team-lead · Enter to view                                                  "
+"  ├─ @alice                                                                     "
+"  └─ hide                                                                       "
+"                                                                                "
+"                                                                                "
+"› Ask Codex to do anything                                                      "
+"                                                                                "
+"  gpt-5.5 default · /tmp/project                                                "

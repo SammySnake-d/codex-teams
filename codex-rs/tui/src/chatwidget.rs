@@ -574,6 +574,7 @@ pub(crate) struct ChatWidget {
     team_footer_label: Option<String>,
     team_footer_spans: Option<Vec<ratatui::text::Span<'static>>>,
     team_teammate_view_header: Option<TeamTeammateViewHeader>,
+    team_roster_tree_lines: Option<Vec<ratatui::text::Line<'static>>>,
     team_ui: TeamUiState,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
@@ -654,6 +655,7 @@ pub(crate) struct ChatWidget {
     suppress_initial_user_message_submit: bool,
     input_queue: InputQueueState,
     cancel_edit: CancelEditState,
+    queued_teams_mailbox_edit_pending: bool,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
     chat_keymap: ChatKeymap,
     /// Keybinding to show for popping the most-recently queued message back
@@ -920,7 +922,10 @@ fn teammate_inbox_display_text(text: &str) -> String {
 }
 
 fn sanitize_teammate_inbox_text_for_display(text: &str) -> String {
+    const CONTEXT_PREFIX: &str = "# Agent Teammate Communication";
     const CONTEXT_MARKER: &str = "The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.";
+    const CODEX_CONTEXT_PREFIX: &str = "# Codex Teams Teammate Communication";
+    const CODEX_CONTEXT_MARKER: &str = "The user interacts primarily with the team lead. Your work is coordinated through Teams tasks and teammate messaging.";
     const MESSAGE_PREVIEW_MARKER: &str = "Message preview:\n";
     const LEGACY_CONTEXT_PREFIX: &str = "Codex Teams context:";
     const LEGACY_CONTEXT_END: &str =
@@ -947,8 +952,28 @@ fn sanitize_teammate_inbox_text_for_display(text: &str) -> String {
     {
         return sanitize_extracted_task(task);
     }
-    if let Some((_, task)) = text.split_once(CONTEXT_MARKER) {
-        return sanitize_extracted_task(task);
+    let strip_addendum = |candidate: &str| -> Option<String> {
+        let trimmed = candidate.trim_start();
+        for (prefix, marker) in [
+            (CONTEXT_PREFIX, CONTEXT_MARKER),
+            (CODEX_CONTEXT_PREFIX, CODEX_CONTEXT_MARKER),
+        ] {
+            if trimmed.starts_with(prefix)
+                && let Some((_, task)) = trimmed.split_once(marker)
+            {
+                return Some(sanitize_extracted_task(task));
+            }
+        }
+        None
+    };
+    if let Some(task) = strip_addendum(text) {
+        return task;
+    }
+    if trimmed.starts_with("<teammate-message")
+        && let Some((_, after_tag)) = trimmed.split_once('>')
+        && let Some(task) = strip_addendum(after_tag)
+    {
+        return task;
     }
     if text.starts_with("Codex Teams message:")
         && let Some((_, preview)) = text.split_once(MESSAGE_PREVIEW_MARKER)

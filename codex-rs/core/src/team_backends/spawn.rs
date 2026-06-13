@@ -12,6 +12,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::team_store;
+
 use super::tmux::AgentColor;
 
 /// Round-robin teammate palette. Order matches Claude `AGENT_COLORS`
@@ -159,18 +161,73 @@ const FORWARDED_ENV_VARS: [&str; 14] = [
     codex_login::OPENAI_API_KEY_ENV_VAR,
 ];
 
+fn select_teammate_config_home(
+    teams_root: &Path,
+    explicit_codex_home: bool,
+    default_codex_home: Option<&Path>,
+) -> PathBuf {
+    if explicit_codex_home || teams_root.join(codex_config::CONFIG_TOML_FILE).exists() {
+        return teams_root.to_path_buf();
+    }
+
+    let Some(default_codex_home) = default_codex_home else {
+        return teams_root.to_path_buf();
+    };
+    if default_codex_home != teams_root
+        && default_codex_home
+            .join(codex_config::CONFIG_TOML_FILE)
+            .exists()
+    {
+        default_codex_home.to_path_buf()
+    } else {
+        teams_root.to_path_buf()
+    }
+}
+
+fn teammate_config_home(teams_root: &Path) -> PathBuf {
+    let default_codex_home = codex_utils_home_dir::find_codex_home()
+        .ok()
+        .map(|home| home.to_path_buf());
+    select_teammate_config_home(
+        teams_root,
+        std::env::var_os("CODEX_HOME").is_some(),
+        default_codex_home.as_deref(),
+    )
+}
+
 /// Claude `buildInheritedEnvVars` analog: mark teammate mode, pin the same
-/// `$CODEX_HOME` (so the teammate reads the same team store + config), and
-/// forward proxy / cert / auth vars that are set and non-empty.
+/// Teams store root, resolve the config home, and forward proxy / cert / auth
+/// vars that are set and non-empty.
 pub(crate) fn build_inherited_env_vars(
-    codex_home: &Path,
+    teams_root: &Path,
+    provider_env_keys: &[&str],
+) -> Vec<(String, String)> {
+    let config_home = teammate_config_home(teams_root);
+    build_inherited_env_vars_with_config_home(teams_root, &config_home, provider_env_keys)
+}
+
+pub(crate) fn build_inherited_env_vars_for_config_home(
+    teams_root: &Path,
+    config_home: &Path,
+    provider_env_keys: &[&str],
+) -> Vec<(String, String)> {
+    build_inherited_env_vars_with_config_home(teams_root, config_home, provider_env_keys)
+}
+
+fn build_inherited_env_vars_with_config_home(
+    teams_root: &Path,
+    config_home: &Path,
     provider_env_keys: &[&str],
 ) -> Vec<(String, String)> {
     let mut env = vec![
         ("CODEX_TEAMMATE".to_string(), "1".to_string()),
         (
+            team_store::TEAM_STORE_ROOT_ENV_VAR.to_string(),
+            teams_root.to_string_lossy().into_owned(),
+        ),
+        (
             "CODEX_HOME".to_string(),
-            codex_home.to_string_lossy().into_owned(),
+            config_home.to_string_lossy().into_owned(),
         ),
     ];
     for key in FORWARDED_ENV_VARS
@@ -218,19 +275,88 @@ mod tests {
 
     #[test]
     fn env_marks_teammate_and_pins_codex_home() {
-        let env = build_inherited_env_vars(Path::new("/tmp/codex-home"), &[]);
+        let codex_home = tempfile::tempdir().expect("temp codex home");
+        std::fs::write(codex_home.path().join(codex_config::CONFIG_TOML_FILE), "")
+            .expect("write config");
+
+        let env = build_inherited_env_vars(codex_home.path(), &[]);
+        let expected_home = codex_home.path().to_string_lossy().into_owned();
+
         assert!(env.contains(&("CODEX_TEAMMATE".to_string(), "1".to_string())));
         assert!(
             env.iter()
-                .any(|(k, v)| k == "CODEX_HOME" && v == "/tmp/codex-home")
+                .any(|(k, v)| k == team_store::TEAM_STORE_ROOT_ENV_VAR && v == &expected_home)
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "CODEX_HOME" && v == &expected_home)
         );
     }
 
     #[test]
+    fn config_home_falls_back_to_default_when_runtime_home_has_no_config() {
+        let runtime_home = tempfile::tempdir().expect("runtime home");
+        let default_home = tempfile::tempdir().expect("default home");
+        std::fs::write(
+            default_home.path().join(codex_config::CONFIG_TOML_FILE),
+            "model_provider = \"custom\"",
+        )
+        .expect("write default config");
+
+        let selected = select_teammate_config_home(
+            runtime_home.path(),
+            /*explicit_codex_home*/ false,
+            Some(default_home.path()),
+        );
+
+        assert_eq!(selected, default_home.path());
+    }
+
+    #[test]
+    fn env_can_separate_team_store_root_from_config_home() {
+        let runtime_home = tempfile::tempdir().expect("runtime home");
+        let config_home = tempfile::tempdir().expect("config home");
+
+        let env =
+            build_inherited_env_vars_for_config_home(runtime_home.path(), config_home.path(), &[]);
+        let runtime_home = runtime_home.path().to_string_lossy().into_owned();
+        let config_home = config_home.path().to_string_lossy().into_owned();
+
+        assert_ne!(runtime_home, config_home);
+        assert!(env.contains(&(
+            team_store::TEAM_STORE_ROOT_ENV_VAR.to_string(),
+            runtime_home
+        )));
+        assert!(env.contains(&("CODEX_HOME".to_string(), config_home)));
+    }
+
+    #[test]
+    fn explicit_codex_home_keeps_runtime_home_even_without_config() {
+        let runtime_home = tempfile::tempdir().expect("runtime home");
+        let default_home = tempfile::tempdir().expect("default home");
+        std::fs::write(
+            default_home.path().join(codex_config::CONFIG_TOML_FILE),
+            "model_provider = \"custom\"",
+        )
+        .expect("write default config");
+
+        let selected = select_teammate_config_home(
+            runtime_home.path(),
+            /*explicit_codex_home*/ true,
+            Some(default_home.path()),
+        );
+
+        assert_eq!(selected, runtime_home.path());
+    }
+
+    #[test]
     fn env_forwards_provider_auth_key_when_present() {
+        let codex_home = tempfile::tempdir().expect("temp codex home");
+        std::fs::write(codex_home.path().join(codex_config::CONFIG_TOML_FILE), "")
+            .expect("write config");
         let path = std::env::var("PATH").expect("PATH should be set in test environment");
 
-        let env = build_inherited_env_vars(Path::new("/tmp/codex-home"), &["PATH"]);
+        let env = build_inherited_env_vars(codex_home.path(), &["PATH"]);
 
         assert!(env.contains(&("PATH".to_string(), path)));
     }

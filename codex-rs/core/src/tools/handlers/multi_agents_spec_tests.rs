@@ -70,7 +70,7 @@ fn spawn_agent_tool_v2_supports_claude_style_teammate_branch_and_lists_visible_m
     assert!(description.contains("Spawns an agent to work on the specified task."));
     assert!(description.contains("By default, `spawn_agent` creates an ordinary Codex subagent."));
     assert!(description.contains(
-        "If a Codex Teams workspace is active and you pass `name`, `spawn_agent` instead spawns a named split-pane Teams teammate"
+        "If you pass `name` inside a single active Teams workspace, or pass both `team_name` and `name`, `spawn_agent` instead spawns a named split-pane Teams teammate"
     ));
     assert!(
         description.contains("Do not pass `name` or `team_name` for ordinary subagent delegation.")
@@ -88,6 +88,7 @@ fn spawn_agent_tool_v2_supports_claude_style_teammate_branch_and_lists_visible_m
     assert!(!description.contains("hidden-model"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
+    assert!(properties.contains_key("prompt"));
     assert!(properties.contains_key("name"));
     assert!(properties.contains_key("team_name"));
     assert!(properties.contains_key("fork_turns"));
@@ -117,7 +118,8 @@ fn spawn_agent_tool_v2_supports_claude_style_teammate_branch_and_lists_visible_m
     );
     assert_eq!(
         parameters.required.as_ref(),
-        Some(&vec!["message".to_string()])
+        None,
+        "message is not schema-required because prompt is a Claude-compatible alias"
     );
     let output_schema = output_schema.expect("spawn_agent output schema");
     let variants = output_schema["oneOf"]
@@ -125,7 +127,22 @@ fn spawn_agent_tool_v2_supports_claude_style_teammate_branch_and_lists_visible_m
         .expect("spawn_agent output should be a native-or-teammate union");
     assert_eq!(variants.len(), 2);
     assert_eq!(variants[0]["required"], json!(["task_name", "nickname"]));
-    assert_eq!(variants[1]["required"], json!(["member", "tmux_pane_id"]));
+    assert_eq!(
+        variants[1]["required"],
+        json!([
+            "status",
+            "prompt",
+            "teammate_id",
+            "agent_id",
+            "model",
+            "name",
+            "tmux_session_name",
+            "tmux_window_name",
+            "tmux_pane_id",
+            "team_name",
+            "is_splitpane"
+        ])
+    );
 }
 
 #[test]

@@ -145,6 +145,61 @@ fn seed_team_store_with_alice(chat: &ChatWidget) {
 }
 
 #[tokio::test]
+async fn teammate_view_header_with_transcript_layout_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.set_team_teammate_view_header(Some(TeamTeammateViewHeader {
+        name: "alice".to_string(),
+        color: Some("red".to_string()),
+        prompt: Some("Inspect issue #15 and report the proof path.".to_string()),
+    }));
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .expect("create terminal");
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("draw teammate header layout");
+
+    assert_chatwidget_snapshot!(
+        "teammate_view_header_with_transcript_layout",
+        normalized_backend_snapshot(terminal.backend())
+    );
+}
+
+#[tokio::test]
+async fn team_roster_tree_above_transcript_layout_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.set_team_roster_tree_lines(Some(vec![
+        vec![
+            "› ".into(),
+            "├─ ".dim(),
+            "team-lead".into(),
+            " · ".dim(),
+            "Enter to view".dim(),
+        ]
+        .into(),
+        vec!["  ".into(), "├─ ".dim(), "@alice".red()].into(),
+        vec!["  ".into(), "└─ ".dim(), "hide".into()].into(),
+    ]));
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .expect("create terminal");
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("draw team roster tree layout");
+
+    assert_chatwidget_snapshot!(
+        "team_roster_tree_above_transcript_layout",
+        normalized_backend_snapshot(terminal.backend())
+    );
+}
+
+#[tokio::test]
 async fn team_tool_output_registers_process_teammate() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let _rollout = configure(&mut chat);

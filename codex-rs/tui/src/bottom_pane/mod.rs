@@ -139,6 +139,7 @@ pub(crate) use title_setup::TerminalTitleSetupView;
 pub(crate) use title_setup::preview_line_for_title_items;
 mod paste_burst;
 mod pending_input_preview;
+pub(crate) use pending_input_preview::QueuedInputPreviewItem;
 mod pending_thread_approvals;
 pub(crate) mod popup_consts;
 mod scroll_state;
@@ -461,6 +462,11 @@ impl BottomPane {
     /// binding that `ChatWidget` actually listens for.
     pub(crate) fn set_queued_message_edit_binding(&mut self, binding: Option<KeyBinding>) {
         self.pending_input_preview.set_edit_binding(binding);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_literal_submission_mode(&mut self, enabled: bool) {
+        self.composer.set_literal_submission_mode(enabled);
         self.request_redraw();
     }
 
@@ -1184,15 +1190,17 @@ impl BottomPane {
     }
 
     /// Update the pending-input preview shown above the composer.
-    pub(crate) fn set_pending_input_preview(
+    pub(crate) fn set_pending_input_preview<T>(
         &mut self,
-        queued: Vec<String>,
+        queued: Vec<T>,
         pending_steers: Vec<String>,
         rejected_steers: Vec<String>,
-    ) {
+    ) where
+        T: Into<QueuedInputPreviewItem>,
+    {
         self.pending_input_preview.pending_steers = pending_steers;
         self.pending_input_preview.rejected_steers = rejected_steers;
-        self.pending_input_preview.queued_messages = queued;
+        self.pending_input_preview.queued_messages = queued.into_iter().map(Into::into).collect();
         self.request_redraw();
     }
 
@@ -2525,6 +2533,39 @@ mod tests {
         let area = Rect::new(0, 0, width, height);
         assert_snapshot!(
             "status_and_queued_messages_snapshot",
+            render_snapshot(&pane, area)
+        );
+    }
+
+    #[test]
+    fn status_and_queued_teams_mailbox_reply_snapshot() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+
+        pane.set_task_running(/*running*/ true);
+        pane.set_pending_input_preview(
+            vec![QueuedInputPreviewItem::teams_mailbox(
+                "@alice: done".to_string(),
+            )],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let width = 48;
+        let height = pane.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        assert_snapshot!(
+            "status_and_queued_teams_mailbox_reply_snapshot",
             render_snapshot(&pane, area)
         );
     }

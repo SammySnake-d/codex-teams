@@ -252,7 +252,7 @@ impl ChatWidget {
             let can_send_directly = local_images.is_empty()
                 && remote_image_urls.is_empty()
                 && team_member_exists(
-                    &self.config.codex_home,
+                    &team_store::root_from_env_or(self.config.codex_home.as_path()),
                     &active_team_name,
                     direct_message.to,
                 );
@@ -553,7 +553,8 @@ impl ChatWidget {
             return (false, None);
         }
 
-        let config = match team_store::read_config(&self.config.codex_home, &team_name) {
+        let teams_root = team_store::root_from_env_or(self.config.codex_home.as_path());
+        let config = match team_store::read_config(&teams_root, &team_name) {
             Ok(Some(config)) => config,
             Ok(None) => {
                 self.add_error_message(format!(
@@ -612,7 +613,7 @@ impl ChatWidget {
 
         for teammate_name in &team_mentions {
             let result = team_store::write_to_mailbox(
-                &self.config.codex_home,
+                &teams_root,
                 &team_name,
                 teammate_name,
                 team_store::TeammateMessage {
@@ -704,8 +705,9 @@ impl ChatWidget {
             history_record,
             render_in_history,
         } = delivery;
+        let teams_root = team_store::root_from_env_or(self.config.codex_home.as_path());
         let result = team_store::write_to_mailbox(
-            &self.config.codex_home,
+            &teams_root,
             &team_name,
             &teammate_name,
             team_store::TeammateMessage {
@@ -917,9 +919,9 @@ fn team_mentions_from_bindings(mention_bindings: &[MentionBinding]) -> Vec<Strin
     mentions
 }
 
-fn team_member_exists(codex_home: &Path, team_name: &str, teammate_name: &str) -> bool {
+fn team_member_exists(teams_root: &Path, team_name: &str, teammate_name: &str) -> bool {
     matches!(
-        team_store::read_config(codex_home, team_name),
+        team_store::read_config(teams_root, team_name),
         Ok(Some(config)) if config.members.iter().any(|member| member.name == teammate_name)
     )
 }

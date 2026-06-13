@@ -28,8 +28,10 @@ use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::team_spec;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
+use codex_config::ConfigLayerSource;
+use codex_config::ConfigLayerStackOrdering;
+use codex_features::Feature;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
@@ -45,7 +47,12 @@ use codex_tools::ToolSpec;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+fn teams_root_for_turn(turn: &TurnContext) -> PathBuf {
+    team_store::root_from_env_or(turn.config.codex_home.as_path())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TeamTool {
@@ -158,7 +165,8 @@ impl TeamTool {
     }
 
     fn search_hint(self) -> &'static str {
-        const TEAM_CREATE_SEARCH: &str = "codex teams team teammate teammates swarm collaboration collaborate coordinate group 团队 队友 create_team TeamCreate";
+        const TEAM_CREATE_SEARCH: &str =
+            "codex teams team teammate teammates swarm 团队 队友 create_team TeamCreate";
         const TEAM_MESSAGE_SEARCH: &str = "codex teams team teammate teammates 队友 message mailbox inbox team_send SendMessage team_message_list";
         const TEAM_TASK_SEARCH: &str = "codex teams team task tasks taskboard team_task_create TaskCreate team_task_update TaskUpdate team_task_claim team_task_list TaskList TaskGet";
         const TEAM_STATUS_SEARCH: &str =
@@ -284,6 +292,7 @@ pub(crate) struct SpawnMemberFromAgentToolRequest {
     pub(crate) name: Option<String>,
     pub(crate) profile: Option<String>,
     pub(crate) model: Option<String>,
+    pub(crate) mode: Option<ModeKind>,
     pub(crate) message: String,
 }
 
@@ -480,6 +489,13 @@ struct CreateTeamResult {
 }
 
 #[derive(Debug, Serialize)]
+struct ClaudeCreateTeamResult {
+    team_name: String,
+    team_file_path: String,
+    lead_agent_id: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ListTeamsResult {
     teams: Vec<crate::team::Team>,
 }
@@ -506,18 +522,127 @@ struct TeamSpawnMemberResult {
     prompt: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct SpawnAgentTeammateResult {
+    status: &'static str,
+    prompt: String,
+    teammate_id: String,
+    agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_type: Option<String>,
+    model: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
+    tmux_session_name: String,
+    tmux_window_name: String,
+    tmux_pane_id: String,
+    team_name: String,
+    is_splitpane: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    plan_mode_required: bool,
+}
+
 struct ProcessSpawnedTeamMember {
     member: crate::team::TeamMember,
+    team_name: String,
+    agent_id: String,
     tmux_pane_id: String,
     backend_type: String,
     color: Option<String>,
+    model: String,
     mode: Option<String>,
+    plan_mode_required: bool,
     is_active: bool,
 }
 
 #[derive(Debug, Serialize)]
-struct TeamSendResult {
-    message: crate::team::TeamMessage,
+struct ClaudeSendMessageResult {
+    success: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing: Option<ClaudeMessageRouting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recipients: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeMessageRouting {
+    sender: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_color: Option<String>,
+    target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+}
+
+fn claude_team_send_result(
+    message: String,
+    sender: String,
+    target: String,
+    summary: Option<String>,
+    content: Option<String>,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    json_output(
+        &ClaudeSendMessageResult {
+            success: true,
+            message,
+            routing: Some(ClaudeMessageRouting {
+                sender,
+                sender_color: None,
+                target,
+                target_color: None,
+                summary,
+                content,
+            }),
+            recipients: None,
+            request_id: None,
+            target: None,
+        },
+        Some(true),
+        "team_send",
+    )
+}
+
+fn claude_team_send_broadcast_result(
+    recipients: Vec<String>,
+    sender: String,
+    summary: Option<String>,
+    content: Option<String>,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    let routing = if recipients.is_empty() {
+        None
+    } else {
+        Some(ClaudeMessageRouting {
+            sender,
+            sender_color: None,
+            target: "@team".to_string(),
+            target_color: None,
+            summary,
+            content,
+        })
+    };
+    json_output(
+        &ClaudeSendMessageResult {
+            success: true,
+            message: claude_broadcast_message(&recipients),
+            routing,
+            recipients: Some(recipients),
+            request_id: None,
+            target: None,
+        },
+        Some(true),
+        "team_send",
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -604,8 +729,12 @@ async fn handle_team_tool(
     }
     let arguments = function_arguments(payload)?;
     match tool {
-        TeamTool::CreateTeam => create_team(session, turn, arguments).await,
-        TeamTool::ClaudeTeamCreate => create_team(session, turn, arguments).await,
+        TeamTool::CreateTeam => {
+            create_team(session, turn, arguments, CreateTeamOutput::LegacyCodex).await
+        }
+        TeamTool::ClaudeTeamCreate => {
+            create_team(session, turn, arguments, CreateTeamOutput::ClaudeAlias).await
+        }
         TeamTool::ListTeams => list_teams(session, arguments).await,
         TeamTool::TeamStatus => team_status(session, arguments).await,
         TeamTool::TeamSpawnMember => team_spawn_member(session, turn, arguments).await,
@@ -626,10 +755,17 @@ async fn handle_team_tool(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CreateTeamOutput {
+    LegacyCodex,
+    ClaudeAlias,
+}
+
 async fn create_team(
     session: Arc<Session>,
     turn: Arc<TurnContext>,
     arguments: String,
+    output: CreateTeamOutput,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: CreateTeamArgs = parse_arguments(&arguments)?;
     let requested_name = args.team_name.or(args.name).ok_or_else(|| {
@@ -646,9 +782,9 @@ async fn create_team(
             existing_team.name
         )));
     }
-    let teams_root = turn.config.codex_home.as_path();
+    let teams_root = teams_root_for_turn(turn.as_ref());
     let mut name = requested_name.clone();
-    if team_store::read_config(teams_root, &name)
+    if team_store::read_config(&teams_root, &name)
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
         })?
@@ -656,7 +792,7 @@ async fn create_team(
     {
         for suffix in 2.. {
             let candidate = format!("{requested_name}-{suffix}");
-            if team_store::read_config(teams_root, &candidate)
+            if team_store::read_config(&teams_root, &candidate)
                 .map_err(|err| {
                     FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
                 })?
@@ -675,7 +811,7 @@ async fn create_team(
         .filter(|agent_type| !agent_type.is_empty())
         .unwrap_or(team_store::TEAM_LEAD_NAME)
         .to_string();
-    let team_file_path = team_store::config_path(teams_root, &name);
+    let team_file_path = team_store::config_path(&teams_root, &name);
     let now = unix_millis();
     let team = registry.create_team(name.clone(), session.thread_id).await;
     let team_file = team_store::TeamFile {
@@ -697,22 +833,34 @@ async fn create_team(
         }],
         ..Default::default()
     };
-    team_store::write_config(teams_root, &name, &team_file).map_err(|err| {
+    team_store::write_config(&teams_root, &name, &team_file).map_err(|err| {
         FunctionCallError::RespondToModel(format!("failed to write team config: {err}"))
     })?;
-    fs::create_dir_all(team_store::tasks_dir(teams_root, &name)).map_err(|err| {
+    fs::create_dir_all(team_store::tasks_dir(&teams_root, &name)).map_err(|err| {
         FunctionCallError::RespondToModel(format!("failed to create team task directory: {err}"))
     })?;
-    json_output(
-        &CreateTeamResult {
-            team,
-            team_name: name,
-            team_file_path: team_file_path.to_string_lossy().into_owned(),
-            lead_agent_id,
-        },
-        Some(true),
-        "create_team",
-    )
+    let team_file_path = team_file_path.to_string_lossy().into_owned();
+    match output {
+        CreateTeamOutput::LegacyCodex => json_output(
+            &CreateTeamResult {
+                team,
+                team_name: name,
+                team_file_path,
+                lead_agent_id,
+            },
+            Some(true),
+            "create_team",
+        ),
+        CreateTeamOutput::ClaudeAlias => json_output(
+            &ClaudeCreateTeamResult {
+                team_name: name,
+                team_file_path,
+                lead_agent_id,
+            },
+            Some(true),
+            "TeamCreate",
+        ),
+    }
 }
 
 async fn list_teams(
@@ -761,7 +909,7 @@ async fn team_spawn_member(
     arguments: String,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: TeamSpawnMemberArgs = parse_arguments(&arguments)?;
-    team_spawn_member_from_args(session, turn, args, "team_spawn_member", None).await
+    team_spawn_member_from_args(session, turn, args, "team_spawn_member", None, None).await
 }
 
 pub(crate) async fn maybe_spawn_member_from_agent_tool(
@@ -769,17 +917,18 @@ pub(crate) async fn maybe_spawn_member_from_agent_tool(
     turn: Arc<TurnContext>,
     request: SpawnMemberFromAgentToolRequest,
 ) -> Result<Option<FunctionToolOutput>, FunctionCallError> {
+    if !turn.config.features.enabled(Feature::Teams) {
+        return Ok(None);
+    }
     let Some(name) = optional_non_empty(request.name, "teammate name")? else {
         return Ok(None);
     };
-    let team_id = match resolve_agent_tool_team_id(
-        session.as_ref(),
-        optional_non_empty(request.team_name, "team name")?,
-    )
-    .await?
-    {
-        Some(team_id) => team_id,
-        None => return Ok(None),
+    let team_id = match optional_non_empty(request.team_name, "team name")? {
+        Some(team_name) => Some(resolve_agent_tool_team_id(session.as_ref(), team_name).await?),
+        None => infer_agent_tool_active_team_id(session.as_ref()).await,
+    };
+    let Some(team_id) = team_id else {
+        return Ok(None);
     };
     let args = TeamSpawnMemberArgs {
         team_id: team_id.to_string(),
@@ -791,15 +940,22 @@ pub(crate) async fn maybe_spawn_member_from_agent_tool(
         items: None,
     };
     let requested_model = optional_non_empty(request.model, "teammate model")?;
-    team_spawn_member_from_args(session, turn, args, "spawn_agent", requested_model)
-        .await
-        .map(Some)
+    team_spawn_member_from_args(
+        session,
+        turn,
+        args,
+        "spawn_agent",
+        requested_model,
+        request.mode,
+    )
+    .await
+    .map(Some)
 }
 
 async fn resolve_agent_tool_team_id(
     session: &Session,
-    requested_team_name: Option<String>,
-) -> Result<Option<ThreadId>, FunctionCallError> {
+    requested_team_name: String,
+) -> Result<ThreadId, FunctionCallError> {
     let registry = session.services.agent_control.team_registry();
     let active_lead_teams = registry
         .list_teams()
@@ -811,20 +967,34 @@ async fn resolve_agent_tool_team_id(
         })
         .collect::<Vec<_>>();
 
-    if let Some(requested_team_name) = requested_team_name {
-        let requested_lower = requested_team_name.to_lowercase();
-        return active_lead_teams
-            .into_iter()
-            .find(|team| team.name.to_lowercase() == requested_lower)
-            .map(|team| Some(team.id))
-            .ok_or_else(|| {
-                FunctionCallError::RespondToModel(format!(
-                    "No active Codex team named \"{requested_team_name}\". Use TeamCreate before spawning a teammate with spawn_agent name/team_name."
-                ))
-            });
-    }
+    let requested_lower = requested_team_name.to_lowercase();
+    active_lead_teams
+        .into_iter()
+        .find(|team| team.name.to_lowercase() == requested_lower)
+        .map(|team| team.id)
+        .ok_or_else(|| {
+            FunctionCallError::RespondToModel(format!(
+                "No active Codex team named \"{requested_team_name}\". Use TeamCreate before spawning a teammate with spawn_agent name/team_name."
+            ))
+        })
+}
 
-    Ok(active_lead_teams.into_iter().next().map(|team| team.id))
+async fn infer_agent_tool_active_team_id(session: &Session) -> Option<ThreadId> {
+    let registry = session.services.agent_control.team_registry();
+    let active_lead_teams = registry
+        .list_teams()
+        .await
+        .into_iter()
+        .filter(|team| {
+            team.lead_thread_id == session.thread_id
+                && matches!(team.status, crate::team::TeamStatus::Active)
+        })
+        .collect::<Vec<_>>();
+    if active_lead_teams.len() == 1 {
+        Some(active_lead_teams[0].id)
+    } else {
+        None
+    }
 }
 
 async fn team_spawn_member_from_args(
@@ -833,6 +1003,7 @@ async fn team_spawn_member_from_args(
     args: TeamSpawnMemberArgs,
     output_tool_name: &str,
     requested_model: Option<String>,
+    requested_mode: Option<ModeKind>,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let team_id = id_from_str("team", &args.team_id)?;
     require_team_lead(session.as_ref(), team_id, output_tool_name).await?;
@@ -861,16 +1032,43 @@ async fn team_spawn_member_from_args(
             permissions,
             &items,
             requested_model.as_deref(),
+            requested_mode,
         )
         .await?;
         let ProcessSpawnedTeamMember {
             member,
+            team_name,
+            agent_id,
             tmux_pane_id,
             backend_type,
             color,
+            model,
             mode,
+            plan_mode_required,
             is_active,
         } = spawned;
+        if output_tool_name == "spawn_agent" {
+            return json_output(
+                &SpawnAgentTeammateResult {
+                    status: "teammate_spawned",
+                    prompt: input_preview(&items),
+                    teammate_id: agent_id.clone(),
+                    agent_id,
+                    agent_type: member.profile.clone(),
+                    model,
+                    name: member.name,
+                    color,
+                    tmux_session_name: "codex-swarm".to_string(),
+                    tmux_window_name: "swarm-view".to_string(),
+                    tmux_pane_id,
+                    team_name,
+                    is_splitpane: true,
+                    plan_mode_required,
+                },
+                Some(true),
+                output_tool_name,
+            );
+        }
         return json_output(
             &TeamSpawnMemberResult {
                 member,
@@ -899,16 +1097,43 @@ async fn team_spawn_member_from_args(
             permissions,
             &items,
             requested_model.as_deref(),
+            requested_mode,
         )
         .await?;
         let ProcessSpawnedTeamMember {
             member,
+            team_name,
+            agent_id,
             tmux_pane_id,
             backend_type,
             color,
+            model,
             mode,
+            plan_mode_required,
             is_active,
         } = spawned;
+        if output_tool_name == "spawn_agent" {
+            return json_output(
+                &SpawnAgentTeammateResult {
+                    status: "teammate_spawned",
+                    prompt: input_preview(&items),
+                    teammate_id: agent_id.clone(),
+                    agent_id,
+                    agent_type: member.profile.clone(),
+                    model,
+                    name: member.name,
+                    color,
+                    tmux_session_name: "codex-swarm".to_string(),
+                    tmux_window_name: "swarm-view".to_string(),
+                    tmux_pane_id,
+                    team_name,
+                    is_splitpane: true,
+                    plan_mode_required,
+                },
+                Some(true),
+                output_tool_name,
+            );
+        }
         return json_output(
             &TeamSpawnMemberResult {
                 member,
@@ -973,134 +1198,28 @@ fn append_teammate_config_string_override(flags: &mut Vec<String>, key: &str, va
     flags.push(format!("{key}={quoted_value}"));
 }
 
-fn append_teammate_config_raw_override(flags: &mut Vec<String>, key: &str, value: &str) {
-    flags.push("-c".to_string());
-    flags.push(format!("{key}={value}"));
-}
-
-fn append_teammate_config_optional_string_override(
-    flags: &mut Vec<String>,
-    key: &str,
-    value: Option<&str>,
-) {
-    if let Some(value) = value.filter(|value| !value.is_empty()) {
-        append_teammate_config_string_override(flags, key, value);
-    }
-}
-
-fn append_teammate_config_string_map_overrides(
-    flags: &mut Vec<String>,
-    prefix: &str,
-    values: Option<&std::collections::HashMap<String, String>>,
-) {
-    let Some(values) = values else {
-        return;
-    };
-    let mut entries = values.iter().collect::<Vec<_>>();
-    entries.sort_by_key(|(left, _)| *left);
-    for (key, value) in entries {
-        append_teammate_config_string_override(flags, &format!("{prefix}.{key}"), value);
-    }
-}
-
-fn append_teammate_model_provider_overrides(
-    flags: &mut Vec<String>,
-    model_provider_id: &str,
-    provider: &ModelProviderInfo,
-) {
-    append_teammate_config_string_override(flags, "model_provider", model_provider_id);
-
-    if model_provider_id == OPENAI_PROVIDER_ID {
-        append_teammate_config_optional_string_override(
-            flags,
-            "openai_base_url",
-            provider.base_url.as_deref(),
-        );
-        return;
-    }
-
-    let prefix = format!("model_providers.{model_provider_id}");
-    append_teammate_config_optional_string_override(
-        flags,
-        &format!("{prefix}.name"),
-        Some(&provider.name),
-    );
-    append_teammate_config_optional_string_override(
-        flags,
-        &format!("{prefix}.base_url"),
-        provider.base_url.as_deref(),
-    );
-    append_teammate_config_optional_string_override(
-        flags,
-        &format!("{prefix}.env_key"),
-        provider.env_key.as_deref(),
-    );
-    append_teammate_config_optional_string_override(
-        flags,
-        &format!("{prefix}.env_key_instructions"),
-        provider.env_key_instructions.as_deref(),
-    );
-    append_teammate_config_string_override(
-        flags,
-        &format!("{prefix}.wire_api"),
-        &provider.wire_api.to_string(),
-    );
-    append_teammate_config_string_map_overrides(
-        flags,
-        &format!("{prefix}.query_params"),
-        provider.query_params.as_ref(),
-    );
-    append_teammate_config_string_map_overrides(
-        flags,
-        &format!("{prefix}.env_http_headers"),
-        provider.env_http_headers.as_ref(),
-    );
-    if let Some(request_max_retries) = provider.request_max_retries {
-        append_teammate_config_raw_override(
-            flags,
-            &format!("{prefix}.request_max_retries"),
-            &request_max_retries.to_string(),
-        );
-    }
-    if let Some(stream_max_retries) = provider.stream_max_retries {
-        append_teammate_config_raw_override(
-            flags,
-            &format!("{prefix}.stream_max_retries"),
-            &stream_max_retries.to_string(),
-        );
-    }
-    if let Some(stream_idle_timeout_ms) = provider.stream_idle_timeout_ms {
-        append_teammate_config_raw_override(
-            flags,
-            &format!("{prefix}.stream_idle_timeout_ms"),
-            &stream_idle_timeout_ms.to_string(),
-        );
-    }
-    if let Some(websocket_connect_timeout_ms) = provider.websocket_connect_timeout_ms {
-        append_teammate_config_raw_override(
-            flags,
-            &format!("{prefix}.websocket_connect_timeout_ms"),
-            &websocket_connect_timeout_ms.to_string(),
-        );
-    }
-    append_teammate_config_raw_override(
-        flags,
-        &format!("{prefix}.requires_openai_auth"),
-        if provider.requires_openai_auth {
-            "true"
-        } else {
-            "false"
-        },
-    );
-    append_teammate_config_raw_override(
-        flags,
-        &format!("{prefix}.supports_websockets"),
-        if provider.supports_websockets {
-            "true"
-        } else {
-            "false"
-        },
-    );
+fn teammate_active_config_profile(config: &crate::config::Config) -> Option<&str> {
+    config
+        .config_layer_stack
+        .get_layers(
+            ConfigLayerStackOrdering::LowestPrecedenceFirst,
+            /*include_disabled*/ false,
+        )
+        .iter()
+        .find_map(|layer| match &layer.name {
+            ConfigLayerSource::User {
+                profile: Some(profile),
+                ..
+            } => Some(profile.as_str()),
+            ConfigLayerSource::Mdm { .. }
+            | ConfigLayerSource::System { .. }
+            | ConfigLayerSource::EnterpriseManaged { .. }
+            | ConfigLayerSource::User { profile: None, .. }
+            | ConfigLayerSource::Project { .. }
+            | ConfigLayerSource::SessionFlags
+            | ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. }
+            | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => None,
+        })
 }
 
 fn append_teammate_launch_mode_flags(
@@ -1192,6 +1311,7 @@ fn build_teammate_launch_spec(
     existing_names: &[String],
     items: &[UserInput],
     requested_model: Option<&str>,
+    requested_mode: Option<ModeKind>,
 ) -> Result<TeammateLaunchSpec, FunctionCallError> {
     let binary = spawn::teammate_binary(turn.config.codex_self_exe.as_deref()).map_err(|err| {
         FunctionCallError::RespondToModel(format!("failed to resolve teammate binary: {err}"))
@@ -1205,6 +1325,7 @@ fn build_teammate_launch_spec(
         existing_names,
         items,
         requested_model,
+        requested_mode,
         binary,
     )
 }
@@ -1219,6 +1340,7 @@ fn build_teammate_launch_spec_with_binary(
     existing_names: &[String],
     items: &[UserInput],
     requested_model: Option<&str>,
+    requested_mode: Option<ModeKind>,
     binary: std::path::PathBuf,
 ) -> Result<TeammateLaunchSpec, FunctionCallError> {
     let unique = spawn::unique_teammate_name(name, existing_names);
@@ -1232,7 +1354,12 @@ fn build_teammate_launch_spec_with_binary(
 
     // NO `--prompt`: the first turn is delivered via the mailbox below
     // (mirroring Claude), so it is not run twice.
-    let mut flags = vec![
+    let mut flags = Vec::new();
+    if let Some(profile) = teammate_active_config_profile(&turn.config) {
+        flags.push("--profile".to_string());
+        flags.push(profile.to_string());
+    }
+    flags.extend([
         "teammate".to_string(),
         "--agent-id".to_string(),
         agent_id.clone(),
@@ -1244,7 +1371,7 @@ fn build_teammate_launch_spec_with_binary(
         color.as_name().to_string(),
         "--parent-session-id".to_string(),
         lead_thread_id.to_string(),
-    ];
+    ]);
     if let Some(profile) = profile {
         flags.push("--agent-type".to_string());
         flags.push(profile.to_string());
@@ -1256,21 +1383,22 @@ fn build_teammate_launch_spec_with_binary(
     flags.push("--enable".to_string());
     flags.push("teams".to_string());
     append_teammate_model_override(&mut flags, &model);
-    append_teammate_model_provider_overrides(
-        &mut flags,
-        &turn.config.model_provider_id,
-        &turn.config.model_provider,
-    );
     let sandbox_policy = turn.sandbox_policy();
+    let launch_mode = requested_mode.unwrap_or(turn.collaboration_mode.mode);
     let plan_mode_required = append_teammate_launch_mode_flags(
         &mut flags,
-        turn.collaboration_mode.mode,
+        launch_mode,
         turn.approval_policy.value(),
         &sandbox_policy,
     );
 
     let provider_env_keys = teammate_provider_env_keys(&turn.config.model_provider);
-    let env = spawn::build_inherited_env_vars(turn.config.codex_home.as_path(), &provider_env_keys);
+    let teams_root = teams_root_for_turn(turn);
+    let env = spawn::build_inherited_env_vars_for_config_home(
+        &teams_root,
+        turn.config.codex_home.as_path(),
+        &provider_env_keys,
+    );
 
     Ok(TeammateLaunchSpec {
         agent_id,
@@ -1287,7 +1415,10 @@ fn build_teammate_launch_spec_with_binary(
     })
 }
 
-async fn ensure_teammate_auth_ready(turn: &TurnContext) -> Result<(), FunctionCallError> {
+async fn apply_lead_auth_to_teammate_env(
+    turn: &TurnContext,
+    env: &mut Vec<(String, String)>,
+) -> Result<(), FunctionCallError> {
     if !turn.config.model_provider.requires_openai_auth {
         return Ok(());
     }
@@ -1298,13 +1429,50 @@ async fn ensure_teammate_auth_ready(turn: &TurnContext) -> Result<(), FunctionCa
         ));
     };
 
-    if auth_manager.auth().await.is_some() {
-        return Ok(());
-    }
+    let Some(auth) = auth_manager.auth().await else {
+        return Err(FunctionCallError::RespondToModel(
+            "Cannot spawn a Codex Teams teammate because the selected model provider requires OpenAI/Codex auth, but the lead session is not authenticated. Run `codex login` or configure provider env auth, then retry.".to_string(),
+        ));
+    };
 
-    Err(FunctionCallError::RespondToModel(
-        "Cannot spawn a Codex Teams teammate because the selected model provider requires OpenAI/Codex auth, but the lead session is not authenticated. Run `codex login` or configure provider env auth, then retry.".to_string(),
-    ))
+    if let Some(api_key) = auth.api_key() {
+        for key in teammate_api_key_env_keys(&turn.config.model_provider) {
+            upsert_teammate_env(env, key, api_key.to_string());
+        }
+    } else {
+        for key in teammate_api_key_env_keys(&turn.config.model_provider) {
+            remove_teammate_env(env, &key);
+        }
+    }
+    Ok(())
+}
+
+fn teammate_api_key_env_keys(provider: &ModelProviderInfo) -> Vec<String> {
+    let mut keys = vec![
+        codex_login::CODEX_API_KEY_ENV_VAR.to_string(),
+        codex_login::OPENAI_API_KEY_ENV_VAR.to_string(),
+    ];
+    if let Some(env_key) = provider.env_key.as_ref().filter(|key| !key.is_empty())
+        && !keys.contains(env_key)
+    {
+        keys.push(env_key.clone());
+    }
+    keys
+}
+
+fn upsert_teammate_env(env: &mut Vec<(String, String)>, key: String, value: String) {
+    if let Some((_, existing_value)) = env
+        .iter_mut()
+        .find(|(existing_key, _)| existing_key == &key)
+    {
+        *existing_value = value;
+    } else {
+        env.push((key, value));
+    }
+}
+
+fn remove_teammate_env(env: &mut Vec<(String, String)>, key: &str) {
+    env.retain(|(existing_key, _)| existing_key != key);
 }
 
 /// Launch a teammate as a separate `codex teammate` process in a tmux pane and
@@ -1322,22 +1490,23 @@ async fn spawn_member_in_pane(
     permissions: Vec<String>,
     items: &[UserInput],
     requested_model: Option<&str>,
+    requested_mode: Option<ModeKind>,
 ) -> Result<ProcessSpawnedTeamMember, FunctionCallError> {
     // Resolve everything that needs `.await` BEFORE constructing the tmux
     // backend: `TmuxBackend` holds a `RefCell`, so keeping it alive across an
     // await point would make this tool future `!Send`.
     let team_name = registry_team_name(session, team_id).await?;
     let backend = TmuxBackend::new();
-    let teams_root = turn.config.codex_home.as_path();
+    let teams_root = teams_root_for_turn(turn);
 
     // Existing members → unique name (Claude `generateUniqueTeammateName`) +
     // round-robin color index.
-    let existing_names: Vec<String> = team_store::read_config(teams_root, &team_name)
+    let existing_names: Vec<String> = team_store::read_config(&teams_root, &team_name)
         .ok()
         .flatten()
         .map(|cfg| cfg.members.into_iter().map(|member| member.name).collect())
         .unwrap_or_default();
-    let spec = build_teammate_launch_spec(
+    let mut spec = build_teammate_launch_spec(
         turn,
         &team_name,
         session.thread_id,
@@ -1346,9 +1515,10 @@ async fn spawn_member_in_pane(
         &existing_names,
         items,
         requested_model,
+        requested_mode,
     )?;
     let member_thread_id = ThreadId::new();
-    ensure_teammate_auth_ready(turn).await?;
+    apply_lead_auth_to_teammate_env(turn, &mut spec.env).await?;
 
     // Open + style the pane (create_teammate_pane sets the title + border color
     // internally, so they are not re-set here).
@@ -1374,7 +1544,7 @@ async fn spawn_member_in_pane(
     // Register the member in the on-disk team config.
     let pane_id = pane.pane_id;
     let member_record = team_store::TeamFileMember {
-        agent_id: spec.agent_id,
+        agent_id: spec.agent_id.clone(),
         member_id: Some(member_thread_id.to_string()),
         name: spec.agent_name.clone(),
         agent_type: profile.clone(),
@@ -1391,7 +1561,7 @@ async fn spawn_member_in_pane(
         ..Default::default()
     };
     let team_for_cfg = team_name.clone();
-    team_store::update_config(teams_root, &team_name, move |cfg| {
+    team_store::update_config(&teams_root, &team_name, move |cfg| {
         cfg.name = team_for_cfg.clone();
         cfg.team_id = Some(team_id.to_string());
         if cfg.lead_agent_id.is_empty() {
@@ -1406,7 +1576,7 @@ async fn spawn_member_in_pane(
     // Deliver the initial prompt via the mailbox (Claude step 9): the teammate's
     // inbox loop consumes it as its first turn.
     write_initial_teammate_prompt_to_mailbox(
-        teams_root,
+        &teams_root,
         &team_name,
         &spec.agent_name,
         &spec.first_turn_text,
@@ -1433,10 +1603,14 @@ async fn spawn_member_in_pane(
 
     Ok(ProcessSpawnedTeamMember {
         member,
+        team_name,
+        agent_id: spec.agent_id,
         tmux_pane_id: pane_id,
         backend_type: "tmux".to_string(),
         color: Some(spec.color.as_name().to_string()),
+        model: spec.model,
         mode: spec.plan_mode_required.then_some("plan".to_string()),
+        plan_mode_required: spec.plan_mode_required,
         is_active: true,
     })
 }
@@ -1459,17 +1633,18 @@ async fn spawn_member_in_iterm_pane(
     permissions: Vec<String>,
     items: &[UserInput],
     requested_model: Option<&str>,
+    requested_mode: Option<ModeKind>,
 ) -> Result<ProcessSpawnedTeamMember, FunctionCallError> {
     let team_name = registry_team_name(session, team_id).await?;
     let backend = ITermBackend::new();
-    let teams_root = turn.config.codex_home.as_path();
+    let teams_root = teams_root_for_turn(turn);
 
-    let existing_names: Vec<String> = team_store::read_config(teams_root, &team_name)
+    let existing_names: Vec<String> = team_store::read_config(&teams_root, &team_name)
         .ok()
         .flatten()
         .map(|cfg| cfg.members.into_iter().map(|member| member.name).collect())
         .unwrap_or_default();
-    let spec = build_teammate_launch_spec(
+    let mut spec = build_teammate_launch_spec(
         turn,
         &team_name,
         session.thread_id,
@@ -1478,9 +1653,10 @@ async fn spawn_member_in_iterm_pane(
         &existing_names,
         items,
         requested_model,
+        requested_mode,
     )?;
     let member_thread_id = ThreadId::new();
-    ensure_teammate_auth_ready(turn).await?;
+    apply_lead_auth_to_teammate_env(turn, &mut spec.env).await?;
 
     // Create the iTerm2 split pane (first teammate: vertical split off the lead;
     // later teammates stack downward — handled inside the backend).
@@ -1514,7 +1690,7 @@ async fn spawn_member_in_iterm_pane(
         })?;
 
     let member_record = team_store::TeamFileMember {
-        agent_id: spec.agent_id,
+        agent_id: spec.agent_id.clone(),
         member_id: Some(member_thread_id.to_string()),
         name: spec.agent_name.clone(),
         agent_type: profile.clone(),
@@ -1531,7 +1707,7 @@ async fn spawn_member_in_iterm_pane(
         ..Default::default()
     };
     let team_for_cfg = team_name.clone();
-    team_store::update_config(teams_root, &team_name, move |cfg| {
+    team_store::update_config(&teams_root, &team_name, move |cfg| {
         cfg.name = team_for_cfg.clone();
         cfg.team_id = Some(team_id.to_string());
         if cfg.lead_agent_id.is_empty() {
@@ -1544,7 +1720,7 @@ async fn spawn_member_in_iterm_pane(
     })?;
 
     write_initial_teammate_prompt_to_mailbox(
-        teams_root,
+        &teams_root,
         &team_name,
         &spec.agent_name,
         &spec.first_turn_text,
@@ -1571,10 +1747,14 @@ async fn spawn_member_in_iterm_pane(
 
     Ok(ProcessSpawnedTeamMember {
         member,
+        team_name,
+        agent_id: spec.agent_id,
         tmux_pane_id: pane.pane_id,
         backend_type: "iterm2".to_string(),
         color: Some(spec.color.as_name().to_string()),
+        model: spec.model,
         mode: spec.plan_mode_required.then_some("plan".to_string()),
+        plan_mode_required: spec.plan_mode_required,
         is_active: true,
     })
 }
@@ -1697,8 +1877,13 @@ async fn team_send_args(
     };
     let items = parse_team_input(args.message, args.items)?;
     let content = input_preview(&items);
+    let summary = args.summary.clone();
+    let target_label = match &target {
+        SendTeamMessageTarget::Lead => format!("@{}", team_store::TEAM_LEAD_NAME),
+        SendTeamMessageTarget::Member(member_id) => format!("@{member_id}"),
+    };
     let registry = session.services.agent_control.team_registry();
-    let message = team_result(
+    let _message = team_result(
         session.as_ref(),
         Some(team_id),
         registry
@@ -1707,7 +1892,7 @@ async fn team_send_args(
                     team_id,
                     sender_member_id,
                     target,
-                    content,
+                    content: content.clone(),
                     delivery_mode,
                     items,
                 },
@@ -1716,21 +1901,16 @@ async fn team_send_args(
             .await,
     )
     .await?;
-    json_output(&TeamSendResult { message }, Some(true), output_tool_name)
-}
-
-#[derive(Serialize)]
-struct MailboxSendResult {
-    delivered: bool,
-    target: String,
-    via: &'static str,
-}
-
-#[derive(Serialize)]
-struct MailboxBroadcastResult {
-    delivered: bool,
-    targets: Vec<String>,
-    via: &'static str,
+    let sender = sender_member_id
+        .map(|member_id| format!("@{member_id}"))
+        .unwrap_or_else(|| team_store::TEAM_LEAD_NAME.to_string());
+    claude_team_send_result(
+        format!("Message sent to {target_label}'s inbox"),
+        sender,
+        target_label,
+        summary,
+        Some(content),
+    )
 }
 
 struct PaneMemberSendRequest {
@@ -1757,10 +1937,10 @@ async fn team_send_to_pane_member(
         ));
     }
     let team_name = registry_team_name(session, request.team_id).await?;
-    let teams_root = turn.config.codex_home.as_path();
+    let teams_root = teams_root_for_turn(turn);
     let sanitized = crate::team_backends::spawn::sanitize_agent_name(&request.member_name);
 
-    let known = team_store::read_config(teams_root, &team_name)
+    let known = team_store::read_config(&teams_root, &team_name)
         .ok()
         .flatten()
         .is_some_and(|cfg| {
@@ -1778,22 +1958,20 @@ async fn team_send_to_pane_member(
     let items = parse_team_input(request.message, request.items)?;
     let content = input_preview(&items);
     write_plain_mailbox_message(
-        teams_root,
+        &teams_root,
         &team_name,
         &sanitized,
         team_store::TEAM_LEAD_NAME,
         &content,
-        request.summary,
+        request.summary.clone(),
     )?;
 
-    json_output(
-        &MailboxSendResult {
-            delivered: true,
-            target: sanitized,
-            via: "mailbox",
-        },
-        Some(true),
-        "team_send",
+    claude_team_send_result(
+        format!("Message sent to {sanitized}'s inbox"),
+        team_store::TEAM_LEAD_NAME.to_string(),
+        format!("@{sanitized}"),
+        request.summary,
+        Some(content),
     )
 }
 
@@ -1810,8 +1988,8 @@ async fn team_send_broadcast_to_pane_members(
         ));
     }
     let team_name = registry_team_name(session, team_id).await?;
-    let teams_root = turn.config.codex_home.as_path();
-    let members = active_store_members(teams_root, &team_name)?
+    let teams_root = teams_root_for_turn(turn);
+    let members = active_store_members(&teams_root, &team_name)?
         .into_iter()
         .filter(|member| member.name != team_store::TEAM_LEAD_NAME)
         .collect::<Vec<_>>();
@@ -1820,7 +1998,7 @@ async fn team_send_broadcast_to_pane_members(
     let mut targets = Vec::with_capacity(members.len());
     for member in members {
         write_plain_mailbox_message(
-            teams_root,
+            &teams_root,
             &team_name,
             &member.name,
             team_store::TEAM_LEAD_NAME,
@@ -1830,14 +2008,11 @@ async fn team_send_broadcast_to_pane_members(
         targets.push(member.name);
     }
 
-    json_output(
-        &MailboxBroadcastResult {
-            delivered: true,
-            targets,
-            via: "mailbox",
-        },
-        Some(true),
-        "team_send",
+    claude_team_send_broadcast_result(
+        targets,
+        team_store::TEAM_LEAD_NAME.to_string(),
+        args.summary,
+        Some(content),
     )
 }
 
@@ -1854,8 +2029,8 @@ async fn resolve_pane_member(
     member_id: Option<&str>,
 ) -> Result<Option<(String, String)>, FunctionCallError> {
     let team_name = registry_team_name(session, team_id).await?;
-    let teams_root = turn.config.codex_home.as_path();
-    let Some(cfg) = team_store::read_config(teams_root, &team_name)
+    let teams_root = teams_root_for_turn(turn);
+    let Some(cfg) = team_store::read_config(&teams_root, &team_name)
         .ok()
         .flatten()
     else {
@@ -2048,17 +2223,17 @@ async fn claude_team_context(
         let context = validate_teammate_process_identity(
             turn, /*requested_team_id*/ None, identity, None,
         )?;
-        let sender_color =
-            team_store::read_config(turn.config.codex_home.as_path(), &context.team_name)
-                .ok()
-                .flatten()
-                .and_then(|config| {
-                    config
-                        .members
-                        .into_iter()
-                        .find(|member| member.name == identity.agent_name)
-                        .and_then(|member| member.color)
-                });
+        let teams_root = teams_root_for_turn(turn);
+        let sender_color = team_store::read_config(&teams_root, &context.team_name)
+            .ok()
+            .flatten()
+            .and_then(|config| {
+                config
+                    .members
+                    .into_iter()
+                    .find(|member| member.name == identity.agent_name)
+                    .and_then(|member| member.color)
+            });
         return Ok(ClaudeTeamContext {
             team_id: context.team_id,
             team_name: context.team_name,
@@ -2109,8 +2284,8 @@ fn validate_teammate_process_identity(
     identity: &crate::team::TeammateIdentity,
     sender_member_id: Option<&str>,
 ) -> Result<TeammateProcessContext, FunctionCallError> {
-    let teams_root = turn.config.codex_home.as_path();
-    let config = team_store::read_config(teams_root, &identity.team).map_err(|err| {
+    let teams_root = teams_root_for_turn(turn);
+    let config = team_store::read_config(&teams_root, &identity.team).map_err(|err| {
         FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
     })?;
     let Some(config) = config else {
@@ -2177,7 +2352,7 @@ async fn teammate_team_send(
     output_tool_name: &'static str,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let args = normalize_team_send_args(args)?;
-    let teams_root = turn.config.codex_home.as_path();
+    let teams_root = teams_root_for_turn(turn);
     let context = validate_teammate_process_identity(
         turn,
         requested_team_id,
@@ -2195,7 +2370,7 @@ async fn teammate_team_send(
         }
     };
     if matches!(args.target.as_deref(), Some("broadcast")) {
-        return teammate_team_send_broadcast(teams_root, team_id, identity, args).await;
+        return teammate_team_send_broadcast(&teams_root, team_id, identity, args).await;
     }
     let (recipient, target) = match args.target.as_deref() {
         Some("lead") | None => (
@@ -2209,7 +2384,7 @@ async fn teammate_team_send(
                 )
             })?;
             let sanitized = crate::team_backends::spawn::sanitize_agent_name(&name);
-            let config = team_store::read_config(teams_root, &identity.team).map_err(|err| {
+            let config = team_store::read_config(&teams_root, &identity.team).map_err(|err| {
                 FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
             })?;
             let Some(member) = config.as_ref().and_then(|config| {
@@ -2250,35 +2425,22 @@ async fn teammate_team_send(
     let items = parse_team_input(args.message, args.items)?;
     let content = input_preview(&items);
     write_plain_mailbox_message(
-        teams_root,
+        &teams_root,
         &identity.team,
         &recipient,
         &identity.agent_name,
         &content,
         args.summary.clone(),
     )?;
+    let _ = (team_id, target, items, delivery_mode, output_tool_name);
 
-    // Return a registry-shaped message so the teammate's model sees a normal
-    // team_send result. The lead authoritatively re-stamps ids when it reads its
-    // inbox.
-    let sender = match optional_id_from_str("sender member", args.sender_member_id)? {
-        Some(id) => crate::team::TeamMessageEndpoint::Member(id),
-        None => crate::team::TeamMessageEndpoint::Member(ThreadId::new()),
-    };
-    let message = crate::team::TeamMessage {
-        id: ThreadId::new(),
-        team_id,
-        sender,
-        target,
-        target_member_id: None,
-        content,
-        items,
-        submitted_id: None,
-        delivery_mode,
-        delivery_status: crate::team::TeamMessageDeliveryStatus::Submitted,
-        created_at: unix_millis(),
-    };
-    json_output(&TeamSendResult { message }, Some(true), output_tool_name)
+    claude_team_send_result(
+        format!("Message sent to {recipient}'s inbox"),
+        identity.agent_name.clone(),
+        format!("@{recipient}"),
+        args.summary,
+        Some(content),
+    )
 }
 
 async fn teammate_team_send_broadcast(
@@ -2312,20 +2474,13 @@ async fn teammate_team_send_broadcast(
         )?;
     }
 
-    let message = crate::team::TeamMessage {
-        id: ThreadId::new(),
-        team_id,
-        sender: crate::team::TeamMessageEndpoint::Member(ThreadId::new()),
-        target: crate::team::TeamMessageEndpoint::Member(ThreadId::new()),
-        target_member_id: None,
-        content,
-        items,
-        submitted_id: None,
-        delivery_mode: TeamMessageDeliveryMode::Queue,
-        delivery_status: crate::team::TeamMessageDeliveryStatus::Submitted,
-        created_at: unix_millis(),
-    };
-    json_output(&TeamSendResult { message }, Some(true), "team_send")
+    let _ = (team_id, items);
+    claude_team_send_broadcast_result(
+        recipients,
+        identity.agent_name.clone(),
+        args.summary,
+        Some(content),
+    )
 }
 
 async fn teammate_team_task_create(
@@ -2340,25 +2495,19 @@ async fn teammate_team_task_create(
         identity,
         /*sender_member_id*/ None,
     )?;
+    let teams_root = teams_root_for_turn(turn);
     let mut task = team_coord::Task::new(non_empty(args.title, "task title")?, "");
     task.description = optional_non_empty(args.note, "task note")?.unwrap_or_default();
     task.owner = args
         .assignee_member_id
-        .map(|member_id| {
-            resolve_store_member_agent_id(
-                turn.config.codex_home.as_path(),
-                &context.team_name,
-                &member_id,
-            )
-        })
+        .map(|member_id| resolve_store_member_agent_id(&teams_root, &context.team_name, &member_id))
         .transpose()?;
     task.blocked_by = args.dependencies.unwrap_or_default();
 
-    let id = team_coord::create_task(turn.config.codex_home.as_path(), &context.team_name, task)
-        .map_err(|err| {
-            FunctionCallError::RespondToModel(format!("failed to create team task: {err}"))
-        })?;
-    let task = team_coord::get_task(turn.config.codex_home.as_path(), &context.team_name, &id)
+    let id = team_coord::create_task(&teams_root, &context.team_name, task).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to create team task: {err}"))
+    })?;
+    let task = team_coord::get_task(&teams_root, &context.team_name, &id)
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("failed to read team task: {err}"))
         })?
@@ -2396,6 +2545,7 @@ async fn teammate_team_task_update(
         identity,
         /*sender_member_id*/ None,
     )?;
+    let teams_root = teams_root_for_turn(turn);
     let status = status
         .map(|status| store_task_status(&status))
         .transpose()?;
@@ -2405,13 +2555,7 @@ async fn teammate_team_task_update(
         ));
     }
     let assignee = assignee_member_id
-        .map(|member_id| {
-            resolve_store_member_agent_id(
-                turn.config.codex_home.as_path(),
-                &context.team_name,
-                &member_id,
-            )
-        })
+        .map(|member_id| resolve_store_member_agent_id(&teams_root, &context.team_name, &member_id))
         .transpose()?;
     let note = optional_non_empty(note, "task note")?;
     if clear_note && note.is_some() {
@@ -2419,35 +2563,30 @@ async fn teammate_team_task_update(
             "clear_note cannot be combined with note".to_string(),
         ));
     }
-    let task = team_coord::update_task(
-        turn.config.codex_home.as_path(),
-        &context.team_name,
-        &task_id,
-        |task| {
-            if let Some(title) = title {
-                task.subject = title;
+    let task = team_coord::update_task(&teams_root, &context.team_name, &task_id, |task| {
+        if let Some(title) = title {
+            task.subject = title;
+        }
+        if clear_assignee {
+            task.owner = None;
+        } else if let Some(assignee) = assignee {
+            task.owner = Some(assignee);
+        }
+        if let Some(dependencies) = dependencies {
+            task.blocked_by = dependencies;
+        }
+        if let Some(status) = status {
+            task.status = status;
+            if status == team_coord::TaskStatus::InProgress && task.owner.is_none() {
+                task.owner = Some(context.member_agent_id.clone());
             }
-            if clear_assignee {
-                task.owner = None;
-            } else if let Some(assignee) = assignee {
-                task.owner = Some(assignee);
-            }
-            if let Some(dependencies) = dependencies {
-                task.blocked_by = dependencies;
-            }
-            if let Some(status) = status {
-                task.status = status;
-                if status == team_coord::TaskStatus::InProgress && task.owner.is_none() {
-                    task.owner = Some(context.member_agent_id.clone());
-                }
-            }
-            if clear_note {
-                task.description.clear();
-            } else if let Some(note) = note {
-                task.description = note;
-            }
-        },
-    )
+        }
+        if clear_note {
+            task.description.clear();
+        } else if let Some(note) = note {
+            task.description = note;
+        }
+    })
     .map_err(|err| FunctionCallError::RespondToModel(format!("failed to update team task: {err}")))?
     .ok_or_else(|| FunctionCallError::RespondToModel(format!("team task {task_id} not found")))?;
 
@@ -2470,13 +2609,11 @@ async fn teammate_team_task_claim(
         identity,
         /*sender_member_id*/ None,
     )?;
+    let teams_root = teams_root_for_turn(turn);
     let member_agent_id = match args.member_id {
         Some(member_id) => {
-            let resolved = resolve_store_member_agent_id(
-                turn.config.codex_home.as_path(),
-                &context.team_name,
-                &member_id,
-            )?;
+            let resolved =
+                resolve_store_member_agent_id(&teams_root, &context.team_name, &member_id)?;
             if resolved != context.member_agent_id {
                 return Err(FunctionCallError::RespondToModel(
                     "team_task_claim member_id must identify this teammate process".to_string(),
@@ -2487,20 +2624,15 @@ async fn teammate_team_task_claim(
         None => context.member_agent_id.clone(),
     };
     validate_store_task_claim(
-        turn.config.codex_home.as_path(),
+        &teams_root,
         &context.team_name,
         &args.task_id,
         &member_agent_id,
     )?;
-    let task = team_coord::update_task(
-        turn.config.codex_home.as_path(),
-        &context.team_name,
-        &args.task_id,
-        |task| {
-            task.owner = Some(member_agent_id.clone());
-            task.status = team_coord::TaskStatus::InProgress;
-        },
-    )
+    let task = team_coord::update_task(&teams_root, &context.team_name, &args.task_id, |task| {
+        task.owner = Some(member_agent_id.clone());
+        task.status = team_coord::TaskStatus::InProgress;
+    })
     .map_err(|err| FunctionCallError::RespondToModel(format!("failed to claim team task: {err}")))?
     .ok_or_else(|| {
         FunctionCallError::RespondToModel(format!("team task {} not found", args.task_id))
@@ -2525,10 +2657,10 @@ async fn teammate_team_task_list(
         identity,
         /*sender_member_id*/ None,
     )?;
-    let tasks = team_coord::list_tasks(turn.config.codex_home.as_path(), &context.team_name)
-        .map_err(|err| {
-            FunctionCallError::RespondToModel(format!("failed to list team tasks: {err}"))
-        })?;
+    let teams_root = teams_root_for_turn(turn);
+    let tasks = team_coord::list_tasks(&teams_root, &context.team_name).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to list team tasks: {err}"))
+    })?;
 
     json_output(
         &StoreTeamTaskListResult { tasks },
@@ -2673,8 +2805,8 @@ async fn team_message_list(
     if matches!(args.target.as_deref(), Some("all") | Some("lead") | None)
         && let Ok(team_name) = registry_team_name(session.as_ref(), team_id).await
     {
-        let teams_root = turn.config.codex_home.as_path();
-        let inbox = team_store::read_mailbox(teams_root, &team_name, team_store::TEAM_LEAD_NAME)
+        let teams_root = teams_root_for_turn(turn.as_ref());
+        let inbox = team_store::read_mailbox(&teams_root, &team_name, team_store::TEAM_LEAD_NAME)
             .unwrap_or_default();
         for entry in inbox {
             if !is_model_visible_lead_mailbox_entry(&entry) {
@@ -2707,6 +2839,84 @@ fn is_model_visible_lead_mailbox_entry(entry: &team_store::TeammateMessage) -> b
     team_coord::parse_idle_notification(&entry.text).is_none()
 }
 
+fn claude_recipient_display_name(to: &str) -> String {
+    if to.eq_ignore_ascii_case("lead") {
+        team_store::TEAM_LEAD_NAME.to_string()
+    } else {
+        to.to_string()
+    }
+}
+
+fn team_member_color(
+    teams_root: &std::path::Path,
+    team_name: &str,
+    member_name: &str,
+) -> Option<String> {
+    team_store::read_config(teams_root, team_name)
+        .ok()
+        .flatten()
+        .and_then(|config| {
+            config
+                .members
+                .into_iter()
+                .find(|member| member.name.eq_ignore_ascii_case(member_name))
+                .and_then(|member| member.color)
+        })
+}
+
+fn mailbox_broadcast_recipients(output_text: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(output_text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("targets")
+                .or_else(|| value.get("recipients"))
+                .and_then(serde_json::Value::as_array)
+                .map(|targets| {
+                    targets
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_default()
+}
+
+fn claude_broadcast_message(recipients: &[String]) -> String {
+    if recipients.is_empty() {
+        "No teammates to broadcast to (you are the only team member)".to_string()
+    } else {
+        format!(
+            "Message broadcast to {} teammate(s): {}",
+            recipients.len(),
+            recipients.join(", ")
+        )
+    }
+}
+
+fn claude_send_message_result(
+    result: ClaudeSendMessageResult,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    json_output(&result, Some(true), "SendMessage")
+}
+
+fn claude_plan_approval_permission_mode(turn: &TurnContext) -> String {
+    match turn.collaboration_mode.mode {
+        ModeKind::Plan => "default",
+        ModeKind::Default | ModeKind::PairProgramming | ModeKind::Execute => {
+            match turn.approval_policy.value() {
+                AskForApproval::Never => "bypassPermissions",
+                AskForApproval::UnlessTrusted
+                | AskForApproval::OnFailure
+                | AskForApproval::OnRequest
+                | AskForApproval::Granular(_) => "default",
+            }
+        }
+    }
+    .to_string()
+}
+
 async fn claude_send_message(
     session: Arc<Session>,
     turn: Arc<TurnContext>,
@@ -2717,40 +2927,66 @@ async fn claude_send_message(
 
     match args.message {
         ClaudeSendMessageContent::Text(message) => {
-            let team_id = if crate::team::teammate_identity().is_some() {
-                None
-            } else {
-                Some(
-                    claude_team_context(session.as_ref(), turn.as_ref())
-                        .await?
-                        .team_id
-                        .to_string(),
-                )
-            };
-            team_send_args(
+            let context = claude_team_context(session.as_ref(), turn.as_ref()).await?;
+            let team_id = context.is_team_lead.then(|| context.team_id.to_string());
+            let summary = args.summary;
+            let output = team_send_args(
                 Arc::clone(&session),
                 Arc::clone(&turn),
                 TeamSendArgs {
                     team_id,
                     to: Some(to.clone()),
-                    summary: args.summary,
+                    summary: summary.clone(),
                     sender_member_id: None,
                     target: None,
                     member_id: None,
                     member_name: None,
                     delivery_mode: None,
-                    message: Some(message),
+                    message: Some(message.clone()),
                     items: None,
                 },
                 "SendMessage",
             )
             .await?;
-            let content = if to == "*" {
-                "Message broadcast to teammates".to_string()
+            let teams_root = teams_root_for_turn(turn.as_ref());
+            let (message_text, recipients, routing_target, target_color) = if to == "*" {
+                let recipients = mailbox_broadcast_recipients(&output.into_text());
+                (
+                    claude_broadcast_message(&recipients),
+                    Some(recipients),
+                    "@team".to_string(),
+                    None,
+                )
             } else {
-                format!("Message sent to {to}'s inbox")
+                let recipient = claude_recipient_display_name(&to);
+                let target_color = team_member_color(&teams_root, &context.team_name, &recipient);
+                (
+                    format!("Message sent to {recipient}'s inbox"),
+                    None,
+                    format!("@{recipient}"),
+                    target_color,
+                )
             };
-            Ok(FunctionToolOutput::from_text(content, Some(true)))
+            let routing = if recipients.as_ref().is_some_and(Vec::is_empty) {
+                None
+            } else {
+                Some(ClaudeMessageRouting {
+                    sender: context.sender_name,
+                    sender_color: context.sender_color,
+                    target: routing_target,
+                    target_color,
+                    summary,
+                    content: Some(message),
+                })
+            };
+            claude_send_message_result(ClaudeSendMessageResult {
+                success: true,
+                message: message_text,
+                routing,
+                recipients,
+                request_id: None,
+                target: None,
+            })
         }
         ClaudeSendMessageContent::Structured(message) => {
             if to == "*" {
@@ -2759,11 +2995,12 @@ async fn claude_send_message(
                 ));
             }
             let context = claude_team_context(session.as_ref(), turn.as_ref()).await?;
+            let teams_root = teams_root_for_turn(turn.as_ref());
             match message {
                 ClaudeStructuredMessage::ShutdownRequest { reason } => {
                     let request_id = format!("shutdown-{}-{}", to, unix_millis());
                     team_coord::send_shutdown_request(
-                        turn.config.codex_home.as_path(),
+                        &teams_root,
                         &context.team_name,
                         &to,
                         &context.sender_name,
@@ -2776,10 +3013,14 @@ async fn claude_send_message(
                             "failed to send shutdown request: {err}"
                         ))
                     })?;
-                    Ok(FunctionToolOutput::from_text(
-                        format!("Shutdown request sent to {to}. Request ID: {request_id}"),
-                        Some(true),
-                    ))
+                    claude_send_message_result(ClaudeSendMessageResult {
+                        success: true,
+                        message: format!("Shutdown request sent to {to}. Request ID: {request_id}"),
+                        routing: None,
+                        recipients: None,
+                        request_id: Some(request_id),
+                        target: Some(to),
+                    })
                 }
                 ClaudeStructuredMessage::ShutdownResponse {
                     request_id,
@@ -2799,13 +3040,13 @@ async fn claude_send_message(
                     }
                     if approve {
                         write_json_mailbox_message(
-                            turn.config.codex_home.as_path(),
+                            &teams_root,
                             &context.team_name,
                             team_store::TEAM_LEAD_NAME,
                             &context.sender_name,
                             &ClaudeShutdownApprovedMessage {
                                 kind: "shutdown_approved",
-                                request_id,
+                                request_id: request_id.clone(),
                                 from: context.sender_name.clone(),
                                 timestamp: team_coord::now_rfc3339(),
                                 pane_id: None,
@@ -2813,33 +3054,43 @@ async fn claude_send_message(
                             },
                             context.sender_color,
                         )?;
-                        Ok(FunctionToolOutput::from_text(
-                            format!(
+                        claude_send_message_result(ClaudeSendMessageResult {
+                            success: true,
+                            message: format!(
                                 "Shutdown approved. Sent confirmation to team-lead. Agent {} is now exiting.",
                                 context.sender_name
                             ),
-                            Some(true),
-                        ))
+                            routing: None,
+                            recipients: None,
+                            request_id: Some(request_id),
+                            target: None,
+                        })
                     } else {
                         let reason = reason.unwrap_or_default();
                         write_json_mailbox_message(
-                            turn.config.codex_home.as_path(),
+                            &teams_root,
                             &context.team_name,
                             team_store::TEAM_LEAD_NAME,
                             &context.sender_name,
                             &ClaudeShutdownRejectedMessage {
                                 kind: "shutdown_rejected",
-                                request_id,
+                                request_id: request_id.clone(),
                                 from: context.sender_name.clone(),
                                 reason: reason.clone(),
                                 timestamp: team_coord::now_rfc3339(),
                             },
                             context.sender_color,
                         )?;
-                        Ok(FunctionToolOutput::from_text(
-                            format!("Shutdown rejected. Reason: \"{reason}\". Continuing to work."),
-                            Some(true),
-                        ))
+                        claude_send_message_result(ClaudeSendMessageResult {
+                            success: true,
+                            message: format!(
+                                "Shutdown rejected. Reason: \"{reason}\". Continuing to work."
+                            ),
+                            routing: None,
+                            recipients: None,
+                            request_id: Some(request_id),
+                            target: None,
+                        })
                     }
                 }
                 ClaudeStructuredMessage::PlanApprovalResponse {
@@ -2859,17 +3110,18 @@ async fn claude_send_message(
                         Some(feedback.unwrap_or_else(|| "Plan needs revision".to_string()))
                     };
                     write_json_mailbox_message(
-                        turn.config.codex_home.as_path(),
+                        &teams_root,
                         &context.team_name,
                         &to,
                         team_store::TEAM_LEAD_NAME,
                         &ClaudePlanApprovalResponseMessage {
                             kind: "plan_approval_response",
-                            request_id,
+                            request_id: request_id.clone(),
                             approved: approve,
                             feedback: feedback.clone(),
                             timestamp: team_coord::now_rfc3339(),
-                            permission_mode: approve.then(|| "default".to_string()),
+                            permission_mode: approve
+                                .then(|| claude_plan_approval_permission_mode(turn.as_ref())),
                         },
                         None,
                     )?;
@@ -2883,7 +3135,14 @@ async fn claude_send_message(
                             feedback.unwrap_or_default()
                         )
                     };
-                    Ok(FunctionToolOutput::from_text(content, Some(true)))
+                    claude_send_message_result(ClaudeSendMessageResult {
+                        success: true,
+                        message: content,
+                        routing: None,
+                        recipients: None,
+                        request_id: Some(request_id),
+                        target: None,
+                    })
                 }
             }
         }
@@ -2990,10 +3249,10 @@ async fn claude_task_create(
     let mut task = team_coord::Task::new(subject.clone(), description);
     task.active_form = optional_non_empty(args.active_form, "active form")?;
     task.metadata = args.metadata;
-    let id = team_coord::create_task(turn.config.codex_home.as_path(), &context.team_name, task)
-        .map_err(|err| {
-            FunctionCallError::RespondToModel(format!("failed to create team task: {err}"))
-        })?;
+    let teams_root = teams_root_for_turn(turn.as_ref());
+    let id = team_coord::create_task(&teams_root, &context.team_name, task).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to create team task: {err}"))
+    })?;
 
     Ok(FunctionToolOutput::from_text(
         format!("Task #{id} created successfully: {subject}"),
@@ -3019,9 +3278,9 @@ async fn claude_task_update(
         metadata,
     } = args;
     let context = claude_team_context(session.as_ref(), turn.as_ref()).await?;
-    let teams_root = turn.config.codex_home.as_path();
+    let teams_root = teams_root_for_turn(turn.as_ref());
     let task_id = non_empty(task_id, "task id")?;
-    let Some(existing_task) = team_coord::get_task(teams_root, &context.team_name, &task_id)
+    let Some(existing_task) = team_coord::get_task(&teams_root, &context.team_name, &task_id)
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("failed to read team task: {err}"))
         })?
@@ -3034,10 +3293,10 @@ async fn claude_task_update(
 
     let status = status.as_deref().map(claude_task_status).transpose()?;
     if matches!(status, Some(ClaudeTaskStatusUpdate::Deleted)) {
-        team_coord::delete_task(teams_root, &context.team_name, &task_id).map_err(|err| {
+        team_coord::delete_task(&teams_root, &context.team_name, &task_id).map_err(|err| {
             FunctionCallError::RespondToModel(format!("failed to delete team task: {err}"))
         })?;
-        remove_deleted_task_references(teams_root, &context.team_name, &task_id)?;
+        remove_deleted_task_references(&teams_root, &context.team_name, &task_id)?;
         return Ok(FunctionToolOutput::from_text(
             format!("Updated task #{task_id} deleted"),
             Some(true),
@@ -3076,7 +3335,7 @@ async fn claude_task_update(
         updated_fields.push("status");
     }
 
-    let updated_task = team_coord::update_task(teams_root, &context.team_name, &task_id, |task| {
+    let updated_task = team_coord::update_task(&teams_root, &context.team_name, &task_id, |task| {
         if let Some(subject) = subject {
             task.subject = subject;
         }
@@ -3116,7 +3375,7 @@ async fn claude_task_update(
     if let Some(blocks) = add_blocks {
         let mut changed = false;
         for blocked_id in blocks {
-            changed |= block_store_task(teams_root, &context.team_name, &task_id, &blocked_id)?;
+            changed |= block_store_task(&teams_root, &context.team_name, &task_id, &blocked_id)?;
         }
         if changed {
             updated_fields.push("blocks");
@@ -3125,7 +3384,7 @@ async fn claude_task_update(
     if let Some(blocked_by) = add_blocked_by {
         let mut changed = false;
         for blocker_id in blocked_by {
-            changed |= block_store_task(teams_root, &context.team_name, &blocker_id, &task_id)?;
+            changed |= block_store_task(&teams_root, &context.team_name, &blocker_id, &task_id)?;
         }
         if changed {
             updated_fields.push("blockedBy");
@@ -3148,7 +3407,8 @@ async fn claude_task_list(
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let _args: EmptyArgs = parse_arguments(&arguments)?;
     let context = claude_team_context(session.as_ref(), turn.as_ref()).await?;
-    let tasks = sorted_visible_store_tasks(turn.config.codex_home.as_path(), &context.team_name)?;
+    let teams_root = teams_root_for_turn(turn.as_ref());
+    let tasks = sorted_visible_store_tasks(&teams_root, &context.team_name)?;
     Ok(FunctionToolOutput::from_text(
         format_claude_task_list(&tasks),
         Some(true),
@@ -3163,12 +3423,10 @@ async fn claude_task_get(
     let args: ClaudeTaskGetArgs = parse_arguments(&arguments)?;
     let context = claude_team_context(session.as_ref(), turn.as_ref()).await?;
     let task_id = non_empty(args.task_id, "task id")?;
-    let task = team_coord::get_task(
-        turn.config.codex_home.as_path(),
-        &context.team_name,
-        &task_id,
-    )
-    .map_err(|err| FunctionCallError::RespondToModel(format!("failed to read team task: {err}")))?;
+    let teams_root = teams_root_for_turn(turn.as_ref());
+    let task = team_coord::get_task(&teams_root, &context.team_name, &task_id).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to read team task: {err}"))
+    })?;
     Ok(FunctionToolOutput::from_text(
         format_claude_task_get(task.as_ref()),
         Some(true),
@@ -3552,8 +3810,9 @@ async fn team_member_stop(
     require_team_lead(session.as_ref(), team_id, "team_member_stop").await?;
     let member_id = id_from_str("member", &args.member_id)?;
     let team_name = registry_team_name(session.as_ref(), team_id).await?;
-    let teams_root = turn.config.codex_home.as_path();
-    let process_member = active_store_member_by_id(teams_root, &team_name, &member_id.to_string())?;
+    let teams_root = teams_root_for_turn(turn.as_ref());
+    let process_member =
+        active_store_member_by_id(&teams_root, &team_name, &member_id.to_string())?;
     let registry = session.services.agent_control.team_registry();
     let snapshot = team_result(
         session.as_ref(),
@@ -3564,8 +3823,8 @@ async fn team_member_stop(
     )
     .await?;
     if let Some(member) = process_member {
-        send_process_shutdown_request(teams_root, &team_name, &member)?;
-        mark_store_members_inactive(teams_root, &team_name, &[member_id.to_string()])?;
+        send_process_shutdown_request(&teams_root, &team_name, &member)?;
+        mark_store_members_inactive(&teams_root, &team_name, &[member_id.to_string()])?;
     }
     json_output(
         &TeamMemberStopResult { snapshot },
@@ -3583,8 +3842,8 @@ async fn team_stop(
     let team_id = id_from_str("team", &args.team_id)?;
     require_team_lead(session.as_ref(), team_id, "team_stop").await?;
     let team_name = registry_team_name(session.as_ref(), team_id).await?;
-    let teams_root = turn.config.codex_home.as_path();
-    let process_members = active_store_members(teams_root, &team_name)?;
+    let teams_root = teams_root_for_turn(turn.as_ref());
+    let process_members = active_store_members(&teams_root, &team_name)?;
     let registry = session.services.agent_control.team_registry();
     let snapshot = team_result(
         session.as_ref(),
@@ -3595,14 +3854,14 @@ async fn team_stop(
     )
     .await?;
     for member in &process_members {
-        send_process_shutdown_request(teams_root, &team_name, member)?;
+        send_process_shutdown_request(&teams_root, &team_name, member)?;
     }
     let member_ids = process_members
         .iter()
         .filter_map(|member| member.member_id.clone())
         .collect::<Vec<_>>();
     if !member_ids.is_empty() {
-        mark_store_members_inactive(teams_root, &team_name, &member_ids)?;
+        mark_store_members_inactive(&teams_root, &team_name, &member_ids)?;
     }
     json_output(&TeamStopResult { snapshot }, Some(true), "team_stop")
 }
@@ -4006,7 +4265,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn teammate_launch_spec_inherits_codex_home_provider_and_auth_env() {
+    async fn teammate_launch_spec_inherits_codex_home_without_provider_cli_overrides() {
         let (_session, mut turn) = make_session_and_context().await;
         let codex_home = tempfile::tempdir().expect("codex home");
         let cwd = tempfile::tempdir().expect("cwd");
@@ -4027,6 +4286,35 @@ mod tests {
             supports_websockets: true,
             ..Default::default()
         };
+        let user_config_path = codex_home.path().join(codex_config::CONFIG_TOML_FILE);
+        let user_config_toml = r#"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+base_url = "https://gw2.oops.asia/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = true
+"#;
+        std::fs::write(&user_config_path, user_config_toml).expect("write user config");
+        let user_config = toml::from_str(user_config_toml).expect("user config toml");
+        config.config_layer_stack = codex_config::ConfigLayerStack::new(
+            vec![codex_config::ConfigLayerEntry::new(
+                ConfigLayerSource::User {
+                    file: codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(
+                        &user_config_path,
+                    )
+                    .expect("absolute user config path"),
+                    profile: None,
+                },
+                user_config,
+            )],
+            codex_config::ConfigRequirements::default(),
+            codex_config::ConfigRequirementsToml::default(),
+        )
+        .expect("config layer stack");
         let inherited_model_override = format!(r#"model="{}""#, turn.model_info.slug);
 
         let spec = build_teammate_launch_spec_with_binary(
@@ -4041,6 +4329,7 @@ mod tests {
                 text_elements: Vec::new(),
             }],
             Some("inherit"),
+            None,
             binary.clone(),
         )
         .expect("launch spec");
@@ -4058,26 +4347,15 @@ mod tests {
         assert!(contains_arg_pair(&spec.flags, "--agent-type", "reviewer"));
         assert!(contains_arg_pair(&spec.flags, "--enable", "teams"));
         assert!(contains_flag_pair(&spec.flags, &inherited_model_override));
-        assert!(contains_flag_pair(
-            &spec.flags,
-            r#"model_provider="custom""#
-        ));
-        assert!(contains_flag_pair(
-            &spec.flags,
-            r#"model_providers.custom.base_url="https://gw2.oops.asia/v1""#
-        ));
-        assert!(contains_flag_pair(
-            &spec.flags,
-            r#"model_providers.custom.env_key="OPENAI_API_KEY""#
-        ));
-        assert!(contains_flag_pair(
-            &spec.flags,
-            "model_providers.custom.requires_openai_auth=true"
-        ));
-        assert!(contains_flag_pair(
-            &spec.flags,
-            "model_providers.custom.supports_websockets=true"
-        ));
+        assert!(
+            !spec
+                .flags
+                .iter()
+                .any(|flag| flag.starts_with("model_provider=")
+                    || flag.starts_with("openai_base_url=")
+                    || flag.starts_with("model_providers."))
+        );
+        assert!(!spec.flags.iter().any(|flag| flag.contains("gw2.oops.asia")));
         assert!(
             spec.env
                 .contains(&("CODEX_TEAMMATE".to_string(), "1".to_string()))
@@ -4086,6 +4364,163 @@ mod tests {
             "CODEX_HOME".to_string(),
             codex_home.path().to_string_lossy().into_owned()
         )));
+        assert!(spec.env.contains(&(
+            team_store::TEAM_STORE_ROOT_ENV_VAR.to_string(),
+            codex_home.path().to_string_lossy().into_owned()
+        )));
+    }
+
+    #[tokio::test]
+    async fn teammate_launch_spec_forwards_active_config_profile() {
+        let (_session, mut turn) = make_session_and_context().await;
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let binary = cwd.path().join("bin").join("codex");
+        let config = Arc::make_mut(&mut turn.config);
+        config.codex_home =
+            codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(codex_home.path())
+                .expect("absolute codex home");
+        config.cwd = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(cwd.path())
+            .expect("absolute cwd");
+        config.model_provider_id = "custom".to_string();
+        config.model_provider = ModelProviderInfo {
+            name: "custom".to_string(),
+            base_url: Some("https://gw2.oops.asia/v1".to_string()),
+            env_key: Some("OPENAI_API_KEY".to_string()),
+            wire_api: codex_model_provider_info::WireApi::Responses,
+            requires_openai_auth: true,
+            supports_websockets: true,
+            ..Default::default()
+        };
+        let user_config_path = codex_home.path().join("work.config.toml");
+        let user_config = toml::from_str(
+            r#"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+base_url = "https://gw2.oops.asia/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = true
+"#,
+        )
+        .expect("profile config toml");
+        config.config_layer_stack = codex_config::ConfigLayerStack::new(
+            vec![codex_config::ConfigLayerEntry::new(
+                ConfigLayerSource::User {
+                    file: codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(
+                        &user_config_path,
+                    )
+                    .expect("absolute profile config path"),
+                    profile: Some("work".to_string()),
+                },
+                user_config,
+            )],
+            codex_config::ConfigRequirements::default(),
+            codex_config::ConfigRequirementsToml::default(),
+        )
+        .expect("config layer stack");
+
+        let spec = build_teammate_launch_spec_with_binary(
+            &turn,
+            "rocket",
+            ThreadId::new(),
+            "alice",
+            /*profile*/ None,
+            &[],
+            &[UserInput::Text {
+                text: "inspect this repo".to_string(),
+                text_elements: Vec::new(),
+            }],
+            Some("inherit"),
+            None,
+            binary,
+        )
+        .expect("launch spec");
+
+        assert!(contains_arg_pair(&spec.flags, "--profile", "work"));
+        assert!(
+            spec.flags
+                .iter()
+                .position(|arg| arg == "--profile")
+                .expect("profile flag")
+                < spec
+                    .flags
+                    .iter()
+                    .position(|arg| arg == "teammate")
+                    .expect("teammate subcommand")
+        );
+        assert!(
+            !spec
+                .flags
+                .iter()
+                .any(|flag| flag.starts_with("model_provider=")
+                    || flag.starts_with("openai_base_url=")
+                    || flag.starts_with("model_providers."))
+        );
+    }
+
+    #[tokio::test]
+    async fn teammate_launch_spec_does_not_override_provider_from_resolved_lead_config() {
+        let (_session, mut turn) = make_session_and_context().await;
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let binary = cwd.path().join("bin").join("codex");
+        let config = Arc::make_mut(&mut turn.config);
+        config.codex_home =
+            codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(codex_home.path())
+                .expect("absolute codex home");
+        config.cwd = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(cwd.path())
+            .expect("absolute cwd");
+        config.model_provider_id = "mock".to_string();
+        config.model_provider = ModelProviderInfo {
+            name: "mock".to_string(),
+            base_url: Some("http://127.0.0.1:12345/v1".to_string()),
+            env_key: Some("PATH".to_string()),
+            wire_api: codex_model_provider_info::WireApi::Responses,
+            requires_openai_auth: false,
+            supports_websockets: false,
+            ..Default::default()
+        };
+
+        let spec = build_teammate_launch_spec_with_binary(
+            &turn,
+            "rocket",
+            ThreadId::new(),
+            "alice",
+            /*profile*/ None,
+            &[],
+            &[UserInput::Text {
+                text: "inspect this repo".to_string(),
+                text_elements: Vec::new(),
+            }],
+            Some("inherit"),
+            None,
+            binary,
+        )
+        .expect("launch spec");
+
+        assert!(
+            !spec
+                .flags
+                .iter()
+                .any(|flag| flag.starts_with("model_provider=")
+                    || flag.starts_with("openai_base_url=")
+                    || flag.starts_with("model_providers."))
+        );
+        assert!(
+            !spec
+                .flags
+                .iter()
+                .any(|flag| flag.contains("127.0.0.1:12345"))
+        );
+        assert!(
+            spec.env
+                .iter()
+                .any(|(key, value)| key == "PATH" && !value.is_empty())
+        );
     }
 
     #[test]
@@ -4217,7 +4652,8 @@ mod tests {
             .requires_openai_auth = true;
         turn.auth_manager = None;
 
-        let err = ensure_teammate_auth_ready(&turn)
+        let mut env = Vec::new();
+        let err = apply_lead_auth_to_teammate_env(&turn, &mut env)
             .await
             .expect_err("missing auth must reject before pane creation");
 
@@ -4236,124 +4672,102 @@ mod tests {
             .model_provider
             .requires_openai_auth = true;
 
-        ensure_teammate_auth_ready(&turn)
+        let mut env = Vec::new();
+        apply_lead_auth_to_teammate_env(&turn, &mut env)
             .await
             .expect("lead auth should satisfy teammate spawn readiness");
     }
 
-    #[test]
-    fn teammate_model_provider_overrides_forward_cli_only_provider_without_secret_values() {
-        let provider = ModelProviderInfo {
-            name: "mock".to_string(),
-            base_url: Some("http://127.0.0.1:12345/v1".to_string()),
-            env_key: Some("PATH".to_string()),
-            env_key_instructions: Some("Use PATH for tests".to_string()),
-            experimental_bearer_token: Some("secret-token".to_string()),
-            wire_api: codex_model_provider_info::WireApi::Responses,
-            query_params: Some(std::collections::HashMap::from([(
-                "api-version".to_string(),
-                "2026-06-08".to_string(),
-            )])),
-            http_headers: Some(std::collections::HashMap::from([(
-                "authorization".to_string(),
-                "Bearer secret-token".to_string(),
-            )])),
-            env_http_headers: Some(std::collections::HashMap::from([(
-                "x-test-key".to_string(),
-                "PATH".to_string(),
-            )])),
-            request_max_retries: Some(0),
-            stream_max_retries: Some(1),
-            stream_idle_timeout_ms: Some(2),
-            websocket_connect_timeout_ms: Some(3),
-            requires_openai_auth: false,
-            supports_websockets: false,
-            ..Default::default()
-        };
-        let mut flags = vec!["teammate".to_string()];
+    #[tokio::test]
+    async fn teammate_auth_env_overwrites_inherited_api_keys_with_lead_api_key() {
+        let (_session, mut turn) = make_session_and_context().await;
+        let config = Arc::make_mut(&mut turn.config);
+        config.model_provider.requires_openai_auth = true;
+        config.model_provider.env_key = Some("CUSTOM_PROVIDER_API_KEY".to_string());
+        turn.auth_manager = Some(codex_login::AuthManager::from_auth_for_testing(
+            codex_login::CodexAuth::from_api_key("lead-auth-json-key"),
+        ));
+        let mut env = vec![
+            (
+                codex_login::CODEX_API_KEY_ENV_VAR.to_string(),
+                "stale-codex-api-key".to_string(),
+            ),
+            (
+                codex_login::OPENAI_API_KEY_ENV_VAR.to_string(),
+                "stale-openai-api-key".to_string(),
+            ),
+            (
+                "CUSTOM_PROVIDER_API_KEY".to_string(),
+                "stale-provider-api-key".to_string(),
+            ),
+        ];
 
-        append_teammate_model_provider_overrides(&mut flags, "mock", &provider);
+        apply_lead_auth_to_teammate_env(&turn, &mut env)
+            .await
+            .expect("lead api-key auth should be usable by spawned teammate");
 
-        assert!(contains_flag_pair(&flags, r#"model_provider="mock""#));
-        assert!(contains_flag_pair(
-            &flags,
-            r#"model_providers.mock.name="mock""#
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            r#"model_providers.mock.base_url="http://127.0.0.1:12345/v1""#
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            r#"model_providers.mock.env_key="PATH""#
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            r#"model_providers.mock.wire_api="responses""#
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            r#"model_providers.mock.query_params.api-version="2026-06-08""#
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            r#"model_providers.mock.env_http_headers.x-test-key="PATH""#
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            "model_providers.mock.request_max_retries=0"
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            "model_providers.mock.stream_max_retries=1"
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            "model_providers.mock.stream_idle_timeout_ms=2"
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            "model_providers.mock.websocket_connect_timeout_ms=3"
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            "model_providers.mock.requires_openai_auth=false"
-        ));
-        assert!(contains_flag_pair(
-            &flags,
-            "model_providers.mock.supports_websockets=false"
-        ));
-        let rendered = flags.join("\n");
-        assert!(!rendered.contains("experimental_bearer_token"));
-        assert!(!rendered.contains("model_providers.mock.http_headers"));
-        assert!(!rendered.contains("secret-token"));
+        assert_eq!(
+            env,
+            vec![
+                (
+                    codex_login::CODEX_API_KEY_ENV_VAR.to_string(),
+                    "lead-auth-json-key".to_string(),
+                ),
+                (
+                    codex_login::OPENAI_API_KEY_ENV_VAR.to_string(),
+                    "lead-auth-json-key".to_string(),
+                ),
+                (
+                    "CUSTOM_PROVIDER_API_KEY".to_string(),
+                    "lead-auth-json-key".to_string(),
+                ),
+            ]
+        );
     }
 
-    #[test]
-    fn teammate_openai_provider_override_uses_openai_base_url_escape_hatch() {
-        let provider = ModelProviderInfo {
-            base_url: Some("http://127.0.0.1:23456/v1".to_string()),
-            ..Default::default()
-        };
-        let mut flags = vec!["teammate".to_string()];
-
-        append_teammate_model_provider_overrides(&mut flags, OPENAI_PROVIDER_ID, &provider);
-
-        assert!(contains_flag_pair(&flags, r#"model_provider="openai""#));
-        assert!(contains_flag_pair(
-            &flags,
-            r#"openai_base_url="http://127.0.0.1:23456/v1""#
+    #[tokio::test]
+    async fn teammate_auth_env_removes_inherited_api_keys_for_token_auth() {
+        let (_session, mut turn) = make_session_and_context().await;
+        let config = Arc::make_mut(&mut turn.config);
+        config.model_provider.requires_openai_auth = true;
+        config.model_provider.env_key = Some("CUSTOM_PROVIDER_API_KEY".to_string());
+        turn.auth_manager = Some(codex_login::AuthManager::from_auth_for_testing(
+            codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
         ));
-        assert!(
-            !flags
-                .iter()
-                .any(|flag| flag.starts_with("model_providers.openai."))
-        );
+        let mut env = vec![
+            (
+                codex_login::CODEX_API_KEY_ENV_VAR.to_string(),
+                "stale-codex-api-key".to_string(),
+            ),
+            (
+                codex_login::OPENAI_API_KEY_ENV_VAR.to_string(),
+                "stale-openai-api-key".to_string(),
+            ),
+            (
+                "CUSTOM_PROVIDER_API_KEY".to_string(),
+                "stale-provider-api-key".to_string(),
+            ),
+            ("PATH".to_string(), "/bin".to_string()),
+        ];
+
+        apply_lead_auth_to_teammate_env(&turn, &mut env)
+            .await
+            .expect("lead token auth should satisfy teammate spawn readiness");
+
+        assert_eq!(env, vec![("PATH".to_string(), "/bin".to_string())]);
     }
 
     #[derive(Debug, Deserialize)]
     struct TestCreateTeamResult {
         team: crate::team::Team,
+        team_name: String,
+        team_file_path: String,
+        lead_agent_id: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TestClaudeCreateTeamResult {
         team_name: String,
         team_file_path: String,
         lead_agent_id: String,
@@ -4372,18 +4786,6 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct TestTeamStopResult {
         snapshot: crate::team::TeamSnapshot,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct TestTeamSendResult {
-        message: crate::team::TeamMessage,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct TestMailboxBroadcastResult {
-        delivered: bool,
-        targets: Vec<String>,
-        via: String,
     }
 
     fn process_member_record(
@@ -4541,8 +4943,6 @@ mod tests {
             assert!(info.entry.search_text.contains("team"));
             if matches!(tool, TeamTool::CreateTeam | TeamTool::ClaudeTeamCreate) {
                 assert!(info.entry.search_text.contains("swarm"));
-                assert!(info.entry.search_text.contains("collaboration"));
-                assert!(info.entry.search_text.contains("coordinate"));
                 assert!(info.entry.search_text.contains("团队"));
                 assert!(info.entry.search_text.contains("队友"));
             } else if matches!(tool, TeamTool::TeamSpawnMember) {
@@ -4550,7 +4950,15 @@ mod tests {
             }
             assert!(source_description.contains("explicit Codex Teams workspaces"));
             assert!(!output.description.is_empty());
-            for forbidden_search_trigger in ["agent", "work", "working"] {
+            for forbidden_search_trigger in [
+                "agent",
+                "work",
+                "working",
+                "collaboration",
+                "collaborate",
+                "coordinate",
+                "group",
+            ] {
                 assert!(
                     !info.entry.search_text.contains(forbidden_search_trigger),
                     "Teams search text must not match ordinary agent trigger {forbidden_search_trigger:?}"
@@ -4687,6 +5095,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_team_create_returns_exact_claude_result_shape() {
+        let (session, turn) = make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let created = TeamHandler::for_tool(TeamTool::ClaudeTeamCreate)
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "TeamCreate",
+                json!({
+                    "team_name": "rocket",
+                    "description": "Claude-compatible envelope",
+                    "agent_type": "researcher"
+                }),
+            ))
+            .await
+            .expect("TeamCreate");
+        let created: TestClaudeCreateTeamResult =
+            serde_json::from_str(&text_output(created)).expect("Claude TeamCreate result");
+
+        assert_eq!(created.team_name, "rocket");
+        assert_eq!(created.lead_agent_id, "team-lead@rocket");
+        assert!(created.team_file_path.ends_with("teams/rocket/config.json"));
+    }
+
+    #[tokio::test]
     async fn claude_task_aliases_use_shared_task_files_and_text_results() {
         let (session, turn) = make_session_and_context().await;
         let registry = session.services.agent_control.team_registry();
@@ -4810,7 +5245,40 @@ mod tests {
             ))
             .await
             .expect("SendMessage plain text");
-        assert_eq!(text_output(sent), "Message sent to alice's inbox");
+        let sent: serde_json::Value =
+            serde_json::from_str(&text_output(sent)).expect("SendMessage JSON result");
+        assert_eq!(sent["success"], true);
+        assert_eq!(sent["message"], "Message sent to alice's inbox");
+        assert_eq!(sent["routing"]["sender"], team_store::TEAM_LEAD_NAME);
+        assert_eq!(sent["routing"]["target"], "@alice");
+        assert_eq!(sent["routing"]["targetColor"], "green");
+        assert_eq!(sent["routing"]["summary"], "assign parser");
+        assert_eq!(sent["routing"]["content"], "start task #1");
+
+        let broadcast = TeamHandler::for_tool(TeamTool::ClaudeSendMessage)
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "SendMessage",
+                json!({
+                    "to": "*",
+                    "summary": "announce",
+                    "message": "stand by"
+                }),
+            ))
+            .await
+            .expect("SendMessage broadcast");
+        let broadcast: serde_json::Value =
+            serde_json::from_str(&text_output(broadcast)).expect("broadcast JSON result");
+        assert_eq!(broadcast["success"], true);
+        assert_eq!(
+            broadcast["message"],
+            "Message broadcast to 1 teammate(s): alice"
+        );
+        assert_eq!(broadcast["recipients"], json!(["alice"]));
+        assert_eq!(broadcast["routing"]["target"], "@team");
+        assert_eq!(broadcast["routing"]["summary"], "announce");
+        assert_eq!(broadcast["routing"]["content"], "stand by");
 
         let shutdown = TeamHandler::for_tool(TeamTool::ClaudeSendMessage)
             .handle(invocation(
@@ -4827,20 +5295,169 @@ mod tests {
             ))
             .await
             .expect("SendMessage shutdown request");
+        let shutdown: serde_json::Value =
+            serde_json::from_str(&text_output(shutdown)).expect("shutdown JSON result");
         assert!(
-            text_output(shutdown).starts_with("Shutdown request sent to alice."),
+            shutdown["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Shutdown request sent to alice.")),
             "shutdown output should match Claude SendMessage text"
+        );
+        assert_eq!(shutdown["success"], true);
+        assert_eq!(shutdown["target"], "alice");
+        assert!(
+            shutdown["request_id"]
+                .as_str()
+                .is_some_and(|request_id| request_id.starts_with("shutdown-alice-"))
         );
 
         let inbox = team_store::read_mailbox(turn.config.codex_home.as_path(), &team.name, "alice")
             .expect("read alice inbox");
-        assert_eq!(inbox.len(), 2);
+        assert_eq!(inbox.len(), 3);
         assert_eq!(inbox[0].text, "start task #1");
         assert_eq!(inbox[0].summary.as_deref(), Some("assign parser"));
-        let shutdown = team_coord::parse_shutdown_request(&inbox[1].text)
+        assert_eq!(inbox[1].text, "stand by");
+        assert_eq!(inbox[1].summary.as_deref(), Some("announce"));
+        let shutdown = team_coord::parse_shutdown_request(&inbox[2].text)
             .expect("structured shutdown request");
         assert_eq!(shutdown.from, team_store::TEAM_LEAD_NAME);
         assert_eq!(shutdown.reason.as_deref(), Some("wrap up"));
+    }
+
+    #[tokio::test]
+    async fn claude_send_message_empty_broadcast_omits_routing() {
+        let (session, turn) = make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        TeamHandler::for_tool(TeamTool::ClaudeTeamCreate)
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "TeamCreate",
+                json!({"team_name": "Rocket"}),
+            ))
+            .await
+            .expect("TeamCreate");
+
+        let broadcast = TeamHandler::for_tool(TeamTool::ClaudeSendMessage)
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "SendMessage",
+                json!({
+                    "to": "*",
+                    "summary": "announce",
+                    "message": "stand by"
+                }),
+            ))
+            .await
+            .expect("SendMessage empty broadcast");
+        let broadcast: serde_json::Value =
+            serde_json::from_str(&text_output(broadcast)).expect("broadcast JSON result");
+
+        assert_eq!(broadcast["success"], true);
+        assert_eq!(
+            broadcast["message"],
+            "No teammates to broadcast to (you are the only team member)"
+        );
+        assert_eq!(broadcast["recipients"], json!([]));
+        assert!(broadcast.get("routing").is_none());
+    }
+
+    async fn send_plan_approval_response(
+        mode: ModeKind,
+        approval_policy: AskForApproval,
+        approve: bool,
+    ) -> team_coord::PlanApprovalResponseMessage {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.collaboration_mode.mode = mode;
+        turn.approval_policy = codex_config::Constrained::allow_any(approval_policy);
+        let registry = session.services.agent_control.team_registry();
+        let team = registry
+            .create_team("Rocket".to_string(), session.thread_id)
+            .await;
+        let member = crate::team::TeamMember::process_member_with_id(
+            ThreadId::new(),
+            "alice".to_string(),
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        write_process_member_config(
+            turn.config.codex_home.as_path(),
+            &team,
+            process_member_record(&team, &member, "alice", true),
+        );
+        let payload = if approve {
+            json!({
+                "to": "alice",
+                "message": {
+                    "type": "plan_approval_response",
+                    "request_id": "plan-1",
+                    "approve": true
+                }
+            })
+        } else {
+            json!({
+                "to": "alice",
+                "message": {
+                    "type": "plan_approval_response",
+                    "request_id": "plan-1",
+                    "approve": false,
+                    "feedback": "revise the plan"
+                }
+            })
+        };
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        TeamHandler::for_tool(TeamTool::ClaudeSendMessage)
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "SendMessage",
+                payload,
+            ))
+            .await
+            .expect("SendMessage plan approval response");
+
+        let inbox = team_store::read_mailbox(turn.config.codex_home.as_path(), &team.name, "alice")
+            .expect("read alice inbox");
+        assert_eq!(inbox.len(), 1);
+        team_coord::parse_plan_approval_response(&inbox[0].text).expect("plan approval response")
+    }
+
+    #[tokio::test]
+    async fn claude_send_message_plan_approval_inherits_lead_permission_mode() {
+        let plan_lead = send_plan_approval_response(
+            ModeKind::Plan,
+            AskForApproval::Never,
+            /*approve*/ true,
+        )
+        .await;
+        assert_eq!(plan_lead.permission_mode.as_deref(), Some("default"));
+
+        let bypass_lead = send_plan_approval_response(
+            ModeKind::Default,
+            AskForApproval::Never,
+            /*approve*/ true,
+        )
+        .await;
+        assert_eq!(
+            bypass_lead.permission_mode.as_deref(),
+            Some("bypassPermissions")
+        );
+
+        let rejected = send_plan_approval_response(
+            ModeKind::Default,
+            AskForApproval::Never,
+            /*approve*/ false,
+        )
+        .await;
+        assert!(!rejected.approved);
+        assert_eq!(rejected.feedback.as_deref(), Some("revise the plan"));
+        assert_eq!(rejected.permission_mode, None);
     }
 
     #[tokio::test]
@@ -5089,10 +5706,15 @@ mod tests {
         )
         .await
         .expect("teammate send");
-        let sent: TestTeamSendResult =
+        let sent: serde_json::Value =
             serde_json::from_str(&output.into_text()).expect("team_send result");
 
-        assert_eq!(sent.message.team_id, team.id);
+        assert_eq!(sent["success"], true);
+        assert_eq!(sent["message"], "Message sent to team-lead's inbox");
+        assert_eq!(sent["routing"]["sender"], "alice");
+        assert_eq!(sent["routing"]["target"], "@team-lead");
+        assert_eq!(sent["routing"]["summary"], "work complete");
+        assert_eq!(sent["routing"]["content"], "done");
         let inbox = team_store::read_mailbox(
             turn.config.codex_home.as_path(),
             &team.name,
@@ -5380,11 +6002,15 @@ mod tests {
             ))
             .await
             .expect("empty broadcast succeeds");
-        let empty_broadcast: TestMailboxBroadcastResult =
+        let empty_broadcast: serde_json::Value =
             serde_json::from_str(&text_output(empty_broadcast)).expect("broadcast result");
-        assert_eq!(empty_broadcast.delivered, true);
-        assert_eq!(empty_broadcast.targets, Vec::<String>::new());
-        assert_eq!(empty_broadcast.via, "mailbox");
+        assert_eq!(empty_broadcast["success"], true);
+        assert_eq!(
+            empty_broadcast["message"],
+            "No teammates to broadcast to (you are the only team member)"
+        );
+        assert_eq!(empty_broadcast["recipients"], json!([]));
+        assert!(empty_broadcast.get("routing").is_none());
         assert!(
             team_store::read_mailbox(
                 turn.config.codex_home.as_path(),
@@ -5429,11 +6055,16 @@ mod tests {
             ))
             .await
             .expect("broadcast succeeds");
-        let broadcast: TestMailboxBroadcastResult =
+        let broadcast: serde_json::Value =
             serde_json::from_str(&text_output(broadcast)).expect("broadcast result");
 
-        assert_eq!(broadcast.delivered, true);
-        assert_eq!(broadcast.targets, vec!["alice".to_string()]);
+        assert_eq!(broadcast["success"], true);
+        assert_eq!(
+            broadcast["message"],
+            "Message broadcast to 1 teammate(s): alice"
+        );
+        assert_eq!(broadcast["recipients"], json!(["alice"]));
+        assert_eq!(broadcast["routing"]["target"], "@team");
         assert!(
             team_store::read_mailbox(
                 turn.config.codex_home.as_path(),

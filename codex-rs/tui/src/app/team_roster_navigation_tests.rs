@@ -13,6 +13,14 @@ fn span_text(spans: &[Span<'static>]) -> String {
         .collect::<String>()
 }
 
+fn line_text(lines: &[ratatui::text::Line<'static>]) -> String {
+    lines
+        .iter()
+        .map(|line| span_text(&line.spans))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn member(suffix: u128, name: &str, pane: &str) -> TeamRosterMember {
     TeamRosterMember::new(TeamRosterMemberInput {
         thread_id: thread_id(suffix),
@@ -61,7 +69,14 @@ fn selection_cycles_leader_teammates_and_hide_row() {
     let spans = state
         .footer_spans(Some(main_thread_id), Some(main_thread_id))
         .expect("selected status should render hint");
-    assert_eq!(span_text(&spans), "main @alice @bob hide · Enter to view");
+    assert_eq!(span_text(&spans), "2 teammates · Enter to view");
+    let lines = state
+        .roster_tree_lines(Some(main_thread_id), Some(main_thread_id))
+        .expect("selected roster should render tree");
+    assert_eq!(
+        line_text(&lines),
+        "› ├─ team-lead · Enter to view\n  ├─ @alice\n  ├─ @bob\n  └─ hide"
+    );
 
     assert!(state.step_selection(TeamRosterDirection::Next, None, None));
     assert_eq!(state.selected_footer_index(), Some(1));
@@ -71,6 +86,17 @@ fn selection_cycles_leader_teammates_and_hide_row() {
 
     assert!(state.step_selection(TeamRosterDirection::Next, None, None));
     assert_eq!(state.selected_footer_index(), Some(3));
+    let spans = state
+        .footer_spans(Some(main_thread_id), Some(main_thread_id))
+        .expect("hide row should render collapse hint");
+    assert_eq!(span_text(&spans), "2 teammates · Enter to view");
+    let lines = state
+        .roster_tree_lines(Some(main_thread_id), Some(main_thread_id))
+        .expect("selected roster should render tree");
+    assert_eq!(
+        line_text(&lines),
+        "  ├─ team-lead\n  ├─ @alice\n  ├─ @bob\n› └─ hide · enter to collapse"
+    );
 
     assert!(state.step_selection(TeamRosterDirection::Next, None, None));
     assert_eq!(state.selected_footer_index(), Some(0));
@@ -99,8 +125,12 @@ fn stepping_reopens_collapsed_roster() {
 
     state.collapse_roster();
     assert_eq!(
-        state.footer_spans(Some(main_thread_id), Some(main_thread_id)),
-        None
+        span_text(
+            &state
+                .footer_spans(Some(main_thread_id), Some(main_thread_id))
+                .expect("collapsed roster still shows status")
+        ),
+        "1 teammate"
     );
 
     assert!(state.step_selection(TeamRosterDirection::Next, None, None));
@@ -108,7 +138,14 @@ fn stepping_reopens_collapsed_roster() {
     let spans = state
         .footer_spans(Some(main_thread_id), Some(main_thread_id))
         .expect("stepping should reopen the collapsed status");
-    assert_eq!(span_text(&spans), "main @alice hide · Enter to view");
+    assert_eq!(span_text(&spans), "1 teammate · Enter to view");
+    let lines = state
+        .roster_tree_lines(Some(main_thread_id), Some(main_thread_id))
+        .expect("stepping should reopen the roster tree");
+    assert_eq!(
+        line_text(&lines),
+        "› ├─ team-lead · Enter to view\n  ├─ @alice\n  └─ hide"
+    );
 }
 
 #[test]
@@ -132,6 +169,44 @@ fn idle_and_mode_metadata_keep_footer_to_roster_items() {
         .footer_spans(Some(thread_id(1)), Some(thread_id(1)))
         .expect("idle member should render");
     assert_eq!(span_text(&spans), "1 teammate");
+}
+
+#[test]
+fn kill_selection_ignores_idle_teammates() {
+    let mut state = TeamRosterNavigationState::default();
+    state.set_active_team("Rocket".to_string());
+    state.register_member(
+        TeamRosterMember::new(TeamRosterMemberInput {
+            thread_id: thread_id(3),
+            name: "alice".to_string(),
+            tmux_pane_id: Some("%alice".to_string()),
+            backend_type: Some("tmux".to_string()),
+            color: None,
+            mode: None,
+            is_active: Some(false),
+            prompt: None,
+        })
+        .expect("pane-backed member"),
+    );
+
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(state.selected_footer_index(), Some(1));
+    assert_eq!(state.kill_selected_teammate(), None);
+    assert_eq!(state.selected_footer_index(), Some(1));
+}
+
+#[test]
+fn kill_selection_ignores_unknown_activity_teammates() {
+    let mut state = TeamRosterNavigationState::default();
+    state.set_active_team("Rocket".to_string());
+    state.register_member(member(3, "alice", "%alice"));
+
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert!(state.step_selection(TeamRosterDirection::Next, None, None));
+    assert_eq!(state.selected_footer_index(), Some(1));
+    assert_eq!(state.kill_selected_teammate(), None);
+    assert_eq!(state.selected_footer_index(), Some(1));
 }
 
 #[test]
@@ -202,6 +277,6 @@ fn activating_leader_teammate_and_hide_returns_expected_action() {
     );
     assert_eq!(
         state.footer_spans(Some(main_thread_id), Some(main_thread_id)),
-        None
+        Some(vec!["2 teammates".into()])
     );
 }

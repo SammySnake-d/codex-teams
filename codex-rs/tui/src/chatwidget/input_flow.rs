@@ -17,11 +17,31 @@ impl ChatWidget {
                 text,
                 text_elements,
             } => {
+                let teams_mailbox_edit_pending = self.take_queued_teams_mailbox_edit_pending();
                 let user_message = self.user_message_from_submission(text, text_elements);
                 if user_message.text.is_empty()
                     && user_message.local_images.is_empty()
                     && user_message.remote_image_urls.is_empty()
                 {
+                    return;
+                }
+                if teams_mailbox_edit_pending {
+                    let should_submit_now =
+                        self.is_session_configured() && !self.is_plan_streaming_in_tui();
+                    if should_submit_now {
+                        self.reasoning_buffer.clear();
+                        self.full_reasoning_buffer.clear();
+                        self.set_status_header(String::from("Working"));
+                        self.submit_teams_mailbox_message(
+                            user_message,
+                            UserMessageHistoryRecord::UserMessageText,
+                        );
+                    } else {
+                        self.queue_user_message_with_options(
+                            user_message,
+                            QueuedInputAction::TeamsMailbox,
+                        );
+                    }
                     return;
                 }
                 let should_submit_now =
@@ -48,7 +68,15 @@ impl ChatWidget {
                 text_elements,
                 action,
             } => {
+                let teams_mailbox_edit_pending = self.take_queued_teams_mailbox_edit_pending();
                 let user_message = self.user_message_from_submission(text, text_elements);
+                if teams_mailbox_edit_pending {
+                    self.queue_user_message_with_options(
+                        user_message,
+                        QueuedInputAction::TeamsMailbox,
+                    );
+                    return;
+                }
                 self.queue_user_message_with_options(user_message, action);
             }
             InputResult::Command(cmd) => {
@@ -70,6 +98,19 @@ impl ChatWidget {
 
     pub(super) fn queue_user_message(&mut self, user_message: UserMessage) {
         self.queue_user_message_with_options(user_message, QueuedInputAction::Plain);
+    }
+
+    pub(super) fn take_queued_teams_mailbox_edit_pending(&mut self) -> bool {
+        let pending = self.queued_teams_mailbox_edit_pending;
+        if pending {
+            self.clear_queued_teams_mailbox_edit_pending();
+        }
+        pending
+    }
+
+    pub(super) fn clear_queued_teams_mailbox_edit_pending(&mut self) {
+        self.queued_teams_mailbox_edit_pending = false;
+        self.bottom_pane.set_literal_submission_mode(false);
     }
 
     pub(crate) fn set_queue_submissions_until_session_configured(&mut self, queue: bool) {

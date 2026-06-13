@@ -33,6 +33,10 @@ use tiny_http::StatusCode;
 
 mod dump;
 mod read_api_key;
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;
+
 use dump::ExchangeDumper;
 use read_api_key::read_auth_header_from_stdin;
 
@@ -689,12 +693,28 @@ fn latest_function_output_call_id_starts_with(body: &Value, call_id_prefix: &str
 }
 
 fn member_to_lead_send_succeeded(output: &str) -> bool {
-    serde_json::from_str::<Value>(output)
-        .ok()
-        .is_some_and(|value| {
-            value
-                .get("message")
-                .is_some_and(member_to_lead_message_matches)
+    let Ok(value) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+
+    if value
+        .get("message")
+        .is_some_and(member_to_lead_message_matches)
+    {
+        return true;
+    }
+
+    value.get("success").and_then(Value::as_bool) == Some(true)
+        && value.get("routing").is_some_and(|routing| {
+            let content_matches = routing
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains("Member-to-lead smoke acknowledgement"));
+            let target_matches = routing
+                .get("target")
+                .and_then(Value::as_str)
+                .is_some_and(|target| target.contains("team-lead"));
+            content_matches && target_matches
         })
 }
 

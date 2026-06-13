@@ -10,6 +10,7 @@ use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::team;
 use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::AgentPath;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_tools::ToolSpec;
@@ -56,35 +57,39 @@ async fn handle_spawn_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    if let Some(output) = team::maybe_spawn_member_from_agent_tool(
-        Arc::clone(&session),
-        Arc::clone(&turn),
-        team::SpawnMemberFromAgentToolRequest {
-            team_name: args.team_name.clone(),
-            name: args.name.clone(),
-            profile: args.agent_type.clone(),
-            model: args.model.clone(),
-            message: args.message.clone(),
-        },
-    )
-    .await?
+    let _activity_description = args.description.as_deref();
+    let agent_type = args.agent_type()?;
+    let message = args.message()?;
+    if args.task_name.is_none()
+        && let Some(output) = team::maybe_spawn_member_from_agent_tool(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            team::SpawnMemberFromAgentToolRequest {
+                team_name: args.team_name.clone(),
+                name: args.name.clone(),
+                profile: agent_type.clone(),
+                model: args.model.clone(),
+                mode: args.mode,
+                message: message.clone(),
+            },
+        )
+        .await?
     {
         return Ok(boxed_tool_output(output));
     }
     let fork_mode = args.fork_mode()?;
     let task_name = args.task_name.clone().ok_or_else(|| {
         FunctionCallError::RespondToModel(
-            "task_name is required when spawn_agent is creating a native Codex subagent. To spawn a Teams teammate, first create a team and pass name (plus optional team_name)."
+            "task_name is required when spawn_agent is creating a native Codex subagent. To spawn a Teams teammate, first create a team and pass name with optional team_name."
                 .to_string(),
         )
     })?;
-    let role_name = args
-        .agent_type
+    let role_name = agent_type
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
 
-    let initial_operation = parse_collab_input(Some(args.message), /*items*/ None)?;
+    let initial_operation = parse_collab_input(Some(message), /*items*/ None)?;
     let prompt = render_input_preview(&initial_operation);
 
     let session_source = turn.session_source.clone();
@@ -267,12 +272,16 @@ impl CoreToolRuntime for Handler {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnAgentArgs {
-    message: String,
+    message: Option<String>,
+    prompt: Option<String>,
+    description: Option<String>,
     task_name: Option<String>,
     name: Option<String>,
     team_name: Option<String>,
     agent_type: Option<String>,
+    subagent_type: Option<String>,
     model: Option<String>,
+    mode: Option<ModeKind>,
     reasoning_effort: Option<ReasoningEffort>,
     service_tier: Option<String>,
     fork_turns: Option<String>,
@@ -280,6 +289,31 @@ struct SpawnAgentArgs {
 }
 
 impl SpawnAgentArgs {
+    fn message(&self) -> Result<String, FunctionCallError> {
+        match (&self.message, &self.prompt) {
+            (Some(_), Some(_)) => Err(FunctionCallError::RespondToModel(
+                "Provide either message or prompt, but not both".to_string(),
+            )),
+            (Some(message), None) | (None, Some(message)) => Ok(message.clone()),
+            (None, None) => Err(FunctionCallError::RespondToModel(
+                "message is required for spawn_agent".to_string(),
+            )),
+        }
+    }
+
+    fn agent_type(&self) -> Result<Option<String>, FunctionCallError> {
+        match (&self.agent_type, &self.subagent_type) {
+            (Some(agent_type), Some(subagent_type)) if agent_type != subagent_type => {
+                Err(FunctionCallError::RespondToModel(
+                    "Provide either agent_type or subagent_type, but not both".to_string(),
+                ))
+            }
+            (Some(agent_type), _) => Ok(Some(agent_type.clone())),
+            (None, Some(subagent_type)) => Ok(Some(subagent_type.clone())),
+            (None, None) => Ok(None),
+        }
+    }
+
     fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
         if self.fork_context.is_some() {
             return Err(FunctionCallError::RespondToModel(

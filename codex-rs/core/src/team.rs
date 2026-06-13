@@ -36,15 +36,15 @@ pub struct TeammateIdentity {
 
 static TEAMMATE_IDENTITY: OnceLock<TeammateIdentity> = OnceLock::new();
 
-const TEAMMATE_SYSTEM_PROMPT_ADDENDUM: &str = r#"# Codex Teams Teammate Communication
+const TEAMMATE_SYSTEM_PROMPT_ADDENDUM: &str = r#"# Agent Teammate Communication
 
-IMPORTANT: You are running as a teammate in a Codex team. To communicate with anyone on your team:
-- Use the SendMessage tool with `to: "<name>"` to send messages to specific teammates, or `to: "team-lead"` to reply to the lead.
-- Use the SendMessage tool with `to: "*"` sparingly for team-wide broadcasts.
+IMPORTANT: You are running as an agent in a team. To communicate with anyone on your team:
+- Use the SendMessage tool with `to: "<name>"` to send messages to specific teammates
+- Use the SendMessage tool with `to: "*"` sparingly for team-wide broadcasts
 
-Plain assistant text is not visible to other teammates or the lead. To communicate, you MUST use SendMessage. If only the Codex-native equivalent is available, use team_send with the same `to` and `message` fields.
+Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool.
 
-The user interacts primarily with the team lead. Your work is coordinated through Teams tasks and teammate messaging."#;
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging."#;
 
 /// Record that this process is running as a teammate. Called once by the hidden
 /// `codex teammate` entrypoint before its inbox loop starts; later calls are
@@ -86,12 +86,20 @@ mod teammate_prompt_tests {
 
     #[test]
     fn teammate_prompt_addendum_matches_claude_visibility_contract() {
-        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("SendMessage"));
-        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("team_send"));
-        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("to: \"<name>\""));
-        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("to: \"*\""));
-        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("Plain assistant text is not visible"));
-        assert!(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("team lead"));
+        assert_eq!(
+            TEAMMATE_SYSTEM_PROMPT_ADDENDUM,
+            r#"# Agent Teammate Communication
+
+IMPORTANT: You are running as an agent in a team. To communicate with anyone on your team:
+- Use the SendMessage tool with `to: "<name>"` to send messages to specific teammates
+- Use the SendMessage tool with `to: "*"` sparingly for team-wide broadcasts
+
+Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool.
+
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging."#
+        );
+        assert!(!TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("Codex"));
+        assert!(!TEAMMATE_SYSTEM_PROMPT_ADDENDUM.contains("team_send"));
     }
 }
 

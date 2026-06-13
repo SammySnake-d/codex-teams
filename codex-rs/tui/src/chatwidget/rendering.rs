@@ -32,6 +32,12 @@ impl ChatWidget {
                 RenderableItem::Owned(Box::new(TeammateViewHeaderRenderable { header })),
             );
         }
+        if let Some(lines) = self.team_roster_tree_lines.as_ref() {
+            flex.push(
+                /*flex*/ 0,
+                RenderableItem::Owned(Box::new(TeamRosterTreeRenderable { lines })),
+            );
+        }
         flex.push(/*flex*/ 1, active_cell_renderable);
         flex.push(/*flex*/ 0, active_hook_cell_renderable);
         flex.push(
@@ -45,6 +51,29 @@ impl ChatWidget {
             )),
         );
         RenderableItem::Owned(Box::new(flex))
+    }
+}
+
+struct TeamRosterTreeRenderable<'a> {
+    lines: &'a [Line<'static>],
+}
+
+impl Renderable for TeamRosterTreeRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        Paragraph::new(Text::from(self.lines(area.width))).render(area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.lines(width).len() as u16
+    }
+}
+
+impl TeamRosterTreeRenderable<'_> {
+    fn lines(&self, width: u16) -> Vec<Line<'static>> {
+        word_wrap_lines(
+            self.lines.to_vec(),
+            RtOptions::new(usize::from(width.max(/*other*/ 1))),
+        )
     }
 }
 

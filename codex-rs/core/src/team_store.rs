@@ -2,7 +2,8 @@
 //!
 //! Teammates are independent `codex` processes that coordinate via shared on-disk
 //! state, mirroring Claude Code's mechanism (see `TEAMS_CLAUDE_PORT_SPEC.md`). This
-//! module owns the persistent layout under a teams root (`$CODEX_HOME`):
+//! module owns the persistent layout under a teams root (`$CODEX_HOME`, or
+//! `CODEX_TEAM_STORE_ROOT` for split-pane teammates whose config home differs):
 //! ```text
 //!   teams/{team}/config.json
 //!   teams/{team}/inboxes/{agent}.json
@@ -13,6 +14,7 @@
 //! still uses this store and mailbox.
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
@@ -28,6 +30,24 @@ use serde::Serialize;
 
 /// Reserved agent name for the team lead (mirrors Claude's `TEAM_LEAD_NAME`).
 pub const TEAM_LEAD_NAME: &str = "team-lead";
+
+/// Optional process-local override for the root that contains `teams/`.
+pub const TEAM_STORE_ROOT_ENV_VAR: &str = "CODEX_TEAM_STORE_ROOT";
+
+/// Resolve the root that contains `teams/`, falling back to the active config home.
+pub fn root_from_env_or(codex_home: &Path) -> PathBuf {
+    root_from_env_value_or(
+        codex_home,
+        std::env::var_os(TEAM_STORE_ROOT_ENV_VAR).as_deref(),
+    )
+}
+
+fn root_from_env_value_or(codex_home: &Path, value: Option<&OsStr>) -> PathBuf {
+    value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| codex_home.to_path_buf())
+}
 
 /// `teams/{team}/config.json` — mirrors Claude's `TeamFile` (camelCase on disk).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -346,6 +366,28 @@ mod tests {
             .unwrap()
             .as_nanos();
         temp_dir().join(format!("codex-team-store-{nanos}"))
+    }
+
+    #[test]
+    fn root_from_env_value_uses_override_when_present() {
+        let fallback = PathBuf::from("/tmp/codex-home");
+        let teams_root = PathBuf::from("/tmp/codex-teams-root");
+
+        assert_eq!(
+            root_from_env_value_or(&fallback, Some(teams_root.as_os_str())),
+            teams_root
+        );
+    }
+
+    #[test]
+    fn root_from_env_value_falls_back_for_missing_or_empty_override() {
+        let fallback = PathBuf::from("/tmp/codex-home");
+
+        assert_eq!(root_from_env_value_or(&fallback, None), fallback);
+        assert_eq!(
+            root_from_env_value_or(&fallback, Some(OsStr::new(""))),
+            fallback
+        );
     }
 
     #[test]

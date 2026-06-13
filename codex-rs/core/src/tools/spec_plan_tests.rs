@@ -1167,6 +1167,36 @@ async fn teams_tools_are_lead_only_and_do_not_replace_spawn_agent() {
 }
 
 #[tokio::test]
+async fn teams_feature_disabled_omits_teams_tools_but_keeps_native_spawn_agent() {
+    let team_tools = [
+        "create_team",
+        "list_teams",
+        "team_status",
+        "team_spawn_member",
+        "team_send",
+        "team_message_list",
+        "team_task_create",
+        "team_task_update",
+        "team_task_claim",
+        "team_task_list",
+        "team_event_list",
+        "team_member_stop",
+        "team_stop",
+    ];
+
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        set_feature(turn, Feature::Teams, /*enabled*/ false);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["spawn_agent"]);
+    plan.assert_visible_lacks(&team_tools);
+    plan.assert_registered_contains(&["spawn_agent"]);
+    plan.assert_registered_lacks(&team_tools);
+}
+
+#[tokio::test]
 async fn hidden_teams_create_and_list_still_dispatch_without_tool_search() {
     let (session, mut turn) = make_session_and_context().await;
     set_features(&mut turn, &[Feature::MultiAgentV2, Feature::Teams]);
@@ -1279,15 +1309,20 @@ async fn teams_tool_search_requires_explicit_teams_terms_not_subagent() {
     let turn = Arc::new(turn);
     for query in [
         "subagent",
+        "子代理",
         "sub-agents",
         "parallel sub-agents",
+        "parallel agent",
+        "agent parallel",
         "spawn subagents",
+        "spawn 子代理",
         "spawn_agent",
         "delegate work to a subagent",
-        "开启subagent",
-        "开启子代理",
         "launch another agent",
         "parallel agents",
+        "collaborate with a subagent",
+        "coordinate parallel agents",
+        "collaboration between agents",
     ] {
         let subagent_tools =
             dispatch_tool_search(&router, Arc::clone(&session), Arc::clone(&turn), query).await;
@@ -1300,8 +1335,6 @@ async fn teams_tool_search_requires_explicit_teams_terms_not_subagent() {
     for (query, expected_tools) in [
         ("teammate", &["create_team"][..]),
         ("swarm", &["create_team"][..]),
-        ("collaboration", &["create_team"][..]),
-        ("coordinate", &["create_team"][..]),
         ("团队", &["create_team"][..]),
         ("队友", &["create_team"][..]),
         ("spawn teammate", &["create_team"][..]),
