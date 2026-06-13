@@ -1,11 +1,23 @@
 # State
 
-updated_at: 2026-06-10 01:50:00 CST
-status: installed-wrapper-runtime-e2e-passed-cache-cleaned
+updated_at: 2026-06-13 05:40:00 CST
+status: teams-migration-verified-packaged-commit-pending
 
 ## Current Focus
 
-Port Codex Teams toward Claude Code fidelity while preserving native Codex subagent behavior. Current active boundary is no longer just `/teams` or Teams/subagent search isolation; it is the user-visible Claude-fidelity gap in teammate prompts, TUI status/header/navigation, reply queue semantics, and real split-pane runtime E2E.
+Port Codex Teams toward Claude Code fidelity while preserving native Codex subagent behavior. Current implementation evidence now covers the previously open fidelity gaps: hidden/plain first teammate prompt delivery, Claude-style TeamCreate/SendMessage envelopes, strict native subagent isolation, Teams footer/header/navigation slices, queued Teams mailbox replies, fresh split-pane runtime E2E, and final local package generation. The remaining workflow boundary is commit/finish hygiene, not another source-code slice.
+
+2026-06-13 05:40 CST completion-audit checkpoint: current wrapper `/Users/snakesammy/.cargo/bin/codex` points at fresh `codex-rs/target/debug/codex`; `codex --enable teams features list` reports `teams under development true`; `codex teammate --help` exposes `--agent-id`, `--agent-name`, and `--team-name`; no relevant source file is newer than the debug binary; no pending snapshots exist; `git diff --check` passes; no active Cargo/Rust/test/smoke process is running. Final interactive visual audit evidence is `/tmp/codex-teams-visual-audit2.4cS0hD`; final package archive is `dist/local/teams-final/codex-package-aarch64-apple-darwin.tar.gz` with SHA256 `44ff75303baf9ba6c9801dad8b8428e584b3b8ce12afe8ec1339b59b4ba4b70e`. Do not mark the Trellis task fully wrapped until the dirty worktree is committed or the user explicitly chooses manual commit.
+
+Latest active diagnostic boundary: user reported a newly spawned teammate still calling the official OpenAI base URL and asked to remember the pitfall. No source edit was made in this memory slice. Evidence points to wrong runtime `CODEX_HOME` first, not a provider-code bug: the screenshot itself says unstable-feature warnings would be suppressed by editing `/private/var/folders/lh/z4bcmr1d18z53jcctpfhwdt80000gn/T/.tmpbZUvQ4/config.toml`, proving that process was reading a temporary Codex home rather than `/Users/snakesammy/.codex/config.toml`. The same screenshot shows `Incorrect API key provided: Test API Key` and `https://api.openai.com/v1/responses`, consistent with a temporary smoke/test config or inherited test env. Exiting/restarting helps only if the new lead is started from the verified wrapper/current binary with real `CODEX_HOME=/Users/snakesammy/.codex`; restarting into another temp-home harness preserves the failure.
+
+2026-06-11 04:10 CST reinforcement: user again asked to remember that teammate still appears not to use `config.toml` and asked whether exiting/restarting Codex is required. Treat this as a diagnostic pitfall, not a new implementation request. The likely answer is yes for stale/wrong-home leads: restart only helps if the fresh lead is launched from the current wrapper with real home, because a running lead keeps its current env/home/runtime and continues spawning teammates from that state.
+
+2026-06-12 17:55 CST recheck: current `/Users/snakesammy/.cargo/bin/codex` is a wrapper to `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`; wrapper/debug `codex teammate --help` exposes `--agent-id`, `--agent-name`, and `--team-name`; no `cli/core/tui` source file was newer than the debug binary; real `/Users/snakesammy/.codex/config.toml` uses `model_provider = "custom"` and `[model_providers.custom].base_url = "http://127.0.0.1:8317/v1"`; `CODEX_HOME=/Users/snakesammy/.codex /Users/snakesammy/.cargo/bin/codex --enable teams features list` reports `teams under development true`. App bundle `/Applications/Codex.app/Contents/Resources/codex teammate --help` is still a stale/noise path that does not expose the hidden teammate subcommand. Do not patch provider/auth code until a fresh real-home lead reproduces the bad URL.
+
+2026-06-12 17:56 CST URL-capture proof: a controlled `codex teammate` smoke used temporary `CODEX_HOME=/tmp/codex-teams-teammate-url-smoke.7nxzlo/home`, where `config.toml` defined provider `capture` at `http://127.0.0.1:18319/v1`. After bypassing the hook-trust startup gate, the teammate TUI rendered `gpt-5.5 xhigh` and YOLO mode, then the local capture server received `POST /v1/responses` with `Authorization: Bearer sk-capture-smoke`. No `api.openai.com` or `Incorrect API key provided: Test API Key` marker appeared. This proves the current wrapper/debug teammate process reads its active `CODEX_HOME/config.toml`; official-URL screenshots remain wrong-home/stale-lead evidence unless reproduced from a fresh real-home lead.
+
+2026-06-12 20:39 CST real-home proof: `CODEX_HOME=/Users/snakesammy/.codex codex exec --ephemeral --skip-git-repo-check --enable teams 'Reply with exactly: CONFIG_OK'` completed through the current wrapper and printed `model: gpt-5.5`, `provider: custom`, and final `CONFIG_OK`. `127.0.0.1:8317` had an active listener, matching the real `/Users/snakesammy/.codex/config.toml` custom provider. Current active lead process `PID 85348` still predates the current `target/debug/codex` mtime, so user screenshots from that UI remain stale-lead evidence, not proof that the current source ignores config.
 
 ## Done
 
@@ -80,14 +92,24 @@ Port Codex Teams toward Claude Code fidelity while preserving native Codex subag
 - No visible `Codex Teams context:` / `You are an independent Codex Teams teammate` envelope was found in the installed smoke evidence.
 - Build cache cleanup removed `codex-rs/target/debug/deps`, `codex-rs/target/debug/incremental`, and `codex-rs/target/debug/build` after confirming no Rust/Cargo/just process was active and `target/debug/codex` only depends on system libraries.
 - `codex-rs/target` is about `1.4G`; `/System/Volumes/Data` has about `76GiB` available.
+- 2026-06-10 03:27 CST correction: App bundle process sightings were only an entrypoint/noise check, not the Codex Teams teammate implementation path. Live teammate processes and the user wrapper route through `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex teammate ...`; `/Applications/Codex.app/.../codex app-server` processes belong to the host Codex/Desktop/node_repl environment and must not drive the Teams fix.
+- Focused source fix added Teams-only launch auth bridging in `codex-rs/core/src/tools/handlers/team.rs`: when the selected provider requires OpenAI/Codex auth and the lead `AuthManager` has API-key auth, tmux/iTerm teammate launch env now receives `CODEX_API_KEY` unless it is already present.
+- Focused cleanup updated `codex-rs/core/src/team_backends/tmux.rs` stale launch-line test shape from root-level `codex --agent-id ...` to `codex teammate --agent-id ...`, matching the real hidden teammate subcommand.
+- Native read-only subagent evidence confirmed current source/parser shape: `codex teammate --help` exposes `--agent-id`, while root-level `codex --agent-id` is expected to fail.
+- Focused validation passed after the new auth-entrypoint slice: `just fmt`; `just test -p codex-core teammate_auth_env_forwards_lead_api_key_as_codex_api_key teammate_auth_env_does_not_overwrite_existing_codex_api_key teammate_spawn_accepts_lead_auth_when_provider_requires_openai_auth teammate_spawn_requires_lead_auth_when_provider_requires_openai_auth multi_agent_v2_spawn_name_and_team_name_uses_teammate_branch multi_agent_v2_spawn_name_without_team_name_uses_native_task_validation multi_agent_v2_spawn_team_name_without_name_uses_native_task_validation multi_agent_v2_spawn_name_without_team_name_with_task_name_spawns_native_agent build_launch_line_basic`; `git diff --check`.
+- No package/link or new runtime E2E was performed after this source change. The installed wrapper may still point at a previously built `target/debug/codex` until the CLI is rebuilt and re-smoked.
+- 2026-06-10 19:06 CST source-backed footer navigation slice: Claude `/tmp/claude-code-sourcemap-codex-teams/restored-src/src/hooks/useBackgroundTaskNavigation.ts` handles `k` only in teammate selection mode and only for running teammates.
+- Implemented Codex footer `k` kill wiring for selected Teams teammates: `codex-rs/tui/src/app/team_roster_navigation.rs` returns `KillTeammate` for active teammate rows and ignores leader/hide/inactive rows; `codex-rs/tui/src/app/input.rs` routes plain `k` to the existing kill/remove/resync path; `codex-rs/tui/src/app/event_dispatch.rs` exposes roster resync as `pub(super)`.
+- Focused validation passed for this slice: `cd codex-rs && just fmt`; `cd codex-rs && just test -p codex-tui team_roster` with 17 tests passed and 2866 skipped; bench-smoke completed; `git diff --check` passed for the touched TUI files.
+- This proves only the footer selection `k` kill slice. It does not prove full Teams migration, runtime navigation parity, queued reply behavior, native subagent smoke, or package readiness.
 
 ## Next Action
 
-If the next turn resumes development, run a cheap process/disk check first, then continue the broader Claude Code Teams fidelity audit. The installed wrapper runtime proof is now green, but the goal remains broader: verify source-backed footer/header/navigation behavior, native subagent isolation under real user prompts, and any remaining Claude prompt/tool parity gaps before marking Teams complete.
+If the next turn resumes workflow, do not start by editing source. First present/execute the commit plan, or finish the Trellis task after the user confirms commit grouping. If the user reports a new runtime issue, require a fresh lead launched as `CODEX_HOME=/Users/snakesammy/.codex /Users/snakesammy/.cargo/bin/codex --enable teams` before reopening provider/auth code. Do not delete `target/debug/codex`; the user-facing wrapper depends on it.
 
 ## Blockers
 
-The installed wrapper depends on `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`; do not delete that file unless `/Users/snakesammy/.cargo/bin/codex` is replaced by another verified working executable. Standalone copied-binary install is currently blocked by SIGKILL/exit 137 when the Mach-O is copied directly to `~/.cargo/bin/codex`. Cargo builds remain expensive, so use source inspection and focused tests only unless a build is required.
+The installed wrapper depends on `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`; do not delete that file unless `/Users/snakesammy/.cargo/bin/codex` is replaced by another verified working executable. Standalone copied-binary install is currently blocked by SIGKILL/exit 137 when the Mach-O is copied directly to `~/.cargo/bin/codex`. Long-lived lead Codex processes do not hot-reload a rebuilt binary and will keep generating old teammate launch commands. A lead started with temporary `CODEX_HOME` will keep spawning teammates that read that temporary home. Cargo builds remain expensive, so use source inspection and focused tests unless a build/runtime smoke is required.
 
 ## Open Questions
 
@@ -98,6 +120,7 @@ The installed wrapper depends on `/Users/snakesammy/Desktop/project/codex-teams/
 - Whether to keep the current Teams search anchor set as a single shared string or split it per Claude-style tool semantics without reintroducing generic `agent` terms that regress native subagent routing.
 - Exact Claude parity target for Down/Enter/Esc navigation and queued replies must be read directly from `claude-code-sourcemap` before code changes.
 - Whether a local WebRTC cache or environment override is available to avoid repeated `webrtc-sys` downloads before focused TUI tests.
+- Whether Codex should intentionally add bare Down navigation as a Codex-only affordance. Claude source evidence says teammate selection uses `Shift+Down/Shift+Up`; bare Down is not the Claude contract.
 
 ## 2026-06-09 19:14 CST Update
 
@@ -123,3 +146,40 @@ Status: teammate-launch-context-focused-tested-runtime-e2e-pending
 - Added `teammate_launch_spec_inherits_codex_home_provider_and_auth_env` to assert custom provider overrides, inherited model override, `CODEX_HOME`, `CODEX_TEAMMATE`, hidden teammate flags, no `--prompt`, and provided binary/cwd in the launch spec.
 - Validation passed: `just fmt`; focused `codex-core` launch/auth/provider/binary tests: 8 passed; `git diff --check` passed.
 - No package/link or full runtime E2E was run in this update. Next required proof remains real split-pane E2E with the intended user-facing binary or explicit `CODEX_TEAMMATE_COMMAND`.
+
+- 2026-06-10 05:32 CST update: current wrapper/debug binary revalidated after the latest auth-env bridge. The most fundamental cause is process-boundary serialization: a teammate is independent and cannot inherit lead in-memory `Config`/`AuthManager`; it only sees `argv`, `env`, cwd, and files under `CODEX_HOME`.
+- Current source now bridges that boundary for Teams teammate launch: lead API-key auth overwrites stale `CODEX_API_KEY`, `OPENAI_API_KEY`, and provider `env_key`; token auth removes stale API-key env so the child reads the shared `CODEX_HOME` auth store. Teammate binary selection fails closed unless `codex teammate --help` exposes hidden teammate flags.
+- Current focused validation passed: 9 `codex-core` tests covering teammate auth env overwrite/removal, auth readiness, binary support, Codex auth env forwarding, and Teams/subagent search isolation.
+- Current wrapper runtime E2E passed. Evidence: `/tmp/codex-teams-current-smoke.SXjqTk`; sentinel `TEAMS_SMOKE_PASS team_id=019eae48-d691-7353-bb76-258d70fdcdf8 member_id=019eae48-d835-75b1-9835-fe43f49fa9d7 member_to_lead_completed=true status_output_bytes=964`.
+- Do not delete `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`; `/Users/snakesammy/.cargo/bin/codex` is a wrapper that depends on it.
+
+## 2026-06-10 05:52 CST Update
+
+Status: teammate-independent-process-config-daemon-fix-focused-tested-runtime-min-pending
+
+- User asked why teammate does not use the current auth/config even though it is an independent process.
+- First-principles conclusion: independent teammate processes inherit only serialized launch state (`argv`, `env`, cwd, and files under `CODEX_HOME`), not the lead's in-memory `Config`, `AuthManager`, or app-server session.
+- New root cause fixed in this turn: `codex teammate` did not merge root-level `--enable/--disable` feature overrides before entering the TUI, so launch config could diverge from the lead command.
+- New root cause fixed in this turn: teammate TUI could implicitly reuse an existing local app-server daemon. If that happened, the executing app-server was not the teammate process that had `CODEX_TEAMMATE`, `set_teammate_identity`, and inherited auth/env/config.
+- Implemented focused fix in `codex-rs/cli/src/main.rs`: teammate subcommand now prepends root config flags before `crate::teammate::run_main`.
+- Implemented focused fix in `codex-rs/tui/src/lib.rs`: `can_reuse_implicit_local_daemon` now takes `is_teammate_process` and returns false for teammates.
+- Preserved non-teammate archive behavior in `codex-rs/tui/src/session_archive_commands.rs` by passing `is_teammate_process=false`.
+- Focused validation passed: `just fmt`; `just test -p codex-cli teammate_inherits_root_config_overrides teammate_parses_bypass_hook_trust_flag -- --nocapture`; `just test -p codex-tui can_reuse_implicit_local_daemon_requires_default_launch_config teammate_startup_skips_onboarding_even_when_login_or_trust_would_show -- --nocapture`; `git diff --check` for touched launch-chain files.
+- Current machine check after the fix: `codex-rs/target` is about `36G`, `/System/Volumes/Data` has about `38GiB` available, `/Users/snakesammy/.cargo/bin/codex` remains a wrapper, and `codex-rs/target/debug/codex` exists.
+- Current process check shows two old smoke teammate processes still running from prior tests, plus the current resumed Codex process. Do not delete `target/debug/codex` while the wrapper/current session depends on it.
+
+Next action: run a minimal current-binary teammate startup/auth/daemon proof without packaging. If that is insufficient, run a no-package tmux Teams smoke with the current debug binary.
+
+## 2026-06-10 22:00 CST Update
+
+Status: karpathy-minimal-runtime-sync-no-source-edit
+
+- Applied `$karpathy-guidelines`: no speculative code changes were made for the teammate auth/config complaint.
+- Current user-facing `codex` is `/Users/snakesammy/.cargo/bin/codex`, a shell wrapper to `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`.
+- The wrapper target was stale relative to TUI source files, so only the development CLI was rebuilt with `cargo build -p codex-cli --bin codex`.
+- Post-build source freshness check passed: no CLI/core/TUI source file is newer than `target/debug/codex`.
+- Minimal teammate startup proof passed: hidden `codex teammate` flags are available and a teammate PTY launch with real `CODEX_HOME=/Users/snakesammy/.codex` entered normal TUI startup without login/onboarding markers.
+- App bundle remains not Teams-capable: `/Applications/Codex.app/Contents/Resources/codex teammate --help` shows top-level help rather than hidden teammate flags.
+- `git diff --check` passed.
+- Cargo intermediate artifacts were cleaned after confirming no build/teammate processes were active; `target/debug/codex` was preserved. `codex-rs/target` is now about 1.4G and Data volume free space is about 56GiB.
+- Do not infer full Teams completion from this. Open work remains `/teams` UI parity, statusbar/header/navigation visual parity, queued reply proof, native subagent runtime smoke, and final package/runtime audit.

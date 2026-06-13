@@ -60,16 +60,15 @@ Minimal-change Codex decision:
   Codex's deferred tool loading.
 - Do not solve native subagent isolation with production user-language
   classifiers in `tool_search.rs`.
-- Make `spawn_agent` the shared spawn surface: without Teams structure it stays
-  the native Codex subagent tool; with an active/explicit team and `name`, it
-  enters the Teams teammate branch.
+- Make `spawn_agent` the shared spawn surface: without explicit Teams structure
+  it stays the native Codex subagent tool; only explicit `team_name` plus
+  `name` enters the Teams teammate branch.
 - Treat `team_spawn_member` as compatibility or exact Teams-control surface,
   not as the primary natural-language route for teammate creation.
 - `team_spawn_member` search exposure must remain exact-name oriented. Teams
   natural-language terms such as teammate/swarm/团队/队友 should load team
   creation/status/message surfaces and let the shared `spawn_agent` tool take
-  the teammate branch when the model provides `name` plus an active or explicit
-  team.
+  the teammate branch only when the model provides both `team_name` and `name`.
 - Claude-compatible alias tools such as `TeamCreate`, `SendMessage`,
   `TaskCreate`, `TaskUpdate`, `TaskList`, and `TaskGet` may exist as Teams API
   compatibility surfaces, but they must not become a second spawn route or
@@ -83,13 +82,23 @@ Required invariant:
 
 - A user request that says `subagent`, `spawn_agent`, or ordinary delegation
   must load and execute the native Codex subagent path unless the model provides
-  the Teams teammate structure (`name` plus active/explicit team). Enabling
+  the Teams teammate structure (`team_name` plus `name`). Enabling
   `features.teams` must not turn native subagents into split-pane teammates.
+- In the Codex `spawn_agent` schema, `task_name` is the native Codex subagent
+  identity. If `task_name` is present, the call must remain on the native
+  subagent path even when a single active Teams workspace exists and `name` is
+  also present. This preserves ordinary Codex agent naming from being captured
+  by Teams active-state inference.
 - The runtime teammate binary must be the real `codex` CLI, not a Cargo
   `target/debug/deps/*` test harness. Teammate spawn resolves
   `CODEX_TEAMMATE_COMMAND`, then configured `codex_self_exe`, then `current_exe`,
   and must escape a deps test binary to the sibling real `target/debug/codex`
   when available.
+- Process-backed teammates must use the lead's resolved `CODEX_HOME` so
+  `config.toml` remains the provider source of truth. Runtime smoke tests that
+  need a mock provider should write that provider into a temporary
+  `CODEX_HOME/config.toml`; they must not rely on session-only `-c
+  model_provider=...` overrides being forwarded into the teammate process.
 
 ## Minimal Vertical Slice
 

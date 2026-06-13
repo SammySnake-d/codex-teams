@@ -29,9 +29,12 @@
 
 ## Final Artifact Evidence
 
-- Current final installed binary: `/Users/snakesammy/.cargo/bin/codex` SHA256 `867e53742349115278c98a02ddc1be7a62c15cc42cc8ef99bc745b545200cc23`.
-- Current final package archive: `dist/local/teams-slice5/codex-package-aarch64-apple-darwin.tar.gz` SHA256 `46ba05557045de9fef003e3e9a68f04a3d8525896501aa6b0e45c914a06e942a`.
-- Earlier memory entry with installed hash `e113c6f71bae0fcacdb5fa2bfc3b8a467a8c2e3eff3c9d17c5b47ac33a6da816` belongs to a prior linked build, not the final package installed at the end of this task.
+- Current final user-facing command: `/Users/snakesammy/.cargo/bin/codex` is a wrapper that execs `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`; wrapper SHA256 `54f22aa5653b085c41c85d686337ede33ecf84a7dc8b386d3c6018b6a23ff0fb`.
+- Current final debug binary: `codex-rs/target/debug/codex` SHA256 `573ea1c034ebcd7da536080c85e327ec819a998428a31ab3c2e76f6cb8dbb510`.
+- Current final package archive: `dist/local/teams-final/codex-package-aarch64-apple-darwin.tar.gz` SHA256 `44ff75303baf9ba6c9801dad8b8428e584b3b8ce12afe8ec1339b59b4ba4b70e`.
+- Packaged binary smoke passed after extracting the archive: `bin/codex --version` and `bin/codex teammate --help` exposed the hidden teammate flags.
+- Latest final interactive visual audit evidence: `/tmp/codex-teams-visual-audit2.4cS0hD`; lead showed `TEAMS_SMOKE_PASS ... member_to_lead_completed=true`, teammate showed `TEAMS_SMOKE_MEMBER_DONE member_to_lead_sent=true`, and bad-marker grep found no visible legacy Teams context, Test API Key, official OpenAI URL, target/debug/deps, unrecognized `--agent-id`, or smoke failure marker.
+- Earlier memory entries with installed hash `867e53742349115278c98a02ddc1be7a62c15cc42cc8ef99bc745b545200cc23` or archive `dist/local/teams-slice5/...` belong to prior slices, not the final `teams-final` package checkpoint.
 
 ## Corrections And Invalidated Beliefs
 
@@ -43,6 +46,10 @@
 - Invalidated: writing visible teammate launch context as a normal user prompt is acceptable. User compared it to Claude Code and rejected the visible `Codex Teams context:` envelope.
 - Invalidated: adding broad Teams search anchors such as `working together` is safe. Current handoff records a focused regression where query `delegate work to a subagent` loads Teams tools because the BM25 anchor contains `working`; remove `work`/`working`-like anchors before further validation.
 - Invalidated: forwarding `CODEX_HOME` alone is enough for process-backed teammates. If the lead is using env-style auth, the teammate can appear unauthenticated and open the login screen unless Codex auth env entrypoints are forwarded and honored in teammate mode.
+- Pitfall: do not describe every bad teammate provider/base-url screenshot as "teammate ignored config.toml." If the pane warning points at `/private/var/folders/.../.tmp*/config.toml` or `/private/tmp/.../home/config.toml`, the process is reading a temporary `CODEX_HOME`; the child is likely inheriting the wrong lead runtime/home, not ignoring `/Users/snakesammy/.codex/config.toml`.
+- Pitfall: exiting/restarting only fixes teammate config drift when the fresh lead is started from the verified wrapper/current binary with real home, for example `CODEX_HOME=/Users/snakesammy/.codex /Users/snakesammy/.cargo/bin/codex --enable teams`. Restarting into another temp-home harness preserves the bug.
+- Pitfall: a running lead process does not hot-reload a rebuilt `target/debug/codex`, `CODEX_HOME`, or provider/auth state into already-open Teams panes. If teammate screenshots still show official OpenAI URL, `Test API Key`, or a temp `config.toml`, first restart the lead from the current wrapper with real home and then reproduce; do not patch provider/auth code from a stale-pane screenshot alone.
+- Pitfall evidence 2026-06-12 20:29 CST: active lead `PID 85348` started at `17:46:57`, before current `target/debug/codex` mtime `20:12:17`. A fresh current-wrapper smoke with provider only in `CODEX_HOME/config.toml` passed `TEAMS_SMOKE_PASS` and all requests hit the configured loopback provider, so this failure mode is stale running lead, not current source ignoring config.
 
 ## Latest Source-Backed Findings
 
