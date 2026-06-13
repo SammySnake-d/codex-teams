@@ -4,9 +4,7 @@
 //! entry, Ctrl-L clear, external editor launch, and agent navigation shortcuts.
 
 use super::*;
-
-const SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE: &str =
-    "Editing previous prompts is unavailable in side conversations.";
+use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
 
 #[derive(Debug, Eq, PartialEq)]
 enum TeamRosterKeyAction {

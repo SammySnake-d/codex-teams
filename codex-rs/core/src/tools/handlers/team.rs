@@ -20,6 +20,7 @@ use crate::team_coord;
 use crate::team_store;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
+#[cfg(test)]
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
@@ -40,6 +41,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
+use codex_tools::ToolExecutorFuture;
 use codex_tools::ToolName;
 use codex_tools::ToolSearchInfo;
 use codex_tools::ToolSearchSourceInfo;
@@ -216,7 +218,6 @@ impl TeamHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for TeamHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(self.tool.name())
@@ -240,13 +241,12 @@ impl ToolExecutor<ToolInvocation> for TeamHandler {
         )
     }
 
-    async fn handle(
-        &self,
-        invocation: ToolInvocation,
-    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
-        handle_team_tool(self.tool, invocation)
-            .await
-            .map(boxed_tool_output)
+    fn handle(&self, invocation: ToolInvocation) -> ToolExecutorFuture<'_> {
+        Box::pin(async move {
+            handle_team_tool(self.tool, invocation)
+                .await
+                .map(boxed_tool_output)
+        })
     }
 }
 

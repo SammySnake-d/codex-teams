@@ -37,6 +37,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_thread_store::ReadThreadParams;
 use serde_json::Value;
+use tracing::instrument;
 
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
@@ -99,6 +100,7 @@ impl From<UserPromptSubmitOutcome> for ContextInjectingHookOutcome {
     }
 }
 
+#[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_pending_session_start_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -293,6 +295,7 @@ pub(crate) async fn run_post_tool_use_hooks(
     outcome
 }
 
+#[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_turn_stop_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -384,9 +387,7 @@ pub(crate) async fn run_pre_compact_hooks(
     let outcome = sess.hooks().run_pre_compact(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
     if outcome.should_stop {
-        PreCompactHookOutcome::Stopped {
-            reason: outcome.stop_reason,
-        }
+        PreCompactHookOutcome::Stopped
     } else {
         PreCompactHookOutcome::Continue
     }
@@ -394,7 +395,7 @@ pub(crate) async fn run_pre_compact_hooks(
 
 pub(crate) enum PreCompactHookOutcome {
     Continue,
-    Stopped { reason: Option<String> },
+    Stopped,
 }
 
 pub(crate) enum PostCompactHookOutcome {
@@ -429,6 +430,7 @@ pub(crate) async fn run_post_compact_hooks(
     }
 }
 
+#[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_legacy_after_agent_hook(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -536,6 +538,10 @@ pub(crate) async fn inspect_pending_input(
             should_stop: false,
             additional_contexts: Vec::new(),
         },
+        TurnInput::InterAgentCommunication(_) => HookRuntimeOutcome {
+            should_stop: false,
+            additional_contexts: Vec::new(),
+        },
     }
 }
 
@@ -568,6 +574,10 @@ pub(crate) async fn record_pending_input(
         },
         TurnInput::ResponseItem(item) => {
             sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
+                .await;
+        }
+        TurnInput::InterAgentCommunication(communication) => {
+            sess.record_inter_agent_communication(turn_context, communication)
                 .await;
         }
     }

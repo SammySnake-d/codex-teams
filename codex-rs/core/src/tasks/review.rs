@@ -74,7 +74,7 @@ impl SessionTask for ReviewTask {
                     source: TurnInputSource::TeamsMailbox,
                     ..
                 } => {}
-                TurnInput::ResponseItem(_) => {}
+                TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => {}
             }
         }
 
