@@ -513,3 +513,29 @@ The previous `/teams` entrypoint work made Teams discoverable and fixed one exec
   - Scoped bad-marker check passed over runtime outputs, proxy response dumps, session jsonl, and team store files.
 - Cleaned the smoke-owned lingering `codex teammate` child and temporary plugin clone git processes after the pass.
 - Current merge caveat remains: `.git/MERGE_HEAD` is still present; cached `git diff --check` reports trailing spaces in an upstream snapshot file that matches `upstream/main` exactly, while the current unstaged Teams/Trellis diff-check is clean.
+
+### 2026-06-25 04:20 CST
+
+- Synced again to upstream/main `8057603d0c70930fe096302227f582b5b94496d8` (`feat(app-server): list descendant threads by ancestor (#29591)`) with merge commit `d3d95d2af`. Merge completed cleanly; no `.git/MERGE_HEAD` remained.
+- Post-merge formatting and hygiene:
+  - `cd codex-rs && just fmt` passed.
+  - `git diff --check` and `git diff --cached --check` passed.
+  - `cargo insta pending-snapshots --manifest-path tui/Cargo.toml --as-json` produced no pending snapshot output, and no `*.snap.new` / `*.snap.pending` files were found.
+- Focused post-merge validation passed:
+  - `just test -p codex-core teammate_binary_rejects_non_teammate_cli teammate_binary_escapes_cargo_deps_test_binary codex_auth_env_vars_are_forwarded_by_default teammate_model_resolves_inherit_to_leader_model teammate_spawn_requires_lead_auth_when_provider_requires_openai_auth teammate_spawn_accepts_lead_auth_when_provider_requires_openai_auth teams_tool_search_requires_explicit_teams_terms_not_subagent teams_feature_keeps_v1_subagent_search_separate tool_search_with_teams_feature_keeps_subagent_query_native`: 9 passed.
+  - `just test -p codex-cli teammate_parses_bypass_hook_trust_flag teammate_tui_cli_preserves_root_runtime_options teammate_inherits_root_config_overrides`: 3 passed.
+  - `RUSTY_V8_ARCHIVE=... RUSTY_V8_SRC_BINDING_PATH=... just test -p codex-tui slash_teams slash_subagents_opens_agent_picker_not_teams_dialog team_roster_navigation team_ui footer_snapshots mentions_v2 lead_inbox_poller teammate_startup_skips_onboarding_even_when_login_or_trust_would_show embedded_app_server_forwards_codex_api_key_env_toggle embedded_app_server_start_failure_is_returned render_teams_mailbox_queued_reply render_mixed_queued_inputs_and_teams_mailbox_reply status_and_queued_teams_mailbox_reply_snapshot`: 63 passed.
+  - `just test -p codex-responses-api-proxy`: 13 passed.
+- Rebuilt the no-package debug CLI: `cd codex-rs && cargo build -p codex-cli --bin codex` passed.
+- Binary contract proof after rebuild:
+  - `codex-rs/target/debug/codex --version` prints `codex-cli 0.0.0`.
+  - `codex-rs/target/debug/codex teammate --help` exposes `Usage: codex teammate`, `--agent-id`, `--agent-name`, and `--team-name`.
+  - No files under `codex-rs/cli/src`, `codex-rs/core/src`, `codex-rs/tui/src`, or `codex-rs/responses-api-proxy/src` were newer than `codex-rs/target/debug/codex`.
+- No-package config-backed Teams live smoke passed using only `codex-rs/target/debug/codex` and the deterministic `codex responses-api-proxy --mock-teams-smoke` provider:
+  - Smoke root: `/tmp/codex-teams-upstream805-smoke.yAR2IJ`.
+  - PASS marker: `TEAMS_SMOKE_PASS team_id=019efb55-00ca-7661-838f-652673fe3174 member_id=019efb55-096c-7571-bd5b-6321c946aba9 member_to_lead_completed=true status_output_bytes=964`.
+  - Scoped postcheck over `exec.out`, `exec.err`, proxy response dumps, and team store reported `TEAMS_SCOPED_BAD_MARKERS_ABSENT`.
+  - The first wrapper script exited 1 only because it incorrectly scanned full `dump/*-request.json` and matched incidental `"login"` schema fields; this is the known card `1068` pitfall and was thickened in compound commit `572e9b5`.
+  - Smoke-owned lingering teammate / mock / tmux processes were cleaned; follow-up process check found none.
+- Current user boundary remains: do not package/link or replace the official/user `codex` command before manual fresh-lead validation is accepted. The verified artifact is the debug binary, not an installed package.
+- Current disk state after validation: `codex-rs/target` about `29G`; `/System/Volumes/Data` about `47GiB` free. Keep `target/debug/codex` for user validation unless disk pressure requires a targeted cleanup that preserves the binary.
