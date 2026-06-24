@@ -539,3 +539,4 @@ The previous `/teams` entrypoint work made Teams discoverable and fixed one exec
   - Smoke-owned lingering teammate / mock / tmux processes were cleaned; follow-up process check found none.
 - Current user boundary remains: do not package/link or replace the official/user `codex` command before manual fresh-lead validation is accepted. The verified artifact is the debug binary, not an installed package.
 - Current disk state after validation: `codex-rs/target` about `29G`; `/System/Volumes/Data` about `47GiB` free. Keep `target/debug/codex` for user validation unless disk pressure requires a targeted cleanup that preserves the binary.
+- Post-validation cleanup: removed only `codex-rs/target/debug/incremental`, preserving `codex-rs/target/debug/codex` for manual validation. `codex-rs/target` dropped from about `29G` to about `17G`; `codex-rs/target/debug/codex --version` and `codex-rs/target/debug/codex teammate --help` still work.
