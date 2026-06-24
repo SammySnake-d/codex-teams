@@ -1,7 +1,7 @@
 # STEP-0003 Claude Teams Fidelity Gaps And Runtime E2E
 
-status: real-home-config-smoke-passed-stale-lead-diagnosed
-updated_at: 2026-06-12 20:39:27 CST
+status: post-upstream-debug-proof-passed-user-entrypoint-pending
+updated_at: 2026-06-25 06:16:00 CST
 
 ## Before
 
@@ -159,6 +159,19 @@ Concrete resume checklist:
 
 claude-code-sourcemap teams prompt statusbar down navigation team_send queue subagent isolation teammate header runtime e2e
 
+### 2026-06-25 05:33 CST
+
+- Merged upstream/main `df1ee09ec50453da3976d239da6cb035403ff28f` into `feat/codex-teams-infra` as `dfa3d078b`.
+- Current verification is debug-binary only, not package/link or PATH `codex` proof. `command -v codex` is `/opt/homebrew/bin/codex` (`codex-cli 0.142.0`), and `/Users/snakesammy/.cargo/bin/codex` does not exist.
+- Rebuilt `codex-rs/target/debug/codex`; `codex teammate --help` exposes `Usage: codex teammate`, `--agent-id`, `--agent-name`, and `--team-name`; source freshness check is clean.
+- Post-merge focused validation passed: core MCP/Teams/subagent, CLI teammate, tools/app-server elicitation, TUI Teams/subagent/elicitation 65/65, responses-api-proxy 13/13, no pending TUI snapshots, and `git diff --check`.
+- Live smoke passed with `CODEX_TEAMMATE_COMMAND` pinned to the debug binary. Evidence: `/tmp/codex-teams-post-df1-smoke.2neggs`; PASS marker `TEAMS_SMOKE_PASS ... member_to_lead_completed=true`.
+- Scoped bad-marker check passed over runtime outputs/proxy responses/session/team store.
+- Cleaned smoke-owned teammate process and Cargo intermediates, preserving `target/debug/codex`; target now about 1.6G.
+- Recorded compound card `1069` for the `test_stdio_server` fixture pitfall.
+
+Next: either ask/execute a commit plan for record files, or if user wants manual validation, instruct them to launch the debug binary explicitly with `CODEX_TEAMMATE_COMMAND` pinned to the same binary. Do not replace user `codex` unless explicitly requested.
+
 ### 2026-06-10 05:52 CST
 
 - New diagnosis: if a process-backed teammate reuses a local app-server daemon, the daemon side does not inherit teammate identity/env/auth. This can make an apparently independent `codex teammate` behave like a normal unauthenticated Codex session.
@@ -240,3 +253,14 @@ claude-code-sourcemap teams prompt statusbar down navigation team_send queue sub
 - Final package archive: `dist/local/teams-final/codex-package-aarch64-apple-darwin.tar.gz`, SHA256 `44ff75303baf9ba6c9801dad8b8428e584b3b8ce12afe8ec1339b59b4ba4b70e`.
 - Final runtime evidence: `/tmp/codex-teams-visual-audit2.4cS0hD`; lead has `TEAMS_SMOKE_PASS ... member_to_lead_completed=true`, teammate has `TEAMS_SMOKE_MEMBER_DONE member_to_lead_sent=true`, and bad-marker grep is clean for legacy Teams context, official OpenAI URL, Test API Key, target/debug/deps, unrecognized `--agent-id`, `TEAMS_SMOKE_FAIL`, and `member_to_lead_sent=false`.
 - Remaining boundary: commit/finish hygiene only. Do not mark the overall goal complete until dirty worktree commit is handled or the user explicitly chooses manual commit.
+
+### 2026-06-25 06:16 CST
+
+- Continued after upstream `24423f5712` was included by merge commit `98d5643ea`.
+- Corrected the footer false start back to Claude compact count semantics; no Rust/TUI source diff remains.
+- Validation passed: `just fmt`; TUI focused 55/55; `codex-analytics` 83/83; `codex-core request_plugin_install` 17/17; core Teams/subagent/auth/search 11/11; extra `spawn_agent` teammate/native branch 4/4; CLI teammate 3/3; responses-api-proxy 13/13; no pending snapshots; `git diff --check`.
+- Rebuilt `codex-rs/target/debug/codex`; `--version` is `codex-cli 0.0.0`; `teammate --help` exposes `Usage: codex teammate`, `--agent-id`, `--agent-name`, and `--team-name`.
+- No-package live smoke passed with `CODEX_TEAMMATE_COMMAND` pinned to the debug binary. Evidence: `/tmp/codex-teams-post-24423-smoke.mCyhM4`; sentinel `TEAMS_SMOKE_PASS team_id=019efbad-0f78-76e1-aab3-85b2f0275dc1 member_id=019efbad-2297-75f1-b73c-4baa94e7f2bb member_to_lead_completed=true status_output_bytes=964`.
+- Scoped bad-marker check reported `TEAMS_SCOPED_BAD_MARKERS_ABSENT`; cleaned smoke/test-created teammate processes.
+- Cleaned build intermediates after validation, preserving `target/debug/codex`; `target` is about `1.6G`.
+- Do not package/link or replace PATH `codex` yet. PATH still resolves to `/opt/homebrew/bin/codex` (`codex-cli 0.142.0`); manual validation must explicitly use `codex-rs/target/debug/codex` until the user approves package/link.

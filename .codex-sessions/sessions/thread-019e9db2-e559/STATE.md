@@ -1,13 +1,23 @@
 # State
 
-updated_at: 2026-06-13 05:40:00 CST
-status: teams-migration-verified-packaged-commit-pending
+updated_at: 2026-06-25 06:16:00 CST
+status: post-upstream-debug-proof-passed-user-entrypoint-pending
 
 ## Current Focus
 
-Port Codex Teams toward Claude Code fidelity while preserving native Codex subagent behavior. Current implementation evidence now covers the previously open fidelity gaps: hidden/plain first teammate prompt delivery, Claude-style TeamCreate/SendMessage envelopes, strict native subagent isolation, Teams footer/header/navigation slices, queued Teams mailbox replies, fresh split-pane runtime E2E, and final local package generation. The remaining workflow boundary is commit/finish hygiene, not another source-code slice.
+Port Codex Teams toward Claude Code fidelity while preserving native Codex subagent behavior. Current source-backed debug-binary proof is green after merging upstream/main through `24423f5712` (`98d5643ea` merge commit), but this is not a packaged/user-entrypoint completion state.
 
-2026-06-13 05:40 CST completion-audit checkpoint: current wrapper `/Users/snakesammy/.cargo/bin/codex` points at fresh `codex-rs/target/debug/codex`; `codex --enable teams features list` reports `teams under development true`; `codex teammate --help` exposes `--agent-id`, `--agent-name`, and `--team-name`; no relevant source file is newer than the debug binary; no pending snapshots exist; `git diff --check` passes; no active Cargo/Rust/test/smoke process is running. Final interactive visual audit evidence is `/tmp/codex-teams-visual-audit2.4cS0hD`; final package archive is `dist/local/teams-final/codex-package-aarch64-apple-darwin.tar.gz` with SHA256 `44ff75303baf9ba6c9801dad8b8428e584b3b8ce12afe8ec1339b59b4ba4b70e`. Do not mark the Trellis task fully wrapped until the dirty worktree is committed or the user explicitly chooses manual commit.
+2026-06-25 06:16 CST checkpoint: the false-start footer pill drift was corrected back to Claude `TeamStatus` count semantics (`N teammate(s)`), leaving no Rust/TUI source diff. Validation passed: `just fmt`, focused TUI Teams/subagent suite 55/55, `codex-analytics` 83/83, `codex-core request_plugin_install` 17/17, focused core Teams/subagent/auth/search 11/11, extra `spawn_agent` teammate/native branch 4/4, CLI teammate 3/3, responses-api-proxy 13/13, no pending snapshots, and `git diff --check`.
+
+2026-06-25 05:31 CST checkpoint: upstream/main `df1ee09ec50453da3976d239da6cb035403ff28f` was merged into `feat/codex-teams-infra` as `dfa3d078b`. Validation passed: `just fmt`, `git diff --check`, focused core MCP/Teams/subagent tests, CLI teammate tests, codex-tools/app-server-protocol/app-server MCP elicitation tests, TUI Teams/subagent/elicitation tests 65/65, responses-api-proxy tests 13/13, and no pending TUI snapshots. The missing `test_stdio_server` fixture pitfall is recorded as compound card `1069`.
+
+Current debug binary proof: `codex-rs/target/debug/codex` was rebuilt after the latest merge, prints `codex-cli 0.0.0`, and `codex-rs/target/debug/codex teammate --help` exposes `Usage: codex teammate` plus `--agent-id`, `--agent-name`, and `--team-name`.
+
+Current runtime proof: no-package live smoke passed with `CODEX_TEAMMATE_COMMAND` pinned to `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`. Evidence root: `/tmp/codex-teams-post-24423-smoke.mCyhM4`. PASS marker: `TEAMS_SMOKE_PASS team_id=019efbad-0f78-76e1-aab3-85b2f0275dc1 member_id=019efbad-2297-75f1-b73c-4baa94e7f2bb member_to_lead_completed=true status_output_bytes=964`. Scoped bad-marker check passed over `exec.out`, `exec.err`, proxy response dumps, and team store files; no legacy visible Teams context, login/auth marker, `api.openai.com`, App bundle path, `target/debug/deps`, unrecognized `--agent-id`, `TEAMS_SMOKE_FAIL`, or `member_to_lead_sent=false` marker was found.
+
+Current entrypoint caveat: `command -v codex` resolves to `/opt/homebrew/bin/codex` (`codex-cli 0.142.0`) and `/Users/snakesammy/.cargo/bin/codex` does not exist. Do not use PATH `codex` as Teams proof. Manual validation must use `codex-rs/target/debug/codex` explicitly or wait for an explicit package/link step. Do not replace or relink the user-facing `codex` command until the user asks.
+
+Current cleanup state: smoke-owned and focused-test-created teammate processes were cleaned. Cargo intermediates were cleaned after confirming no cargo/rustc/nextest/just process was active, preserving `codex-rs/target/debug/codex`; `codex-rs/target` is about 1.6G.
 
 Latest active diagnostic boundary: user reported a newly spawned teammate still calling the official OpenAI base URL and asked to remember the pitfall. No source edit was made in this memory slice. Evidence points to wrong runtime `CODEX_HOME` first, not a provider-code bug: the screenshot itself says unstable-feature warnings would be suppressed by editing `/private/var/folders/lh/z4bcmr1d18z53jcctpfhwdt80000gn/T/.tmpbZUvQ4/config.toml`, proving that process was reading a temporary Codex home rather than `/Users/snakesammy/.codex/config.toml`. The same screenshot shows `Incorrect API key provided: Test API Key` and `https://api.openai.com/v1/responses`, consistent with a temporary smoke/test config or inherited test env. Exiting/restarting helps only if the new lead is started from the verified wrapper/current binary with real `CODEX_HOME=/Users/snakesammy/.codex`; restarting into another temp-home harness preserves the failure.
 

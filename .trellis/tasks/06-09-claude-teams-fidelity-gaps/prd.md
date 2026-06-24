@@ -540,3 +540,66 @@ The previous `/teams` entrypoint work made Teams discoverable and fixed one exec
 - Current user boundary remains: do not package/link or replace the official/user `codex` command before manual fresh-lead validation is accepted. The verified artifact is the debug binary, not an installed package.
 - Current disk state after validation: `codex-rs/target` about `29G`; `/System/Volumes/Data` about `47GiB` free. Keep `target/debug/codex` for user validation unless disk pressure requires a targeted cleanup that preserves the binary.
 - Post-validation cleanup: removed only `codex-rs/target/debug/incremental`, preserving `codex-rs/target/debug/codex` for manual validation. `codex-rs/target` dropped from about `29G` to about `17G`; `codex-rs/target/debug/codex --version` and `codex-rs/target/debug/codex teammate --help` still work.
+
+### 2026-06-25 05:01 CST
+
+- Resume checkpoint before syncing the next upstream delta.
+- Remote `upstream/main` is now `df1ee09ec50453da3976d239da6cb035403ff28f`, while local `upstream/main` is still `a33ad93996522315d1d774b9a029d5a1cc8532fa` and current branch `HEAD` is `c77bd0bd6b711434e9823c3145011f6eb722a3b2`.
+- Current code tree has no dirty Rust/Trellis changes before this record update; only `.codex-sessions/*` session metadata is dirty.
+- Entrypoint drift is the current user-visible blocker:
+  - `command -v codex` resolves to `/opt/homebrew/bin/codex`.
+  - That command reports `codex-cli 0.142.0`.
+  - `/Users/snakesammy/.cargo/bin/codex` does not exist.
+  - `codex-rs/target/debug/codex` exists and `codex-rs/target/debug/codex teammate --help` exposes `Usage: codex teammate` plus `--agent-id`, `--agent-name`, and `--team-name`.
+- Do not package, link, or replace the user-facing `codex` command before the next post-merge debug-binary live proof passes and the user explicitly accepts that handoff boundary.
+- Next actions: fetch and merge `upstream/main`, resolve any upstream compatibility drift, rerun focused Teams/subagent/TUI/proxy validation, rebuild `codex-rs/target/debug/codex`, and run a no-package live smoke with `CODEX_TEAMMATE_COMMAND` pinned to the debug binary.
+
+### 2026-06-25 05:31 CST
+
+- Synced `feat/codex-teams-infra` with upstream/main `df1ee09ec50453da3976d239da6cb035403ff28f` via merge commit `dfa3d078b`; no merge conflicts and no `.git/MERGE_HEAD` remains.
+- Post-merge validation passed:
+  - `just fmt` passed.
+  - `git diff --check` passed.
+  - Focused core MCP/Teams/subagent/config tests passed after building the missing `test_stdio_server` fixture binary.
+  - Focused CLI teammate tests passed.
+  - Focused `codex-tools`, `codex-app-server-protocol`, and `codex-app-server` MCP elicitation tests passed for the upstream `df1ee09ec` boundary.
+  - Focused TUI Teams/subagent/elicitation tests passed: 65/65 with the recorded V8 artifact overrides.
+  - `codex-responses-api-proxy` tests passed: 13/13.
+  - No pending TUI snapshots were reported.
+- Rebuilt `codex-rs/target/debug/codex` after merge. It prints `codex-cli 0.0.0`; `codex-rs/target/debug/codex teammate --help` exposes `Usage: codex teammate` and `--agent-id` / `--agent-name` / `--team-name`; source freshness check found no relevant source newer than the debug binary.
+- No-package live smoke passed using the debug binary only:
+  - Smoke root: `/tmp/codex-teams-post-df1-smoke.2neggs`.
+  - `CODEX_TEAMMATE_COMMAND=/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`.
+  - PASS marker: `TEAMS_SMOKE_PASS team_id=019efb86-6cdc-7583-b8db-79b2dd93da86 member_id=019efb86-d937-71b1-84a2-28b047810d6e member_to_lead_completed=true status_output_bytes=964`.
+  - Scoped bad-marker check found no visible legacy Teams context, login/auth marker, `api.openai.com`, App bundle path, `target/debug/deps`, unrecognized `--agent-id`, `TEAMS_SMOKE_FAIL`, or `member_to_lead_sent=false` marker.
+- Cleaned the smoke-owned lingering teammate process after the pass.
+- Cleaned build intermediates only after verifying no Cargo/Rust/nextest/just process was active, preserving `codex-rs/target/debug/codex`. `codex-rs/target` dropped from about 58G to 1.6G; `/System/Volumes/Data` free space rose to about 125GiB.
+- Current user-entrypoint caveat remains: `codex` on PATH is still `/opt/homebrew/bin/codex` (`codex-cli 0.142.0`) and `/Users/snakesammy/.cargo/bin/codex` does not exist. Manual validation must use `codex-rs/target/debug/codex` explicitly or wait for an explicit package/link step.
+- Compound memory: recorded card `1069` for the `test_stdio_server` fixture pitfall. Future `codex-core` MCP/stdio focused failures that say `could not locate binary "test_stdio_server"` should first run `cargo build -p codex-rmcp-client --bin test_stdio_server` and then rerun the failed tests, instead of patching production code.
+
+### 2026-06-25 06:16 CST
+
+- Continued after upstream/main `24423f5712` was already merged into `feat/codex-teams-infra` as merge commit `98d5643ea`.
+- Corrected a local false start that changed the Teams footer from Claude's compact `N teammate(s)` status into `@main · @alice`; Claude `TeamStatus.tsx` is count-based, so no Rust/TUI source diff remains from that attempt.
+- Validation passed after the correction and rebuild:
+  - `cd codex-rs && just fmt` passed.
+  - Focused TUI Teams/subagent tests passed: 55/55.
+  - Upstream plugin-install boundary tests passed: `codex-analytics` 83/83 and `codex-core request_plugin_install` 17/17.
+  - Focused core Teams/subagent/auth/search tests passed: 11/11; extra `spawn_agent` teammate/native branch tests passed: 4/4.
+  - Focused CLI teammate tests passed: 3/3.
+  - `codex-responses-api-proxy` tests passed: 13/13.
+  - No pending TUI snapshots were reported; no `*.snap.new` / `*.snap.pending` files were found.
+  - `git diff --check` passed.
+- Rebuilt the no-package debug CLI: `cd codex-rs && cargo build -p codex-cli --bin codex` passed.
+- Binary contract proof:
+  - `codex-rs/target/debug/codex --version` prints `codex-cli 0.0.0`.
+  - `codex-rs/target/debug/codex teammate --help` exposes `Usage: codex teammate`, `--agent-id`, `--agent-name`, and `--team-name`.
+- No-package config-backed Teams live smoke passed using only `codex-rs/target/debug/codex`, `CODEX_TEAMMATE_COMMAND` pinned to that same debug binary, and `codex responses-api-proxy --mock-teams-smoke`:
+  - Smoke root: `/tmp/codex-teams-post-24423-smoke.mCyhM4`.
+  - PASS marker: `TEAMS_SMOKE_PASS team_id=019efbad-0f78-76e1-aab3-85b2f0275dc1 member_id=019efbad-2297-75f1-b73c-4baa94e7f2bb member_to_lead_completed=true status_output_bytes=964`.
+  - Correct scoped bad-marker check reported `TEAMS_SCOPED_BAD_MARKERS_ABSENT` over `exec.out`, `exec.err`, proxy response dumps, and team store files.
+- Cleanup:
+  - Cleaned the smoke-owned `mock-member` teammate and three focused-test-created `alice@rocket` teammate processes.
+  - Cleaned `target/debug/deps`, `target/debug/incremental`, `target/debug/build`, `target/debug/.fingerprint`, and `target/debug/gn_out` after verifying no active Cargo/Rust/nextest/just process existed.
+  - Preserved `codex-rs/target/debug/codex`; `target` dropped from about `35G` to `1.6G`, and the debug binary still runs plus exposes teammate flags.
+- Current user-entrypoint caveat remains: `codex` on PATH is still `/opt/homebrew/bin/codex` (`codex-cli 0.142.0`). Do not package/link or replace it until explicitly approved after this debug-binary proof.

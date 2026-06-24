@@ -208,3 +208,23 @@ All display modes must remain adapters over the same team state and event feed.
 ## Persistence Boundary
 
 If persistent resume is not in the first slice, team state must clearly report that it is live-session-only. Stale team state must not be presented as resumable.
+
+## Entrypoint Validation Boundary
+
+Teams runtime proof must distinguish the development binary from installed
+system entrypoints. A passing source build is not enough if `codex` on `PATH`
+resolves to a Homebrew/App-bundle binary that does not expose the hidden
+`codex teammate` subcommand.
+
+Before user handoff or package/link:
+
+- Verify the debug binary directly with `codex-rs/target/debug/codex teammate
+  --help`; the help text must contain `Usage: codex teammate`, `--agent-id`,
+  `--agent-name`, and `--team-name`.
+- Run no-package live smoke with `CODEX_TEAMMATE_COMMAND` pinned to that debug
+  binary, so lead and teammate use the same freshly built artifact.
+- Treat `command -v codex` resolving to Homebrew/App-bundle Codex as an
+  installed-entrypoint drift, not as evidence that the Teams source path is
+  broken.
+- Do not replace or relink the user-facing `codex` command until focused tests
+  and the debug-binary live smoke pass after the latest upstream merge.

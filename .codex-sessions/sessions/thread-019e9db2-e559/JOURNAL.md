@@ -395,3 +395,36 @@ Event: completion audit and session-memory sync after final package checkpoint
 - Final package archive is `dist/local/teams-final/codex-package-aarch64-apple-darwin.tar.gz`, SHA256 `44ff75303baf9ba6c9801dad8b8428e584b3b8ce12afe8ec1339b59b4ba4b70e`.
 - Final interactive audit evidence is `/tmp/codex-teams-visual-audit2.4cS0hD`, with lead `TEAMS_SMOKE_PASS ... member_to_lead_completed=true`, teammate `TEAMS_SMOKE_MEMBER_DONE member_to_lead_sent=true`, and zero bad markers for legacy Teams context, official OpenAI URL, Test API Key, target/debug/deps, unrecognized `--agent-id`, or smoke failure.
 - The remaining non-code boundary is commit/finish hygiene. The worktree is still dirty, so do not mark the goal or Trellis task complete until the commit plan is accepted/executed or the user explicitly takes over manual commit.
+
+## 2026-06-25 05:33 CST
+
+Event: post-upstream debug Teams proof and entrypoint boundary recorded
+
+- Merged upstream/main `df1ee09ec50453da3976d239da6cb035403ff28f` into `feat/codex-teams-infra` as `dfa3d078b`.
+- Debug-binary validation passed after merge: focused core/CLI/tools/app-server/TUI/proxy tests, no pending snapshots, `git diff --check`, rebuild, source freshness check, and no-package Teams live smoke.
+- Live smoke evidence: `/tmp/codex-teams-post-df1-smoke.2neggs`; PASS marker `TEAMS_SMOKE_PASS ... member_to_lead_completed=true`; scoped bad-marker grep was clean.
+- Current entrypoint boundary: PATH `codex` is Homebrew `0.142.0`; `/Users/snakesammy/.cargo/bin/codex` does not exist. Manual validation must use `codex-rs/target/debug/codex` explicitly or wait for explicit package/link.
+- Cleaned smoke-owned teammate process and Cargo intermediates while preserving `target/debug/codex`; target is about 1.6G.
+- Compound card `1069` records the missing `test_stdio_server` fixture pitfall.
+
+## 2026-06-25 06:16 CST
+
+Event: upstream 24423 post-merge Teams proof, no package/link
+
+- Merge state: current branch is `feat/codex-teams-infra` at `98d5643ea74a6748c8462bb45f5918603e68e3a4`, with upstream `24423f5712` included.
+- Corrected the footer false start: Claude `TeamStatus.tsx` uses compact `N teammate(s)` count, not `@main · @alice`; after correction there is no Rust/TUI source diff.
+- Validation passed:
+  - `just fmt`.
+  - TUI focused Teams/subagent suite: 55/55.
+  - `codex-analytics`: 83/83.
+  - `codex-core request_plugin_install`: 17/17.
+  - Core Teams/subagent/auth/search suite: 11/11; extra spawn_agent branch suite: 4/4.
+  - CLI teammate suite: 3/3.
+  - responses-api-proxy: 13/13.
+  - no pending insta snapshots; `git diff --check` passed.
+- Rebuilt `codex-rs/target/debug/codex`; `--version` prints `codex-cli 0.0.0`, and `teammate --help` exposes `Usage: codex teammate`, `--agent-id`, `--agent-name`, and `--team-name`.
+- No-package live Teams smoke passed with `CODEX_TEAMMATE_COMMAND=/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`.
+- Smoke evidence: `/tmp/codex-teams-post-24423-smoke.mCyhM4`; sentinel `TEAMS_SMOKE_PASS team_id=019efbad-0f78-76e1-aab3-85b2f0275dc1 member_id=019efbad-2297-75f1-b73c-4baa94e7f2bb member_to_lead_completed=true status_output_bytes=964`.
+- Scoped bad-marker check passed: no legacy visible Teams context, login/auth marker, official OpenAI URL, App bundle path, `target/debug/deps`, unrecognized `--agent-id`, `TEAMS_SMOKE_FAIL`, or `member_to_lead_sent=false` marker in scoped runtime evidence.
+- Cleaned smoke/test-created teammate leftovers and build intermediates, preserving `target/debug/codex`. `target` is about `1.6G` after cleanup.
+- Boundary remains: PATH `codex` is `/opt/homebrew/bin/codex` (`codex-cli 0.142.0`), not this debug build. Do not replace/package/link until the user explicitly asks; manual validation must run the debug binary explicitly.
