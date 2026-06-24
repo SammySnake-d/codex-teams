@@ -118,7 +118,9 @@ impl TeamUiState {
                     .insert(call_id.clone(), PendingTeamCall { tool, team_id });
                 None
             }
-            ResponseItem::FunctionCallOutput { call_id, output } => {
+            ResponseItem::FunctionCallOutput {
+                call_id, output, ..
+            } => {
                 let pending = self.pending_calls.remove(call_id)?;
                 let text = output.text_content()?;
                 let value = serde_json::from_str::<Value>(text).ok()?;
@@ -519,13 +521,16 @@ mod tests {
             namespace: None,
             arguments: arguments.to_string(),
             call_id: call_id.to_string(),
+            internal_chat_message_metadata_passthrough: None,
         }
     }
 
     fn output(call_id: &str, json: &str) -> ResponseItem {
         ResponseItem::FunctionCallOutput {
+            id: None,
             call_id: call_id.to_string(),
             output: FunctionCallOutputPayload::from_text(json.to_string()),
+            internal_chat_message_metadata_passthrough: None,
         }
     }
 
@@ -632,6 +637,7 @@ mod tests {
             namespace: Some("mcp".to_string()),
             arguments: "{}".to_string(),
             call_id: "c1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
         });
         let created = state.observe_response_item(&output(
             "c1",

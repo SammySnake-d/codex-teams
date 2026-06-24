@@ -16,13 +16,16 @@ fn call(name: &str, call_id: &str, arguments: &str) -> ResponseItem {
         namespace: None,
         arguments: arguments.to_string(),
         call_id: call_id.to_string(),
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
 fn output(call_id: &str, json: &str) -> ResponseItem {
     ResponseItem::FunctionCallOutput {
+        id: None,
         call_id: call_id.to_string(),
         output: FunctionCallOutputPayload::from_text(json.to_string()),
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -622,6 +625,7 @@ async fn namespaced_team_spawn_member_output_does_not_update_teams_roster() {
             namespace: Some("mcp".to_string()),
             arguments: r#"{"team_id":"team-1"}"#.to_string(),
             call_id: "mcp-spawn-1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
         },
     );
     feed_raw(

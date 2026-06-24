@@ -700,3 +700,44 @@ Event: interactive visual audit and mock parser fix
   - Precise bad-marker grep found no visible `Codex Teams context:`, independent-teammate legacy prompt, `Test API Key`, `Incorrect API key`, `api.openai.com`, App bundle path, `target/debug/deps`, unrecognized `--agent-id`, `TEAMS_SMOKE_FAIL`, or `member_to_lead_sent=false`.
 - No smoke-owned teammate/proxy process remained after the audit. `codex --version` and `CODEX_HOME=/Users/snakesammy/.codex codex teammate --help` still work.
 - Status: automated final interactive visual audit for the current wrapper/debug binary is now closed. If the user wants stricter pixel-for-pixel Claude style parity, use `/tmp/codex-teams-visual-audit2.4cS0hD` pane captures as the baseline for a new focused UI slice.
+
+## 2026-06-25 03:41 CST
+
+Event: upstream 1.42 sync checkpoint, focused tests, debug live smoke, and memory updates
+
+- Continued `claude-teams-fidelity-gaps` on branch `feat/codex-teams-infra` while syncing toward `upstream/main` at `f959e7fc9832dfa0ebfb6542ab1bbf829638ac24`.
+- The merge is not yet closed: `.git/MERGE_HEAD` is present, there are no unmerged index entries, but a large upstream merge set is staged and 9 local compatibility fixes remain unstaged.
+- User boundary preserved: no `bin/codex` / official command replacement or relink was performed. Verification used `codex-rs/target/debug/codex` only.
+- Focused validation evidence already passed in this continuation:
+  - core focused Teams/subagent/config tests: 9/9;
+  - CLI teammate runtime/root tests: 3/3;
+  - TUI Teams focused tests: 47/47.
+- Upstream 1.42 TUI tests needed V8 release artifact overrides for local validation: `RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH` pointed at the fetched `rusty-v8-149.2.0-aarch64-apple-darwin` artifacts.
+- Debug binary proof passed: `target/debug/codex --version` reports `codex-cli 0.0.0`; `target/debug/codex teammate --help` exposes `--agent-id`, `--agent-name`, and `--team-name`.
+- No-package live smoke passed with temp config/auth and debug binary:
+  - root `/tmp/codex-teams-upstream142-smoke.skTsM6`;
+  - `TEAMS_SMOKE_PASS team_id=019efb20-74c3-76d3-8c5b-48ad0ccab129 member_id=019efb20-8523-7263-847d-391d8817f665 member_to_lead_completed=true status_output_bytes=964`.
+- Smoke script exit 1 was diagnosed as a false negative from broad bad-marker grep over plugin docs/proxy request schema strings. Scoped runtime-only postcheck passed.
+- Smoke-owned lingering teammate was cleaned; no smoke teammate/proxy process remains.
+- Compound cards added:
+  - `1067` for the upstream 1.42 `rusty_v8` validation override pitfall.
+  - `1068` for Teams smoke scoped negative grep pitfall.
+- Current disk state: `codex-rs/target` about `26G`; Data volume about `55GiB` free. Preserve `target/debug/codex` until the package/link decision is explicit.
+- Remaining: close merge hygiene, decide/stage the 9 unstaged compatibility files, handle cached snapshot whitespace, rerun diff hygiene, then decide whether to commit. Do not call Teams fully complete before final user manual validation.
+
+## 2026-06-25 03:58 CST
+
+Event: post-rebuild focused tests and no-package live smoke
+
+- Rebuilt `codex-rs/target/debug/codex` after the latest upstream compatibility edits. The debug binary now postdates CLI/core/TUI/proxy source files.
+- Verified `target/debug/codex --version` and `target/debug/codex teammate --help`; hidden teammate flags are present.
+- Focused tests passed after rebuild:
+  - `codex-core`: 9/9 Teams/subagent/config tests.
+  - `codex-cli`: 3/3 teammate runtime/root tests.
+  - `codex-tui`: 47/47 Teams tests using the recorded `RUSTY_V8_*` overrides.
+- First smoke attempt failed because `teamssmoke` required `OPENAI_API_KEY` in the process environment; `auth.json` alone was not enough for the provider `env_key` path.
+- Second no-package live smoke passed using current `target/debug/codex` only:
+  - root `/tmp/codex-teams-post-rebuild-smoke.8yaAYa`;
+  - sentinel `TEAMS_SMOKE_PASS team_id=019efb36-9544-7a62-b3ac-6a61b75dfe6e member_id=019efb36-a15a-7433-b59a-70a9d34dbff0 member_to_lead_completed=true status_output_bytes=964`.
+- Scoped negative check passed; broad grep over plugin/request schema remains forbidden for this smoke class.
+- Cleaned the smoke-owned lingering teammate and temporary plugin clone git processes. No package/link or official command replacement was performed.

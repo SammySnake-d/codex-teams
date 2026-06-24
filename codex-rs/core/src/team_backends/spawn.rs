@@ -11,6 +11,10 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Stdio;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::team_store;
 
@@ -29,6 +33,8 @@ pub(crate) const AGENT_COLOR_PALETTE: [AgentColor; 8] = [
     AgentColor::Pink,
     AgentColor::Cyan,
 ];
+
+const TEAMMATE_HELP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Claude `assignTeammateColor`: round-robin over [`AGENT_COLOR_PALETTE`] by
 /// spawn index.
@@ -130,7 +136,36 @@ fn teammate_binary_without_override(path: &Path) -> PathBuf {
 }
 
 fn supports_teammate_subcommand(path: &Path) -> bool {
-    let output = Command::new(path).arg("teammate").arg("--help").output();
+    let mut child = match Command::new(path)
+        .arg("teammate")
+        .arg("--help")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let deadline = Instant::now() + TEAMMATE_HELP_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+    let output = child.wait_with_output();
     let Ok(output) = output else {
         return false;
     };

@@ -74,7 +74,7 @@ fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &Sessi
 
 fn apply_turn_context(metadata: &mut ThreadMetadata, turn_ctx: &TurnContextItem) {
     if metadata.cwd.as_os_str().is_empty() {
-        metadata.cwd = turn_ctx.cwd.clone();
+        metadata.cwd = turn_ctx.cwd.clone().into_path_buf();
     }
     metadata.model = Some(turn_ctx.model.clone());
     metadata.reasoning_effort = turn_ctx.effort.clone();
@@ -191,6 +191,7 @@ mod tests {
                 text: "hello from response item".to_string(),
             }],
             phase: None,
+            internal_chat_message_metadata_passthrough: None,
         });
 
         apply_rollout_item(&mut metadata, &item, "test-provider");
@@ -320,6 +321,7 @@ mod tests {
             &mut metadata,
             &RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
+                    session_id: thread_id.into(),
                     id: thread_id,
                     forked_from_id: Some(
                         ThreadId::from_string(&Uuid::now_v7().to_string()).expect("thread id"),
@@ -339,6 +341,7 @@ mod tests {
                     dynamic_tools: None,
                     memory_mode: None,
                     multi_agent_version: None,
+                    context_window: None,
                 },
                 git: None,
             }),
@@ -348,7 +351,12 @@ mod tests {
             &mut metadata,
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: PathBuf::from("/parent/workspace"),
+                cwd: serde_json::from_value(serde_json::json!(
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .join("parent/workspace")
+                ))
+                .expect("absolute parent cwd"),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
@@ -362,6 +370,7 @@ mod tests {
                 personality: None,
                 collaboration_mode: None,
                 multi_agent_version: None,
+                multi_agent_mode: None,
                 realtime_active: None,
                 effort: None,
                 summary: codex_protocol::config_types::ReasoningSummary::Auto,
@@ -370,10 +379,10 @@ mod tests {
         );
 
         assert_eq!(metadata.cwd, PathBuf::from("/child/worktree"));
+        let permission_profile: PermissionProfile = PermissionProfile::Disabled;
         assert_eq!(
             metadata.sandbox_policy,
-            serde_json::to_string(&PermissionProfile::Disabled)
-                .expect("serialize permission profile")
+            serde_json::to_string(&permission_profile).expect("serialize permission profile")
         );
         assert_eq!(metadata.approval_mode, "never");
     }
@@ -387,7 +396,12 @@ mod tests {
             &mut metadata,
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: PathBuf::from("/workspace"),
+                cwd: serde_json::from_value(serde_json::json!(
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .join("workspace")
+                ))
+                .expect("absolute workspace cwd"),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
@@ -401,6 +415,7 @@ mod tests {
                 personality: None,
                 collaboration_mode: None,
                 multi_agent_version: None,
+                multi_agent_mode: None,
                 realtime_active: None,
                 effort: None,
                 summary: codex_protocol::config_types::ReasoningSummary::Auto,
@@ -418,12 +433,16 @@ mod tests {
     fn turn_context_sets_cwd_when_session_cwd_missing() {
         let mut metadata = metadata_for_test();
         metadata.cwd = PathBuf::new();
+        let fallback_cwd = std::env::current_dir()
+            .expect("current directory")
+            .join("fallback/workspace");
 
         apply_rollout_item(
             &mut metadata,
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: PathBuf::from("/fallback/workspace"),
+                cwd: serde_json::from_value(serde_json::json!(&fallback_cwd))
+                    .expect("absolute fallback cwd"),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
@@ -437,6 +456,7 @@ mod tests {
                 personality: None,
                 collaboration_mode: None,
                 multi_agent_version: None,
+                multi_agent_mode: None,
                 realtime_active: None,
                 effort: Some(ReasoningEffort::High),
                 summary: codex_protocol::config_types::ReasoningSummary::Auto,
@@ -444,7 +464,7 @@ mod tests {
             "test-provider",
         );
 
-        assert_eq!(metadata.cwd, PathBuf::from("/fallback/workspace"));
+        assert_eq!(metadata.cwd, fallback_cwd);
     }
 
     #[test]
@@ -455,7 +475,12 @@ mod tests {
             &mut metadata,
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: PathBuf::from("/fallback/workspace"),
+                cwd: serde_json::from_value(serde_json::json!(
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .join("fallback/workspace")
+                ))
+                .expect("absolute fallback cwd"),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
@@ -469,6 +494,7 @@ mod tests {
                 personality: None,
                 collaboration_mode: None,
                 multi_agent_version: None,
+                multi_agent_mode: None,
                 realtime_active: None,
                 effort: Some(ReasoningEffort::High),
                 summary: codex_protocol::config_types::ReasoningSummary::Auto,
@@ -489,6 +515,7 @@ mod tests {
             &mut metadata,
             &RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
+                    session_id: thread_id.into(),
                     id: thread_id,
                     forked_from_id: None,
                     parent_thread_id: None,
@@ -506,6 +533,7 @@ mod tests {
                     dynamic_tools: None,
                     memory_mode: None,
                     multi_agent_version: None,
+                    context_window: None,
                 },
                 git: None,
             }),
@@ -524,6 +552,7 @@ mod tests {
             rollout_path: PathBuf::from("/tmp/a.jsonl"),
             created_at,
             updated_at: created_at,
+            recency_at: created_at,
             source: "cli".to_string(),
             thread_source: None,
             agent_path: None,

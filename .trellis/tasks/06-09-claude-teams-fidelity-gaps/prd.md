@@ -456,3 +456,60 @@ The previous `/teams` entrypoint work made Teams discoverable and fixed one exec
 - Smoke request proof: request dumps contained model `gpt-5.5`; bad-marker grep found no visible legacy Teams context, legacy independent-teammate prompt, `Test API Key`, `Incorrect API key`, `api.openai.com`, App bundle path, `target/debug/deps`, or unrecognized `--agent-id`.
 - Cleanup: ended the smoke's lingering `codex teammate` process, then removed debug/release build intermediates while preserving `codex-rs/target/debug/codex`. `codex-rs/target` dropped from 26G to 1.1G; `/System/Volumes/Data` free space rose from about 21GiB to about 45GiB.
 - Current boundary: the debug build and wrapper target are fresh and smoke-proven. Package/link is still not separately changed in this checkpoint because the wrapper already points to the fresh debug binary; user-facing interactive retest should start from a fresh lead, not older `codex resume` or App bundle processes.
+
+### 2026-06-25 03:41 CST
+
+- Resumed the Claude Teams fidelity task after syncing toward upstream/main `f959e7fc9832dfa0ebfb6542ab1bbf829638ac24` (upstream 1.42-era CLI state).
+- Current git state is not final: `.git/MERGE_HEAD` still points at `f959e7fc9832dfa0ebfb6542ab1bbf829638ac24`; there are no unmerged index entries, but the merge is still in progress with a large staged upstream merge set and 9 unstaged compatibility fixes.
+- User boundary remains active: do not replace or relink `bin/codex` / the official command before debug-binary live proof is accepted. Current verification used only `codex-rs/target/debug/codex`.
+- Upstream protocol/API drift fixes in the unstaged set are surgical compatibility changes only:
+  - `ResponseItem::FunctionCall` / `FunctionCallOutput` test fixtures now include upstream `internal_chat_message_metadata_passthrough` / `id` fields where required.
+  - `codex-rs/tui/src/chatwidget/team_ui.rs` matches `FunctionCallOutput { .. }` for the new protocol fields.
+  - `codex-rs/core/src/tools/spec_plan.rs` uses the active `StepContext` turn and `config.features` for Teams tool planning after upstream StepContext changes.
+  - `codex-rs/core/src/team_backends/spawn.rs` bounds the teammate `--help` support probe so a bad candidate binary cannot hang teammate binary resolution.
+  - `AskForApproval::OnFailure` handling was removed where upstream removed that enum variant.
+- Focused validation already passed before this checkpoint:
+  - Core focused Teams/subagent/config tests: 9/9.
+  - CLI teammate root/runtime tests: 3/3.
+  - TUI focused Teams tests: 47/47.
+- TUI focused tests required V8 release artifact env overrides after upstream 1.42 introduced `v8 v149.2.0` in the local test dependency chain:
+  - `RUSTY_V8_ARCHIVE=/var/folders/lh/z4bcmr1d18z53jcctpfhwdt80000gn/T/codex-package/rusty-v8-149.2.0-aarch64-apple-darwin/librusty_v8_release_aarch64-apple-darwin.a.gz`
+  - `RUSTY_V8_SRC_BINDING_PATH=/var/folders/lh/z4bcmr1d18z53jcctpfhwdt80000gn/T/codex-package/rusty-v8-149.2.0-aarch64-apple-darwin/src_binding_release_aarch64-apple-darwin.rs`
+- Debug binary proof:
+  - `codex-rs/target/debug/codex --version` prints `codex-cli 0.0.0`.
+  - `codex-rs/target/debug/codex teammate --help` exposes `Usage: codex teammate`, `--agent-id`, `--agent-name`, and `--team-name`.
+- No-package live smoke passed with debug binary only:
+  - Smoke root: `/tmp/codex-teams-upstream142-smoke.skTsM6`.
+  - `CODEX_HOME=/tmp/codex-teams-upstream142-smoke.skTsM6/home`.
+  - `CODEX_TEAM_STORE_ROOT=/tmp/codex-teams-upstream142-smoke.skTsM6/store`.
+  - `CODEX_TEAMMATE_COMMAND=/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`.
+  - PASS marker: `TEAMS_SMOKE_PASS team_id=019efb20-74c3-76d3-8c5b-48ad0ccab129 member_id=019efb20-8523-7263-847d-391d8817f665 member_to_lead_completed=true status_output_bytes=964`.
+- Initial smoke script exit code was a false negative caused by a broad bad-marker grep scanning plugin docs and proxy request schema strings (`login` / `api.openai.com`). Scoped postcheck over runtime outputs, proxy response dumps, session jsonl, and team store passed: positive marker present and scoped negative markers absent.
+- Post-smoke hygiene: smoke-owned lingering teammate process was cleaned; no current `codex teammate`, `responses-api-proxy`, or mock smoke process remains from that run.
+- Build-cache state at checkpoint: `codex-rs/target` is about `26G`; `/System/Volumes/Data` has about `55GiB` free; keep `target/debug/codex` until package/link decisions are explicit.
+- Compound memory recorded two new reusable pitfalls:
+  - Card `1067`: upstream 1.42 Codex TUI tests can require `RUSTY_V8_ARCHIVE` / `RUSTY_V8_SRC_BINDING_PATH` release artifact overrides instead of product source changes.
+  - Card `1068`: Teams smoke bad-marker grep must be scoped to runtime evidence and must not scan plugin clones or full proxy request schemas.
+- Remaining before user handoff or package/link:
+  - Resolve merge hygiene, including staged snapshot trailing whitespace or explicit snapshot acceptance.
+  - Stage the 9 unstaged compatibility fixes intentionally or split them before completing the upstream merge.
+  - Re-run `git diff --check` / focused hygiene after any whitespace decision.
+  - Do not claim full Teams migration complete until merge state is clean and the user performs final manual validation on a fresh lead.
+
+### 2026-06-25 03:58 CST
+
+- Rebuilt `codex-rs/target/debug/codex` after the upstream 1.42 compatibility edits so current source and debug binary are aligned.
+- Freshness proof after rebuild: no files under `codex-rs/cli/src`, `codex-rs/core/src`, `codex-rs/tui/src`, or `codex-rs/responses-api-proxy/src` were newer than `target/debug/codex`.
+- Focused validation passed on the rebuilt tree:
+  - `just test -p codex-core ...`: 9 Teams/subagent/config tests passed.
+  - `just test -p codex-cli ...`: 3 teammate CLI/root-runtime tests passed.
+  - `just test -p codex-tui ...`: 47 Teams TUI tests passed, using the `RUSTY_V8_ARCHIVE` / `RUSTY_V8_SRC_BINDING_PATH` overrides recorded above.
+- First post-rebuild smoke attempt failed before Teams execution because `teamssmoke` uses `env_key = "OPENAI_API_KEY"` and the lead process environment did not contain that variable. Keeping only `auth.json` was insufficient for this provider/env_key path.
+- Reran with both temp `auth.json` and `OPENAI_API_KEY=sk-teams-smoke` in the lead environment.
+- Post-rebuild no-package live smoke passed:
+  - Smoke root: `/tmp/codex-teams-post-rebuild-smoke.8yaAYa`.
+  - Debug binary: `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`.
+  - PASS marker: `TEAMS_SMOKE_PASS team_id=019efb36-9544-7a62-b3ac-6a61b75dfe6e member_id=019efb36-a15a-7433-b59a-70a9d34dbff0 member_to_lead_completed=true status_output_bytes=964`.
+  - Scoped bad-marker check passed over runtime outputs, proxy response dumps, session jsonl, and team store files.
+- Cleaned the smoke-owned lingering `codex teammate` child and temporary plugin clone git processes after the pass.
+- Current merge caveat remains: `.git/MERGE_HEAD` is still present; cached `git diff --check` reports trailing spaces in an upstream snapshot file that matches `upstream/main` exactly, while the current unstaged Teams/Trellis diff-check is clean.

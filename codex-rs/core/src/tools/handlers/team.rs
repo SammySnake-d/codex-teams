@@ -1241,9 +1241,6 @@ fn append_teammate_launch_mode_flags(
             AskForApproval::UnlessTrusted => {
                 append_teammate_config_string_override(flags, "approval_policy", "untrusted");
             }
-            AskForApproval::OnFailure => {
-                append_teammate_config_string_override(flags, "approval_policy", "on-failure");
-            }
             AskForApproval::OnRequest => {
                 append_teammate_config_string_override(flags, "approval_policy", "on-request");
             }
@@ -2908,7 +2905,6 @@ fn claude_plan_approval_permission_mode(turn: &TurnContext) -> String {
             match turn.approval_policy.value() {
                 AskForApproval::Never => "bypassPermissions",
                 AskForApproval::UnlessTrusted
-                | AskForApproval::OnFailure
                 | AskForApproval::OnRequest
                 | AskForApproval::Granular(_) => "default",
             }
@@ -4131,6 +4127,7 @@ fn json_output<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::step_context::StepContext;
     use crate::session::tests::make_session_and_context;
     use crate::tools::context::SharedTurnDiffTracker;
     use crate::tools::context::ToolCallSource;
@@ -4148,9 +4145,11 @@ mod tests {
         tool_name: &str,
         args: serde_json::Value,
     ) -> ToolInvocation {
+        let step_context = StepContext::for_test(Arc::clone(&turn));
         ToolInvocation {
             session,
             turn,
+            step_context,
             tracker: SharedTurnDiffTracker::default(),
             cancellation_token: CancellationToken::new(),
             call_id: "call-1".to_string(),

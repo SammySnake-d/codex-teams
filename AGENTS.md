@@ -105,6 +105,7 @@ Codex maintains a context (history of messages) that is sent to the model in inf
 Search for breaking changes in external integration surfaces:
 
 - app-server APIs
+- raw response item events (`rawResponseItem/*`), even while experimental
 - CLI parameters
 - configuration loading
 - resuming sessions from existing rollouts
@@ -219,10 +220,13 @@ Use `just bench-smoke` to dry-run the benchmark for a single iteration to ensure
   - Under Bazel, binaries and resources may live under runfiles; use `codex_utils_cargo_bin::cargo_bin` to resolve absolute paths that remain stable after `chdir`.
 - When locating fixture files or test resources under Bazel, avoid `env!("CARGO_MANIFEST_DIR")`. Prefer `codex_utils_cargo_bin::find_resource!` so paths resolve correctly under both Cargo and Bazel runfiles.
 
-### Integration tests (core)
+### Integration tests
+
+#### codex_core integration testing
 
 - Prefer the utilities in `core_test_support::responses` when writing end-to-end Codex tests.
-
+- Use `TestCodexBuilder::build_with_auto_env()` by default to ensure that new tests work with
+  foreign app/exec OSes. See $remote-tests for details.
 - All `mount_sse*` helpers return a `ResponseMock`; hold onto it so you can assert against outbound `/responses` POST bodies.
 - Use `ResponseMock::single_request()` when a test should only issue one POST, or `ResponseMock::requests()` to inspect every captured `ResponsesRequest`.
 - `ResponsesRequest` exposes helpers (`body_json`, `input`, `function_call_output`, `custom_tool_call_output`, `call_output`, `header`, `path`, `query_param`) so assertions can target structured payloads instead of manual JSON digging.
@@ -246,6 +250,14 @@ Use `just bench-smoke` to dry-run the benchmark for a single iteration to ensure
   // assert using request.function_call_output(call_id) or request.json_body() or other helpers.
   ```
 
+#### app-server integration testing
+
+- Tests should exercise app-server's public JSON-RPC API.
+- Use similar server mocking as for core integration tests.
+- Use `TestAppServer::new_with_auto_env()` and `TestAppServer::send_thread_start_request_with_auto_env()`
+  by default to ensure that new tests work with foreign app/exec OSes. See `$remote-tests` for
+  details.
+
 ## App-server API Development Best Practices
 
 These guidelines apply to app-server protocol work in `codex-rs`, especially:
@@ -261,6 +273,7 @@ These guidelines apply to app-server protocol work in `codex-rs`, especially:
   `*Params` for request payloads, `*Response` for responses, and `*Notification` for notifications.
 - Expose RPC methods as `<resource>/<method>` and keep `<resource>` singular (for example, `thread/read`, `app/list`).
 - Always expose fields as camelCase on the wire with `#[serde(rename_all = "camelCase")]` unless a tagged union or explicit compatibility requirement needs a targeted rename.
+- Always expose string enum values as camelCase on the wire with matching serde and TS `rename_all = "camelCase"` annotations unless an explicit compatibility requirement needs targeted renames.
 - Exception: config RPC payloads are expected to use snake_case to mirror config.toml keys (see the config read/write/list APIs in `app-server-protocol/src/protocol/v2.rs`).
 - Always set `#[ts(export_to = "v2/")]` on v2 request/response/notification types so generated TypeScript lands in the correct namespace.
 - Never use `#[serde(skip_serializing_if = "Option::is_none")]` for v2 API payload fields.
@@ -327,3 +340,6 @@ closest `pyproject.toml`'s `requires-python` field to see what minimum runtime v
 ## Platform Support
 
 Tests and features must support Linux, macOS and Windows unless feature is explicitly OS-specific.
+
+Codex supports running connected app-server and exec-server on different operating systems. See the
+`$remote-tests` skill for details about integration testing these configurations.

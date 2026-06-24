@@ -45,7 +45,6 @@ fn spawn_agent_tool_v2_supports_claude_style_teammate_branch_and_lists_visible_m
         ],
         agent_type_description: "role help".to_string(),
         hide_agent_type_model_reasoning: false,
-        include_usage_hint: true,
         usage_hint_text: None,
     });
 
@@ -160,7 +159,6 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         available_models: Vec::new(),
         agent_type_description: "role help".to_string(),
         hide_agent_type_model_reasoning: false,
-        include_usage_hint: true,
         usage_hint_text: None,
     });
 
@@ -236,7 +234,6 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         ],
         agent_type_description: "role help".to_string(),
         hide_agent_type_model_reasoning: false,
-        include_usage_hint: true,
         usage_hint_text: None,
     });
 
@@ -280,7 +277,6 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
         available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
         agent_type_description: "role help".to_string(),
         hide_agent_type_model_reasoning: true,
-        include_usage_hint: true,
         usage_hint_text: None,
     });
 

@@ -78,6 +78,11 @@ async fn handle_spawn_agent(
                 .to_string(),
         )
     })?;
+    let multi_agent_mode = crate::session::multi_agents::effective_multi_agent_mode(
+        turn.multi_agent_version,
+        &turn.session_source,
+        turn.multi_agent_mode,
+    );
     let role_name = agent_type
         .as_deref()
         .map(str::trim)
@@ -156,6 +161,7 @@ async fn handle_spawn_agent(
                 fork_mode,
                 parent_thread_id: Some(session.thread_id),
                 environments: Some(turn.environments.to_selections()),
+                initial_multi_agent_mode: multi_agent_mode,
             },
         ),
     )
