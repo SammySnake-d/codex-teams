@@ -603,3 +603,36 @@ The previous `/teams` entrypoint work made Teams discoverable and fixed one exec
   - Cleaned `target/debug/deps`, `target/debug/incremental`, `target/debug/build`, `target/debug/.fingerprint`, and `target/debug/gn_out` after verifying no active Cargo/Rust/nextest/just process existed.
   - Preserved `codex-rs/target/debug/codex`; `target` dropped from about `35G` to `1.6G`, and the debug binary still runs plus exposes teammate flags.
 - Current user-entrypoint caveat remains: `codex` on PATH is still `/opt/homebrew/bin/codex` (`codex-cli 0.142.0`). Do not package/link or replace it until explicitly approved after this debug-binary proof.
+
+### 2026-07-10 01:49 CST
+
+- Continued after checkpoint commit `9386ecd625` with upstream `24423f5712` already included by merge commit `98d5643ea`.
+- Current repository state before this record: clean Rust/product tree; `command -v codex` resolves to `/Users/snakesammy/.local/bin/codex`, a shell shim that execs `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`.
+- Current binary contract proof still holds without rebuilding:
+  - `codex --version` prints `codex-cli 0.0.0`.
+  - `codex teammate --help` exposes `Usage: codex teammate`, `--agent-id`, `--agent-name`, and `--team-name`.
+  - The Homebrew vendor binary at `/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex` is restored to a Mach-O executable.
+- A linked/user-entrypoint smoke attempted from this non-pane Codex execution environment failed for an expected readiness reason, not a Teams logic regression:
+  - Evidence root: `/tmp/codex-teams-linked-24423-smoke.YaXCiK`.
+  - `create_team` succeeded and wrote `/tmp/codex-teams-linked-24423-smoke.YaXCiK/store/teams/local_tmux_teams_smoke/config.json`.
+  - `team_spawn_member` then failed with `team_spawn_member requires a tmux or iTerm2 pane backend so the teammate runs as a Codex Teams process. Start Codex inside a supported pane backend, then retry the Teams request.`
+  - Current controller shell has no `TMUX`, no `ITERM_SESSION_ID`, and no `TERM_PROGRAM`, so it cannot prove process-backed split-pane spawn from here.
+- Do not treat this linked smoke failure as an auth/config/tool-schema regression. The next linked live proof must run from a real tmux or iTerm pane-capable lead, or be handed to the user as a fresh-lead manual visual validation boundary.
+- `codex-rs/target` is about `2.1G`; preserve `codex-rs/target/debug/codex` because `/Users/snakesammy/.local/bin/codex` depends on it.
+
+### 2026-07-10 01:54 CST
+
+- Reran the linked/user-entrypoint smoke from a temporary tmux session so `team_spawn_member` had a real pane backend.
+- Smoke used the current PATH command, not the raw debug path:
+  - `CODEX_CMD=/Users/snakesammy/.local/bin/codex`.
+  - The shim still execs `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`.
+  - `CODEX_TEAMMATE_COMMAND` was pinned to the same `codex` command.
+- Linked tmux smoke passed:
+  - Evidence root: `/tmp/codex-teams-linked-tmux-24423-smoke.EEfqMN`.
+  - `EXEC_STATUS=0`.
+  - PASS marker: `TEAMS_SMOKE_PASS team_id=019f4802-f2f2-7022-94b3-c29556a4cc2c member_id=019f4802-f321-7e53-a0e1-9d15ecd277f1 member_to_lead_completed=true status_output_bytes=964`.
+  - Scoped runtime-only bad-marker check reported `TEAMS_SCOPED_BAD_MARKERS_ABSENT`.
+  - Team store shows `mock-member` with `backend=tmux`, `tmuxPaneId=%1`, and prompt `Send one acknowledgement to the team lead with team_send, then stop.`
+- Post-smoke cleanup: the temporary tmux session, mock proxy, and smoke-owned teammate process were gone; `codex-rs/target` remained about `2.1G` and `target/debug/codex` was preserved.
+- Feature gate smoke passed through the same PATH command: `codex --enable teams features list` reports `teams ... true`, and `codex --disable teams features list` reports `teams ... false`.
+- Current remaining boundary: user visual/manual validation on a fresh lead is now the remaining acceptance step before saying the migration is user-accepted. Do not replace the official Homebrew vendor binary; current testing uses the PATH shim only.

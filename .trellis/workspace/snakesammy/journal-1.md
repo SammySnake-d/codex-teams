@@ -741,3 +741,28 @@ Event: post-rebuild focused tests and no-package live smoke
   - sentinel `TEAMS_SMOKE_PASS team_id=019efb36-9544-7a62-b3ac-6a61b75dfe6e member_id=019efb36-a15a-7433-b59a-70a9d34dbff0 member_to_lead_completed=true status_output_bytes=964`.
 - Scoped negative check passed; broad grep over plugin/request schema remains forbidden for this smoke class.
 - Cleaned the smoke-owned lingering teammate and temporary plugin clone git processes. No package/link or official command replacement was performed.
+
+## 2026-07-10 01:49 CST
+
+Event: linked user-entrypoint smoke readiness checkpoint
+
+- Continued `06-09-claude-teams-fidelity-gaps` after checkpoint commit `9386ecd625`.
+- Verified current user PATH entry is not the official Homebrew CLI: `/Users/snakesammy/.local/bin/codex` is a shim to `/Users/snakesammy/Desktop/project/codex-teams/codex-rs/target/debug/codex`.
+- Verified the shimmed command prints `codex-cli 0.0.0`, and `codex teammate --help` exposes `Usage: codex teammate` plus `--agent-id`, `--agent-name`, and `--team-name`.
+- Verified the Homebrew vendor binary was restored to Mach-O.
+- Recorded linked smoke evidence root `/tmp/codex-teams-linked-24423-smoke.YaXCiK`.
+- Diagnosis: linked smoke failed after successful `create_team`; `team_spawn_member` failed because the current controller process is not inside a tmux/iTerm pane backend. Current shell has empty `TMUX`, `ITERM_SESSION_ID`, and `TERM_PROGRAM`.
+- This is expected fail-closed readiness behavior, not a Teams auth/config/schema regression. The next live proof must run from a pane-capable lead, or be treated as user manual visual validation.
+- Preserve `codex-rs/target/debug/codex`; current target size is about `2.1G`.
+
+## 2026-07-10 01:54 CST
+
+Event: linked user-entrypoint tmux smoke passed
+
+- Followed the no-pane failure with a real tmux-backed linked smoke using the current PATH `codex` shim.
+- Evidence root: `/tmp/codex-teams-linked-tmux-24423-smoke.EEfqMN`.
+- The tmux driver launched `CODEX_CMD=/Users/snakesammy/.local/bin/codex`; `CODEX_TEAMMATE_COMMAND` pointed to the same command.
+- Smoke exited `EXEC_STATUS=0` and printed `TEAMS_SMOKE_PASS team_id=019f4802-f2f2-7022-94b3-c29556a4cc2c member_id=019f4802-f321-7e53-a0e1-9d15ecd277f1 member_to_lead_completed=true status_output_bytes=964`.
+- Scoped runtime-only negative check passed: no legacy visible Teams context, independent teammate prompt, official OpenAI URL, App bundle path, `target/debug/deps`, unrecognized `--agent-id`, or failure sentinel appeared in runtime result evidence.
+- Team store showed the spawned teammate as `backend=tmux`, `tmuxPaneId=%1`, with plain first-task prompt text.
+- Smoke-owned tmux/proxy/teammate processes were cleaned; `codex-rs/target/debug/codex` was preserved.
