@@ -9,7 +9,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
-use codex_protocol::protocol::USER_MESSAGE_BEGIN;
+use codex_protocol::protocol::strip_user_message_prefix;
 use regex::Regex;
 use regex::RegexBuilder;
 use tokio::process::Command;
@@ -285,7 +285,8 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::Compacted(_) => None,
+        | RolloutItem::Compacted(_)
+        | RolloutItem::WorldState(_) => None,
     }
 }
 
@@ -293,13 +294,6 @@ fn content_item_text(item: &ContentItem) -> Option<&str> {
     match item {
         ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text.as_str()),
         ContentItem::InputImage { .. } => None,
-    }
-}
-
-fn strip_user_message_prefix(text: &str) -> &str {
-    match text.find(USER_MESSAGE_BEGIN) {
-        Some(idx) => text[idx + USER_MESSAGE_BEGIN.len()..].trim(),
-        None => text.trim(),
     }
 }
 

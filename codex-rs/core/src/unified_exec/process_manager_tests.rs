@@ -42,12 +42,20 @@ fn env_overlay_for_exec_server_keeps_runtime_changes_only() {
         ("HOME".to_string(), "/client-home".to_string()),
         ("PATH".to_string(), "/client-path".to_string()),
         ("SHELL_SET".to_string(), "policy".to_string()),
+        (
+            CODEX_PERMISSION_PROFILE_ENV_VAR.to_string(),
+            "current-profile".to_string(),
+        ),
     ]);
     let request_env = HashMap::from([
         ("HOME".to_string(), "/client-home".to_string()),
         ("PATH".to_string(), "/sandbox-path".to_string()),
         ("SHELL_SET".to_string(), "policy".to_string()),
         ("CODEX_THREAD_ID".to_string(), "thread-1".to_string()),
+        (
+            CODEX_PERMISSION_PROFILE_ENV_VAR.to_string(),
+            "current-profile".to_string(),
+        ),
         (
             "CODEX_SANDBOX_NETWORK_DISABLED".to_string(),
             "1".to_string(),
@@ -60,10 +68,39 @@ fn env_overlay_for_exec_server_keeps_runtime_changes_only() {
             ("PATH".to_string(), "/sandbox-path".to_string()),
             ("CODEX_THREAD_ID".to_string(), "thread-1".to_string()),
             (
+                CODEX_PERMISSION_PROFILE_ENV_VAR.to_string(),
+                "current-profile".to_string(),
+            ),
+            (
                 "CODEX_SANDBOX_NETWORK_DISABLED".to_string(),
                 "1".to_string()
             ),
         ])
+    );
+}
+
+#[test]
+fn exec_env_policy_excludes_runtime_permission_profile() {
+    let policy = ShellEnvironmentPolicy {
+        r#set: HashMap::from([
+            (
+                "codex_permission_profile".to_string(),
+                "stale-profile".to_string(),
+            ),
+            ("KEEP".to_string(), "value".to_string()),
+        ]),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        exec_env_policy_from_shell_policy(&policy),
+        codex_exec_server::ExecEnvPolicy {
+            inherit: policy.inherit,
+            ignore_default_excludes: policy.ignore_default_excludes,
+            exclude: vec![CODEX_PERMISSION_PROFILE_ENV_VAR.to_string()],
+            r#set: HashMap::from([("KEEP".to_string(), "value".to_string())]),
+            include_only: Vec::new(),
+        }
     );
 }
 
@@ -198,6 +235,93 @@ fn initial_exec_yield_time_has_no_platform_floor() {
 }
 
 #[tokio::test]
+async fn output_collection_stays_bounded_across_repeated_drains() {
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let output_notify = Arc::new(Notify::new());
+    let output_closed = Arc::new(AtomicBool::new(false));
+    let output_closed_notify = Arc::new(Notify::new());
+    let cancellation_token = CancellationToken::new();
+
+    let collect = UnifiedExecProcessManager::collect_output_until_deadline(
+        &output_buffer,
+        &output_notify,
+        &output_closed,
+        &output_closed_notify,
+        &cancellation_token,
+        /*pause_state*/ None,
+        Instant::now() + Duration::from_secs(5),
+    );
+    let produce = async {
+        for byte in [b'a', b'b', b'c'] {
+            output_buffer.lock().await.push_chunk(
+                vec![byte; crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES],
+            );
+            output_notify.notify_one();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if output_buffer.lock().await.retained_bytes() == 0 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("collector should drain each chunk");
+        }
+
+        output_closed.store(true, Ordering::Release);
+        cancellation_token.cancel();
+        output_closed_notify.notify_waiters();
+        output_notify.notify_waiters();
+    };
+
+    let (collected, ()) = tokio::join!(collect, produce);
+    let mut expected = HeadTailBuffer::default();
+    for byte in [b'a', b'b', b'c'] {
+        expected.push_chunk(vec![
+            byte;
+            crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES
+        ]);
+    }
+    assert_eq!(collected, expected);
+}
+
+#[tokio::test]
+async fn output_collection_preserves_omissions_from_drained_buffer() {
+    let mut buffered_output = HeadTailBuffer::default();
+    buffered_output.push_chunk(vec![
+        b'a';
+        crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES
+    ]);
+    buffered_output.push_chunk(b"overflow".to_vec());
+    let mut expected = HeadTailBuffer::default();
+    expected.push_chunk(vec![
+        b'a';
+        crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES
+    ]);
+    expected.push_chunk(b"overflow".to_vec());
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(buffered_output));
+    let output_notify = Arc::new(Notify::new());
+    let output_closed = Arc::new(AtomicBool::new(true));
+    let output_closed_notify = Arc::new(Notify::new());
+    let cancellation_token = CancellationToken::new();
+    cancellation_token.cancel();
+
+    let collected = UnifiedExecProcessManager::collect_output_until_deadline(
+        &output_buffer,
+        &output_notify,
+        &output_closed,
+        &output_closed_notify,
+        &cancellation_token,
+        /*pause_state*/ None,
+        Instant::now() + Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(collected, expected);
+}
+
+#[tokio::test]
 async fn network_denial_fallback_message_names_sandbox_network_proxy() {
     let message = network_denial_message_for_session(/*session*/ None, /*deferred*/ None).await;
 
@@ -278,21 +402,24 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
 
     let event = tokio::time::timeout(Duration::from_secs(1), rx_event.recv())
         .await
-        .expect("timed out waiting for failed exec end event")
+        .expect("timed out waiting for failed command execution item")
         .expect("event channel closed");
-    let codex_protocol::protocol::EventMsg::ExecCommandEnd(end_event) = event.msg else {
-        panic!("expected ExecCommandEnd event");
+    let codex_protocol::protocol::EventMsg::ItemCompleted(completed_event) = event.msg else {
+        panic!("expected ItemCompleted event");
     };
-    assert_eq!(end_event.call_id, "call-unified-denied");
+    let codex_protocol::items::TurnItem::CommandExecution(item) = completed_event.item else {
+        panic!("expected CommandExecution item");
+    };
+    assert_eq!(item.id, "call-unified-denied");
     assert_eq!(
-        end_event.status,
-        codex_protocol::protocol::ExecCommandStatus::Failed
+        item.status,
+        codex_protocol::items::CommandExecutionStatus::Failed
     );
-    assert_eq!(end_event.exit_code, -1);
-    assert_eq!(end_event.process_id.as_deref(), Some("123"));
+    assert_eq!(item.exit_code, Some(-1));
+    assert_eq!(item.process_id.as_deref(), Some("123"));
     assert_eq!(
-        end_event.aggregated_output,
-        "PRE_DENIAL_MARKER\nNetwork access denied"
+        item.aggregated_output.as_deref(),
+        Some("PRE_DENIAL_MARKER\nNetwork access denied")
     );
 }
 

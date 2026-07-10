@@ -7,6 +7,12 @@
 use super::*;
 use crate::session_resume::read_session_model;
 
+#[derive(Clone, Copy)]
+pub(super) enum ThreadRollbackOrigin {
+    Backtrack,
+    SafetyBufferingRetry,
+}
+
 impl App {
     pub(super) async fn shutdown_current_thread(&mut self, app_server: &mut AppServerSession) {
         if let Some(thread_id) = self.chat_widget.thread_id() {
@@ -663,7 +669,7 @@ impl App {
                             .as_ref()
                             .map(|profile| &profile.permission_profile),
                     );
-                    app_server
+                    let response = app_server
                         .turn_start(
                             thread_id,
                             items.to_vec(),
@@ -682,6 +688,12 @@ impl App {
                             *user_input_source,
                         )
                         .await?;
+                    if self.active_thread_id == Some(thread_id)
+                        && self.chat_widget.thread_id() == Some(thread_id)
+                    {
+                        self.chat_widget
+                            .record_safety_buffering_turn(response.turn.id, op);
+                    }
                 }
                 Ok(true)
             }
@@ -1417,6 +1429,22 @@ impl App {
         num_turns: u32,
         response: &ThreadRollbackResponse,
     ) {
+        self.handle_thread_rollback_response_with_origin(
+            thread_id,
+            num_turns,
+            response,
+            ThreadRollbackOrigin::Backtrack,
+        )
+        .await;
+    }
+
+    pub(super) async fn handle_thread_rollback_response_with_origin(
+        &mut self,
+        thread_id: ThreadId,
+        num_turns: u32,
+        response: &ThreadRollbackResponse,
+        origin: ThreadRollbackOrigin,
+    ) {
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
             let mut store = channel.store.lock().await;
             store.apply_thread_rollback(response);
@@ -1442,7 +1470,12 @@ impl App {
                 self.clear_active_thread().await;
             }
         }
-        self.handle_backtrack_rollback_succeeded(num_turns);
+        match origin {
+            ThreadRollbackOrigin::Backtrack => self.handle_backtrack_rollback_succeeded(num_turns),
+            ThreadRollbackOrigin::SafetyBufferingRetry => {
+                self.apply_non_pending_thread_rollback(num_turns);
+            }
+        }
     }
 
     pub(super) fn handle_thread_event_now(&mut self, event: ThreadBufferedEvent) {

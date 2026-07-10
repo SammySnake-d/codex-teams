@@ -27,7 +27,7 @@ fn model_with_shell_type(shell_type: ConfigShellToolType) -> ModelInfo {
         upgrade: None,
         base_instructions: String::new(),
         model_messages: None,
-        supports_reasoning_summaries: false,
+        include_skills_usage_instructions: false,
         default_reasoning_summary: Default::default(),
         support_verbosity: false,
         default_verbosity: None,

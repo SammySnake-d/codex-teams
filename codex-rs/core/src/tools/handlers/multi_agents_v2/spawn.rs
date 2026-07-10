@@ -4,13 +4,14 @@ use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
+use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
+use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
 use crate::tools::handlers::team;
-use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
-use codex_protocol::protocol::Op;
 use codex_tools::ToolSpec;
 use std::sync::Arc;
 
@@ -53,7 +54,7 @@ async fn handle_spawn_agent(
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let _activity_description = args.description.as_deref();
     let agent_type = args.agent_type()?;
-    let message = args.message()?;
+    let message = message_content(args.message()?)?;
     if args.task_name.is_none()
         && let Some(output) = team::maybe_spawn_member_from_agent_tool(
             Arc::clone(&session),
@@ -78,17 +79,10 @@ async fn handle_spawn_agent(
                 .to_string(),
         )
     })?;
-    let multi_agent_mode = crate::session::multi_agents::effective_multi_agent_mode(
-        turn.multi_agent_version,
-        &turn.session_source,
-        turn.multi_agent_mode,
-    );
     let role_name = agent_type
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
-
-    let initial_operation = parse_collab_input(Some(message.clone()), /*items*/ None)?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
     let mut config =
@@ -136,34 +130,28 @@ async fn handle_spawn_agent(
             "spawned agent is missing a canonical task name".to_string(),
         )
     })?;
+    let author = turn
+        .session_source
+        .get_agent_path()
+        .unwrap_or_else(AgentPath::root);
+    let communication = communication_from_tool_message(author, new_agent_path.clone(), message);
+    let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
     let spawned_agent = Box::pin(
-        session.services.agent_control.spawn_agent_with_metadata(
-            config,
-            match initial_operation {
-                Op::UserInput { items, .. }
-                    if items
-                        .iter()
-                        .all(|item| matches!(item, UserInput::Text { .. })) =>
-                {
-                    let author = turn
-                        .session_source
-                        .get_agent_path()
-                        .unwrap_or_else(AgentPath::root);
-                    let communication =
-                        communication_from_tool_message(author, new_agent_path.clone(), message);
-                    Op::InterAgentCommunication { communication }
-                }
-                initial_operation => initial_operation,
-            },
-            Some(spawn_source),
-            SpawnAgentOptions {
-                fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
-                fork_mode,
-                parent_thread_id: Some(session.thread_id),
-                environments: Some(turn.environments.to_selections()),
-                initial_multi_agent_mode: multi_agent_mode,
-            },
-        ),
+        session
+            .services
+            .agent_control
+            .spawn_agent_with_communication(
+                config,
+                communication,
+                context,
+                Some(spawn_source),
+                SpawnAgentOptions {
+                    fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
+                    fork_mode,
+                    parent_thread_id: Some(session.thread_id),
+                    environments: Some(turn.environments.to_selections()),
+                },
+            ),
     )
     .await
     .map_err(collab_spawn_error)?;
@@ -177,19 +165,17 @@ async fn handle_spawn_agent(
         .as_ref()
         .and_then(|snapshot| snapshot.session_source.get_nickname())
         .or(spawned_agent.metadata.agent_nickname);
-    session
-        .send_event(
-            &turn,
-            SubAgentActivityEvent {
-                event_id: call_id,
-                occurred_at_ms: now_unix_timestamp_ms(),
-                agent_thread_id: new_thread_id,
-                agent_path: new_agent_path.clone(),
-                kind: SubAgentActivityKind::Started,
-            }
-            .into(),
-        )
-        .await;
+    emit_sub_agent_activity(
+        &session,
+        &turn,
+        SubAgentActivityItem {
+            id: call_id,
+            agent_thread_id: new_thread_id,
+            agent_path: new_agent_path.clone(),
+            kind: SubAgentActivityKind::Started,
+        },
+    )
+    .await;
     let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",
@@ -199,16 +185,15 @@ async fn handle_spawn_agent(
     let task_name = String::from(new_agent_path);
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
-    if hide_agent_metadata {
-        Ok(boxed_tool_output(SpawnAgentResult::HiddenMetadata {
-            task_name,
-        }))
+    let result = if hide_agent_metadata {
+        SpawnAgentResult::HiddenMetadata { task_name }
     } else {
-        Ok(boxed_tool_output(SpawnAgentResult::WithNickname {
+        SpawnAgentResult::WithNickname {
             task_name,
             nickname,
-        }))
-    }
+        }
+    };
+    Ok(boxed_tool_output(result))
 }
 
 impl CoreToolRuntime for Handler {

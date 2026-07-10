@@ -1,6 +1,5 @@
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::DEFAULT_CLIENT_NAME;
 use app_test_support::TestAppServer;
 use app_test_support::create_apply_patch_sse_response;
 use app_test_support::create_exec_command_sse_response;
@@ -81,6 +80,8 @@ use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_remote;
+use core_test_support::skip_if_wine_exec;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -133,7 +134,10 @@ async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>>
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -230,7 +234,10 @@ async fn turn_start_with_empty_input_runs_model_request() -> Result<()> {
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -332,7 +339,10 @@ async fn turn_start_additional_context_flows_to_model_input() -> Result<()> {
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -409,7 +419,10 @@ async fn turn_start_sends_originator_header() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.initialize_with_client_info(ClientInfo {
@@ -486,7 +499,10 @@ async fn turn_start_emits_user_message_item_with_text_elements() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -602,18 +618,18 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
     write_test_skill(codex_home.path(), "beta-skill")?;
 
     let isolated_home = codex_home.path().to_string_lossy();
-    let mut mcp = TestAppServer::new_with_env(
-        codex_home.path(),
-        &[
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[
             ("HOME", Some(isolated_home.as_ref())),
             ("USERPROFILE", Some(isolated_home.as_ref())),
-        ],
-    )
-    .await?;
+        ])
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams::default())
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
         .await?;
     let thread_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -719,7 +735,10 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
         .expect("bundled model catalog should include a picker model with service tiers");
     let service_tier_id = service_tier_model.service_tiers[0].id.clone();
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -783,7 +802,10 @@ async fn thread_start_omits_empty_instruction_overrides_from_model_request() -> 
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -857,7 +879,7 @@ async fn thread_start_omits_empty_instruction_overrides_from_model_request() -> 
 }
 
 #[tokio::test]
-async fn turn_start_tracks_turn_event_analytics() -> Result<()> {
+async fn turn_start_tracks_thread_originator_in_analytics() -> Result<()> {
     let server = responses::start_mock_server().await;
     let response_mock = responses::mount_response_sequence(
         &server,
@@ -885,13 +907,18 @@ async fn turn_start_tracks_turn_event_analytics() -> Result<()> {
     std::fs::write(config_path, config)?;
     mount_analytics_capture(&server, codex_home.path()).await?;
 
-    let mut mcp = TestAppServer::new_without_managed_config(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             thread_source: Some(ThreadSource::User),
+            service_name: Some("codex_work_desktop".to_string()),
             ..Default::default()
         })
         .await?;
@@ -936,7 +963,7 @@ async fn turn_start_tracks_turn_event_analytics() -> Result<()> {
     assert_eq!(event["event_params"]["turn_id"], turn.id);
     assert_eq!(
         event["event_params"]["app_server_client"]["product_client_id"],
-        DEFAULT_CLIENT_NAME
+        "codex_work_desktop"
     );
     assert_eq!(event["event_params"]["model"], "mock-model");
     assert_eq!(event["event_params"]["model_provider"], "mock_provider");
@@ -1009,11 +1036,15 @@ async fn turn_profile_tracks_blocking_tool_and_follow_up_sampling() -> Result<()
     )?;
     mount_analytics_capture(&server, codex_home.path()).await?;
 
-    let mut mcp = TestAppServer::new_without_managed_config(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -1110,7 +1141,10 @@ async fn turn_start_accepts_text_at_limit_with_mention_item() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -1170,7 +1204,10 @@ async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -1250,7 +1287,10 @@ async fn turn_start_rejects_invalid_permission_selection_before_starting_turn() 
         "sandbox_mode = \"read-only\"\n",
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -1322,11 +1362,14 @@ async fn turn_start_rejects_unknown_environment_before_starting_turn() -> Result
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -1397,7 +1440,10 @@ async fn turn_start_emits_notifications_and_accepts_model_override() -> Result<(
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     // Start a thread (v2) and capture its id.
@@ -1542,12 +1588,15 @@ async fn turn_start_accepts_collaboration_mode_override_v2() -> Result<()> {
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.3-codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
             ..Default::default()
         })
         .await?;
@@ -1628,12 +1677,15 @@ async fn turn_start_uses_thread_feature_overrides_for_request_user_input_tool_de
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.3-codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
             config: Some(HashMap::from([(
                 "features.default_mode_request_user_input".to_string(),
                 json!(true),
@@ -1713,7 +1765,10 @@ async fn turn_start_accepts_personality_override_v2() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -1771,7 +1826,7 @@ async fn turn_start_accepts_personality_override_v2() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_accepts_multi_agent_mode_v2() -> Result<()> {
+async fn turn_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -1790,7 +1845,10 @@ async fn turn_start_accepts_multi_agent_mode_v2() -> Result<()> {
         &BTreeMap::from([(Feature::MultiAgentV2, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -1834,18 +1892,21 @@ async fn turn_start_accepts_multi_agent_mode_v2() -> Result<()> {
         .single_request()
         .message_input_texts("developer");
     assert!(developer_texts.iter().any(|text| {
-        text.contains("<multi_agent_mode>")
-            && text.contains("Proactive multi-agent delegation is active.")
+        text.contains(
+            "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents",
+        )
     }));
-    assert!(!developer_texts.iter().any(|text| {
-        text.contains("Do not spawn sub-agents unless the user explicitly asks for sub-agents")
-    }));
+    assert!(
+        !developer_texts
+            .iter()
+            .any(|text| text.contains("Proactive multi-agent delegation is active."))
+    );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn thread_start_multi_agent_mode_initializes_first_turn() -> Result<()> {
+async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -1864,7 +1925,10 @@ async fn thread_start_multi_agent_mode_initializes_first_turn() -> Result<()> {
         &BTreeMap::from([(Feature::MultiAgentV2, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -1884,7 +1948,7 @@ async fn thread_start_multi_agent_mode_initializes_first_turn() -> Result<()> {
         multi_agent_mode,
         ..
     } = to_response::<ThreadStartResponse>(thread_resp)?;
-    assert_eq!(multi_agent_mode, MultiAgentMode::Proactive);
+    assert_eq!(multi_agent_mode, MultiAgentMode::ExplicitRequestOnly);
 
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
@@ -1912,67 +1976,17 @@ async fn thread_start_multi_agent_mode_initializes_first_turn() -> Result<()> {
     let developer_texts = response_mock
         .single_request()
         .message_input_texts("developer");
+    assert!(developer_texts.iter().any(|text| {
+        text.contains(MULTI_AGENT_MODE_OPEN_TAG)
+            && text.contains(
+                "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents",
+            )
+    }));
     assert!(
-        developer_texts.iter().any(|text| {
-            text.contains(MULTI_AGENT_MODE_OPEN_TAG)
-                && text.contains("Proactive multi-agent delegation is active.")
-        }),
-        "expected proactive multi-agent mode instructions in developer input, got {developer_texts:?}"
+        !developer_texts
+            .iter()
+            .any(|text| text.contains("Proactive multi-agent delegation is active."))
     );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn thread_start_reports_multi_agent_mode() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let cases = [
-        (
-            BTreeMap::from([(Feature::MultiAgentV2, true)]),
-            Some(MultiAgentMode::Proactive),
-            MultiAgentMode::Proactive,
-        ),
-        (
-            BTreeMap::from([(Feature::MultiAgentV2, true)]),
-            Some(MultiAgentMode::None),
-            MultiAgentMode::None,
-        ),
-        (
-            BTreeMap::new(),
-            Some(MultiAgentMode::Proactive),
-            MultiAgentMode::Proactive,
-        ),
-        (
-            BTreeMap::from([(Feature::MultiAgentV2, true)]),
-            None,
-            MultiAgentMode::ExplicitRequestOnly,
-        ),
-    ];
-
-    for (features, requested_multi_agent_mode, expected_multi_agent_mode) in cases {
-        let server = responses::start_mock_server().await;
-        let codex_home = TempDir::new()?;
-        create_config_toml(codex_home.path(), &server.uri(), "never", &features)?;
-
-        let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
-        timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-        let thread_req = mcp
-            .send_thread_start_request_with_auto_env(ThreadStartParams {
-                model: Some("mock-model".to_string()),
-                multi_agent_mode: requested_multi_agent_mode,
-                ..Default::default()
-            })
-            .await?;
-        let thread_resp: JSONRPCResponse = timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
-        )
-        .await??;
-        let response = to_response::<ThreadStartResponse>(thread_resp)?;
-
-        assert_eq!(response.multi_agent_mode, expected_multi_agent_mode);
-    }
 
     Ok(())
 }
@@ -2002,7 +2016,10 @@ async fn turn_start_change_personality_mid_thread_v2() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -2118,7 +2135,10 @@ async fn turn_start_uses_migrated_pragmatic_personality_without_override_v2() ->
         /*git_info*/ None,
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let persisted_toml: ConfigToml = toml::from_str(&std::fs::read_to_string(
@@ -2135,7 +2155,7 @@ async fn turn_start_uses_migrated_pragmatic_personality_without_override_v2() ->
 
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.3-codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
             ..Default::default()
         })
         .await?;
@@ -2209,6 +2229,11 @@ async fn turn_start_forwards_custom_local_image_detail() -> Result<()> {
 
 #[tokio::test]
 async fn turn_start_exec_approval_toggle_v2() -> Result<()> {
+    // TODO(anp): Remove after shell-command approval routing supports target-native Windows cwd.
+    skip_if_wine_exec!(
+        Ok(()),
+        "shell-command approval routing requires a host-native cwd under Wine-exec"
+    );
     skip_if_no_network!(Ok(()));
 
     let tmp = TempDir::new()?;
@@ -2249,12 +2274,16 @@ async fn turn_start_exec_approval_toggle_v2() -> Result<()> {
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.as_path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.as_path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let expected_environment_id = mcp.auto_env_params()?.environment_id;
 
     // thread/start
     let start_id = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -2295,7 +2324,10 @@ async fn turn_start_exec_approval_toggle_v2() -> Result<()> {
         panic!("expected CommandExecutionRequestApproval request");
     };
     assert_eq!(params.item_id, "call1");
-    assert_eq!(params.environment_id.as_deref(), Some("local"));
+    assert_eq!(
+        params.environment_id.as_deref(),
+        Some(expected_environment_id.as_str())
+    );
     let resolved_request_id = request_id.clone();
 
     // Approve and wait for task completion
@@ -2367,12 +2399,15 @@ async fn turn_start_exec_approval_toggle_v2() -> Result<()> {
 
 #[tokio::test]
 async fn turn_start_exec_approval_decline_v2() -> Result<()> {
+    // TODO(anp): Remove after command approval routing accepts target-native Windows cwd.
+    skip_if_wine_exec!(
+        Ok(()),
+        "command approval routing rejects the selected Windows cwd on the Linux host"
+    );
     skip_if_no_network!(Ok(()));
 
     let tmp = TempDir::new()?;
     let codex_home = tmp.path().to_path_buf();
-    let workspace = tmp.path().join("workspace");
-    std::fs::create_dir(&workspace)?;
 
     let responses = vec![
         create_shell_command_sse_response(
@@ -2395,11 +2430,14 @@ async fn turn_start_exec_approval_decline_v2() -> Result<()> {
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.as_path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.as_path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let start_id = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -2419,7 +2457,6 @@ async fn turn_start_exec_approval_decline_v2() -> Result<()> {
                 text: "run python".to_string(),
                 text_elements: Vec::new(),
             }],
-            cwd: Some(workspace.clone()),
             ..Default::default()
         })
         .await?;
@@ -2512,6 +2549,8 @@ async fn turn_start_exec_approval_decline_v2() -> Result<()> {
 
 #[tokio::test]
 async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
+    // TODO(anp): Materialize cwd and shell-display fixtures in the selected remote environment.
+    skip_if_remote!(Ok(()), "cwd fixtures are only materialized on the host");
     skip_if_no_network!(Ok(()));
 
     let tmp = TempDir::new()?;
@@ -2548,12 +2587,15 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     // thread/start
     let start_id = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -2742,11 +2784,14 @@ stream_max_retries = 0
         ),
     )?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let start_id = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -2853,7 +2898,13 @@ url = "ws://127.0.0.1:1"
 "#,
     )?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        // This test owns environments.toml and explicitly compares local selections
+        // with a configured remote environment, so auto env would change its subject.
+        .without_auto_env()
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     for case in [
@@ -2983,6 +3034,11 @@ fn environment_params(ids: Option<&[&str]>, cwd: &Path) -> Option<Vec<TurnEnviro
 
 #[tokio::test]
 async fn turn_start_file_change_approval_v2() -> Result<()> {
+    // TODO(anp): Materialize apply-patch workspaces in the selected remote environment.
+    skip_if_remote!(
+        Ok(()),
+        "apply-patch workspace fixture is only materialized on the host"
+    );
     skip_if_no_network!(Ok(()));
 
     let tmp = TempDir::new()?;
@@ -3008,11 +3064,14 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let start_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             cwd: Some(workspace.to_string_lossy().into_owned()),
             ..Default::default()
@@ -3152,6 +3211,11 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
 
 #[tokio::test]
 async fn turn_start_does_not_stream_apply_patch_change_updates_without_feature_v2() -> Result<()> {
+    // TODO(anp): Materialize apply-patch workspaces in the selected remote environment.
+    skip_if_remote!(
+        Ok(()),
+        "apply-patch workspace fixture is only materialized on the host"
+    );
     skip_if_no_network!(Ok(()));
 
     let tmp = TempDir::new()?;
@@ -3199,11 +3263,14 @@ async fn turn_start_does_not_stream_apply_patch_change_updates_without_feature_v
     let server = create_mock_responses_server_sequence(responses).await;
     create_config_toml(&codex_home, &server.uri(), "never", &BTreeMap::default())?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let start_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             cwd: Some(workspace.to_string_lossy().into_owned()),
             ..Default::default()
@@ -3250,6 +3317,11 @@ async fn turn_start_does_not_stream_apply_patch_change_updates_without_feature_v
 
 #[tokio::test]
 async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
+    // TODO(anp): Materialize apply-patch workspaces in the selected remote environment.
+    skip_if_remote!(
+        Ok(()),
+        "apply-patch workspace fixture is only materialized on the host"
+    );
     skip_if_no_network!(Ok(()));
 
     let tmp = TempDir::new()?;
@@ -3337,11 +3409,14 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
     model["apply_patch_tool_type"] = serde_json::Value::from("freeform");
     std::fs::write(&cache_path, serde_json::to_string_pretty(&cache)?)?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let start_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             cwd: Some(workspace.to_string_lossy().into_owned()),
             ..Default::default()
@@ -3469,12 +3544,15 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         &BTreeMap::from([(Feature::Collab, true)]),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.3-codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
             ..Default::default()
         })
         .await?;
@@ -3687,12 +3765,15 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
     )?;
     write_models_cache(codex_home.path())?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.3-codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
             ..Default::default()
         })
         .await?;
@@ -3865,12 +3946,15 @@ config_file = "./custom-role.toml"
         ),
     )?;
 
-    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.3-codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
             ..Default::default()
         })
         .await?;
@@ -3974,6 +4058,11 @@ config_file = "./custom-role.toml"
 
 #[tokio::test]
 async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Result<()> {
+    // TODO(anp): Materialize apply-patch workspaces in the selected remote environment.
+    skip_if_remote!(
+        Ok(()),
+        "apply-patch workspace fixture is only materialized on the host"
+    );
     skip_if_no_network!(Ok(()));
 
     let tmp = TempDir::new()?;
@@ -4009,11 +4098,14 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let start_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             cwd: Some(workspace.to_string_lossy().into_owned()),
             ..Default::default()
@@ -4157,6 +4249,11 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
 
 #[tokio::test]
 async fn turn_start_file_change_approval_decline_v2() -> Result<()> {
+    // TODO(anp): Materialize apply-patch workspaces in the selected remote environment.
+    skip_if_remote!(
+        Ok(()),
+        "apply-patch workspace fixture is only materialized on the host"
+    );
     skip_if_no_network!(Ok(()));
 
     let tmp = TempDir::new()?;
@@ -4182,11 +4279,14 @@ async fn turn_start_file_change_approval_decline_v2() -> Result<()> {
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let start_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             cwd: Some(workspace.to_string_lossy().into_owned()),
             ..Default::default()
@@ -4313,6 +4413,11 @@ async fn turn_start_file_change_approval_decline_v2() -> Result<()> {
 #[tokio::test]
 #[cfg_attr(windows, ignore = "process id reporting differs on Windows")]
 async fn command_execution_notifications_include_process_id() -> Result<()> {
+    // TODO(anp): Add target-Windows process-id expectations for remote executors.
+    skip_if_wine_exec!(
+        Ok(()),
+        "process id reporting differs for a Windows executor"
+    );
     skip_if_no_network!(Ok(()));
 
     let responses = vec![
@@ -4329,11 +4434,14 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
         "danger-full-access",
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let start_id = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -4463,11 +4571,14 @@ async fn turn_start_with_elevated_override_does_not_persist_project_trust() -> R
 
     let workspace = TempDir::new()?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_request = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             cwd: Some(workspace.path().display().to_string()),
             ..Default::default()
         })

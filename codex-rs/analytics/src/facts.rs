@@ -464,6 +464,7 @@ pub(crate) enum AnalyticsFact {
         connection_id: u64,
         request_id: RequestId,
         response: Box<ClientResponsePayload>,
+        thread_originator: Option<String>,
     },
     ErrorResponse {
         connection_id: u64,
@@ -578,8 +579,16 @@ pub(crate) struct PluginStateChangedInput {
     pub state: PluginState,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginInstallSource {
+    Manual,
+    ExternalAgentMigration,
+}
+
 pub(crate) struct PluginInstallFailedInput {
     pub plugin: PluginTelemetryMetadata,
+    pub source: PluginInstallSource,
     pub error_type: String,
 }
 

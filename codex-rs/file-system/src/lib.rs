@@ -1,3 +1,9 @@
+mod find_up;
+
+pub use find_up::FindUpErrorPolicy;
+pub use find_up::find_nearest_ancestor_with_markers;
+pub use find_up::find_nearest_native_ancestor_with_markers;
+
 use bytes::Bytes;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::ManagedFileSystemPermissions;
@@ -75,6 +81,9 @@ pub struct WalkOptions {
     pub max_entries: usize,
     /// Whether directory symlinks should be followed.
     pub follow_directory_symlinks: bool,
+    /// Whether directories whose names start with `.` should be returned but not traversed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prune_hidden_directories: bool,
 }
 
 /// Type of a filesystem entry returned by a walk.
@@ -162,10 +171,11 @@ impl FileSystemSandboxContext {
         permissions: PermissionProfile<AbsolutePathBuf>,
         cwd: Option<PathUri>,
     ) -> Self {
+        let workspace_roots = cwd.iter().cloned().collect();
         Self {
             permissions: permissions.into(),
             cwd,
-            workspace_roots: Vec::new(),
+            workspace_roots,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: false,
             use_legacy_landlock: false,
@@ -310,7 +320,19 @@ pub trait ExecutorFileSystem: Send + Sync {
         options: WalkOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
-        Box::pin(walk(self, path, options, sandbox))
+        self.walk_via_directory_reads(path, options, sandbox)
+    }
+
+    /// Performs a bounded walk using the primitive filesystem operations.
+    ///
+    /// Implementations with an optimized walk transport can use this as a compatibility fallback.
+    fn walk_via_directory_reads<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: WalkOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
+        Box::pin(walk_via_directory_reads(self, path, options, sandbox))
     }
 
     fn remove<'a>(
@@ -329,7 +351,7 @@ pub trait ExecutorFileSystem: Send + Sync {
     ) -> ExecutorFileSystemFuture<'a, ()>;
 }
 
-async fn walk<F: ExecutorFileSystem + ?Sized>(
+async fn walk_via_directory_reads<F: ExecutorFileSystem + ?Sized>(
     file_system: &F,
     root: &PathUri,
     options: WalkOptions,
@@ -445,6 +467,9 @@ async fn walk<F: ExecutorFileSystem + ?Sized>(
             });
 
             if kind == WalkEntryKind::Directory && depth < options.max_depth {
+                if options.prune_hidden_directories && entry.file_name.starts_with('.') {
+                    continue;
+                }
                 let directory_identity = if options.follow_directory_symlinks {
                     match file_system.canonicalize(&path, sandbox).await {
                         Ok(path) => path,

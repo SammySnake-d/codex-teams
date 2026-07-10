@@ -516,7 +516,7 @@ impl TeamRegistry {
         let spawned_agent = agent_control
             .spawn_agent_with_metadata(
                 config,
-                initial_items.into(),
+                initial_items,
                 session_source,
                 SpawnAgentOptions {
                     parent_thread_id,
@@ -675,7 +675,7 @@ impl TeamRegistry {
         }
 
         match agent_control
-            .send_input(agent_thread_id, items.into())
+            .send_input(agent_thread_id, items)
             .await
         {
             Ok(submission_id) => {

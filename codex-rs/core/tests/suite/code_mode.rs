@@ -43,6 +43,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -110,54 +111,6 @@ fn text_item(items: &[Value], index: usize) -> &str {
         .get("text")
         .and_then(Value::as_str)
         .expect("content item should be input_text")
-}
-
-fn assert_repeated_text_item(items: &[Value], index: usize, byte: u8, expected_len: usize) {
-    let actual = text_item(items, index);
-    assert_eq!(
-        actual.len(),
-        expected_len,
-        "unexpected repeated-output length"
-    );
-    assert!(
-        actual.bytes().all(|actual_byte| actual_byte == byte),
-        "output should contain only byte {byte:?}"
-    );
-}
-
-fn assert_middle_truncated_repeated_text_item(
-    items: &[Value],
-    index: usize,
-    byte: u8,
-    expected_prefix_len: usize,
-    expected_marker: &str,
-    expected_suffix_len: usize,
-) {
-    let actual = text_item(items, index);
-    let body = actual
-        .strip_prefix("Total output lines: 1\n\n")
-        .expect("truncated output should include the total-line header");
-    let (prefix, suffix) = body
-        .split_once(expected_marker)
-        .expect("truncated output should include the expected marker");
-    assert_eq!(
-        prefix.len(),
-        expected_prefix_len,
-        "unexpected truncated-output prefix length"
-    );
-    assert_eq!(
-        suffix.len(),
-        expected_suffix_len,
-        "unexpected truncated-output suffix length"
-    );
-    assert!(
-        prefix.bytes().all(|actual_byte| actual_byte == byte),
-        "prefix should contain only byte {byte:?}"
-    );
-    assert!(
-        suffix.bytes().all(|actual_byte| actual_byte == byte),
-        "suffix should contain only byte {byte:?}"
-    );
 }
 
 fn extract_running_cell_id(text: &str) -> String {
@@ -238,10 +191,19 @@ async fn run_code_mode_turn_with_model_and_config(
     model: &'static str,
     configure: impl FnOnce(&mut Config) + Send + 'static,
 ) -> Result<(TestCodex, ResponseMock)> {
-    let mut builder = test_codex().with_model(model).with_config(move |config| {
+    let builder = test_codex().with_model(model).with_config(move |config| {
         let _ = config.features.enable(Feature::CodeMode);
         configure(config);
     });
+    run_code_mode_turn_with_builder(server, prompt, code, builder).await
+}
+
+async fn run_code_mode_turn_with_builder(
+    server: &MockServer,
+    prompt: &str,
+    code: &str,
+    mut builder: TestCodexBuilder,
+) -> Result<(TestCodex, ResponseMock)> {
     let test = builder.build(server).await?;
 
     responses::mount_sse_once(
@@ -265,6 +227,35 @@ async fn run_code_mode_turn_with_model_and_config(
 
     test.submit_turn(prompt).await?;
     Ok((test, second_mock))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_process_host_falls_back_to_in_process_code_mode() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_code_mode_host_program("codex-code-mode-host-does-not-exist".into())
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::CodeMode)
+                .expect("code mode should be enabled");
+        });
+    let (_test, follow_up_mock) =
+        run_code_mode_turn_with_builder(&server, "Run code mode", "text('fallback')", builder)
+            .await?;
+
+    assert_eq!(
+        text_item(
+            &custom_tool_output_items(&follow_up_mock.single_request(), "call-1"),
+            /*index*/ 1,
+        ),
+        "fallback"
+    );
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -443,6 +434,7 @@ async fn run_code_mode_turn_with_rmcp_config(
         servers.insert(
             "rmcp".to_string(),
             McpServerConfig {
+                auth: Default::default(),
                 transport: McpServerTransportConfig::Stdio {
                     command: rmcp_test_server_bin,
                     args: Vec::new(),
@@ -539,6 +531,76 @@ text(JSON.stringify(await tools.exec_command({ cmd: "printf code_mode_exec_marke
     assert!(parsed.get("wall_time_seconds").is_some());
     assert!(parsed.get("session_id").is_none());
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn code_mode_exec_holds_captured_result_during_elicitation() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+        });
+    let test = builder.build(&server).await?;
+
+    let first_mock = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_custom_tool_call("call-1", "exec", "text('captured');"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let second_mock = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(
+        test.codex.increment_out_of_band_elicitation_count().await?,
+        1
+    );
+    assert_eq!(
+        test.codex.increment_out_of_band_elicitation_count().await?,
+        2
+    );
+    let release_elicitation = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while first_mock.requests().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial response request should arrive");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            second_mock.requests().is_empty(),
+            "captured exec result should not return during an elicitation"
+        );
+        assert_eq!(
+            test.codex.decrement_out_of_band_elicitation_count().await?,
+            1
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            second_mock.requests().is_empty(),
+            "captured exec result should wait for every elicitation"
+        );
+        assert_eq!(
+            test.codex.decrement_out_of_band_elicitation_count().await?,
+            0
+        );
+        Ok::<(), anyhow::Error>(())
+    };
+
+    tokio::try_join!(test.submit_turn("run code mode"), release_elicitation)?;
+    second_mock.single_request();
     Ok(())
 }
 
@@ -657,8 +719,7 @@ if (!tool) {
             "exec".to_string(),
             "wait".to_string(),
             "request_user_input".to_string(),
-            "web_search".to_string(),
-            "image_generation".to_string()
+            "web_search".to_string()
         ]
     );
 
@@ -681,7 +742,8 @@ if (!tool) {
         })
         .expect("exec description should be present");
     assert!(exec_description.contains("filter `ALL_TOOLS` by `name` and `description`"));
-    assert!(exec_description.contains("calendar_timezone_option_99"));
+    assert!(exec_description.contains("Shared MCP Types:"));
+    assert!(!exec_description.contains("calendar_timezone_option_99"));
 
     let request = follow_up_mock.single_request();
     let (output, success) = custom_tool_output_body_and_success(&request, "call-1");
@@ -931,6 +993,7 @@ text(JSON.stringify(result));
             config.current_time_reminder = Some(CurrentTimeReminderConfig {
                 reminder_interval_seconds: 3_000,
                 clock_source: CurrentTimeSource::System,
+                ..CurrentTimeReminderConfig::default()
             });
         },
     )
@@ -2816,7 +2879,7 @@ async fn code_mode_resizes_explicit_original_image() -> Result<()> {
         &server,
         "use exec to return a large original-detail image",
         &code,
-        "gpt-5.3-codex",
+        "gpt-5.4",
         |_| {},
     )
     .await?;
@@ -2886,7 +2949,7 @@ async fn code_mode_can_use_view_image_result_with_image_helper() -> Result<()> {
 
     let server = responses::start_mock_server().await;
     let mut builder = test_codex()
-        .with_model("gpt-5.3-codex")
+        .with_model("gpt-5.4")
         .with_config(move |config| {
             let _ = config.features.enable(Feature::CodeMode);
         });
@@ -2980,7 +3043,7 @@ image(imageItem);
         &server,
         "use exec to call the rmcp image scenario tool and emit its image output",
         code,
-        "gpt-5.3-codex",
+        "gpt-5.4",
     )
     .await?;
 

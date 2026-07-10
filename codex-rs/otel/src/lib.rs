@@ -29,6 +29,7 @@ pub use crate::provider::OtelProvider;
 pub use crate::trace_context::context_from_w3c_trace_context;
 pub use crate::trace_context::current_span_trace_id;
 pub use crate::trace_context::current_span_w3c_trace_context;
+pub use crate::trace_context::inject_span_w3c_trace_headers;
 pub use crate::trace_context::set_parent_from_context;
 pub use crate::trace_context::set_parent_from_w3c_trace_context;
 pub use crate::trace_context::span_w3c_trace_context;
@@ -58,6 +59,7 @@ impl From<AuthMode> for TelemetryAuthMode {
             AuthMode::ApiKey | AuthMode::BedrockApiKey => Self::ApiKey,
             AuthMode::Chatgpt
             | AuthMode::ChatgptAuthTokens
+            | AuthMode::Headers
             | AuthMode::AgentIdentity
             | AuthMode::PersonalAccessToken => Self::Chatgpt,
         }

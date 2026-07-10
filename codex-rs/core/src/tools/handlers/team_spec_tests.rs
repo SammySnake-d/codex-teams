@@ -5,7 +5,6 @@ fn description(tool: ToolSpec) -> String {
         ToolSpec::Function(function) => function.description,
         ToolSpec::Namespace(_)
         | ToolSpec::ToolSearch { .. }
-        | ToolSpec::ImageGeneration { .. }
         | ToolSpec::WebSearch { .. }
         | ToolSpec::Freeform(_) => panic!("expected function tool"),
     }
