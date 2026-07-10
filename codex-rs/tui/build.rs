@@ -1,19 +1,21 @@
+//! Build script: stamp a Teams-fork display version so `codex --version` and the
+//! TUI header reflect exactly which team build is running.
+//!
+//! Upstream keeps `[workspace.package].version = "0.0.0"` as a source-build
+//! sentinel (see `is_source_build_version`), and the real release version is
+//! injected by CI. We must not touch that. Instead we compute an ADDITIONAL
+//! display string of the form `<upstream>-<team.N>+<git-hash>`, e.g.
+//! `0.143.0-alpha.10-team.1+9993fb8`, and expose it as `CODEX_TEAMS_VERSION`.
+//!
+//! Inputs (all best-effort; missing pieces degrade gracefully):
+//! - `codex-rs/TEAMS_VERSION`  -> the manually-bumped `team.N` tag.
+//! - `git describe --tags --match 'rust-v*'` -> the upstream release anchor.
+//! - `git rev-parse --short HEAD` -> the current commit hash.
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo:rustc-link-arg=-ObjC");
-    }
-    stamp_teams_version();
-}
-
-/// Stamp a Teams-fork display version so `codex --version` reflects exactly which
-/// team build is running. Upstream keeps `[workspace.package].version = "0.0.0"`
-/// as a source-build sentinel and injects the real version in CI, so we compute
-/// an ADDITIONAL string `<upstream>-<team.N>+<git-hash>` and expose it as
-/// `CODEX_TEAMS_VERSION`. Kept in sync with `tui/build.rs`.
-fn stamp_teams_version() {
+    // codex-rs/ (the workspace root) is one level up from tui/.
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
     let workspace_root = manifest_dir
         .parent()
@@ -21,6 +23,7 @@ fn stamp_teams_version() {
         .unwrap_or(manifest_dir);
     let teams_version_path = workspace_root.join("TEAMS_VERSION");
 
+    // Rebuild whenever the team version file or git HEAD changes.
     println!("cargo:rerun-if-changed={}", teams_version_path.display());
     if let Some(git_dir) = find_git_dir(&workspace_root) {
         println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
@@ -36,7 +39,12 @@ fn stamp_teams_version() {
         &workspace_root,
         &["describe", "--tags", "--match", "rust-v*", "--abbrev=0"],
     )
-    .map(|s| s.trim().trim_start_matches("rust-v").to_string())
+    .map(|s| {
+        s.trim()
+            .trim_start_matches("rust-v")
+            .trim_start_matches("rust-v")
+            .to_string()
+    })
     .filter(|s| !s.is_empty());
 
     let hash = git(&workspace_root, &["rev-parse", "--short", "HEAD"])

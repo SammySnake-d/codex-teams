@@ -674,10 +674,7 @@ impl TeamRegistry {
             return Err(err);
         }
 
-        match agent_control
-            .send_input(agent_thread_id, items)
-            .await
-        {
+        match agent_control.send_input(agent_thread_id, items).await {
             Ok(submission_id) => {
                 let agent_status = agent_control.get_status(agent_thread_id).await;
                 message.submitted_id = Some(submission_id.clone());
