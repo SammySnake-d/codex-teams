@@ -23,7 +23,7 @@ fn stamp_teams_version() {
 
     println!("cargo:rerun-if-changed={}", teams_version_path.display());
     if let Some(git_dir) = find_git_dir(&workspace_root) {
-        println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+        watch_git_commit(&git_dir);
     }
 
     let team_tag = std::fs::read_to_string(&teams_version_path)
@@ -63,6 +63,22 @@ fn find_git_dir(start: &std::path::Path) -> Option<PathBuf> {
         dir = d.parent().map(PathBuf::from);
     }
     None
+}
+
+/// Emit `rerun-if-changed` for both `HEAD` and the ref file it points at, so a
+/// new commit on the current branch (which only rewrites the ref) still
+/// retriggers the build script and refreshes the embedded hash.
+fn watch_git_commit(git_dir: &std::path::Path) {
+    let head = git_dir.join("HEAD");
+    println!("cargo:rerun-if-changed={}", head.display());
+    if let Ok(contents) = std::fs::read_to_string(&head)
+        && let Some(reference) = contents.strip_prefix("ref:").map(str::trim)
+    {
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join(reference).display()
+        );
+    }
 }
 
 fn git(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
