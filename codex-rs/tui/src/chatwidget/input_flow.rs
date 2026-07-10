@@ -31,7 +31,7 @@ impl ChatWidget {
                         && !self.input_queue.suppress_queue_autosend;
                     if should_submit_now {
                         self.reasoning_buffer.clear();
-                        self.full_reasoning_buffer.clear();
+                        self.reasoning_summary_parts.clear();
                         self.set_status_header(String::from("Working"));
                         self.submit_teams_mailbox_message(
                             user_message,

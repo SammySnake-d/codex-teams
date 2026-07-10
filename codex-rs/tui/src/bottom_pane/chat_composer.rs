@@ -2089,7 +2089,11 @@ impl ChatComposer {
                         self.insert_selected_mention(token_range, &insert_text, path.as_deref());
                     }
                     MentionV2Selection::Team { insert_text, path } => {
-                        self.insert_selected_mention(&insert_text, Some(path.as_str()));
+                        self.insert_selected_mention(
+                            token_range,
+                            &insert_text,
+                            Some(path.as_str()),
+                        );
                     }
                 }
             }
