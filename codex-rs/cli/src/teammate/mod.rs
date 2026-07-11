@@ -7,12 +7,9 @@
 //! reads its on-disk inbox and injects the lead's messages as turns in its OWN
 //! session (the first turn is delivered via the mailbox, NOT the command line).
 //!
-//! This replaces the earlier headless run-loop. The mailbox/idle/shutdown
-//! helpers in [`runner`] are retained and reused by the TUI's teammate-mode
-//! background poller.
-
-#[allow(dead_code)]
-mod runner;
+//! The inbox poll / idle / shutdown / mid-turn progress logic all lives in the
+//! TUI (`tui/src/app/lead_inbox_poller.rs` + `tui/src/chatwidget/protocol.rs`);
+//! an earlier headless run-loop was removed once the TUI became the live path.
 
 use anyhow::Result;
 use clap::Parser;
