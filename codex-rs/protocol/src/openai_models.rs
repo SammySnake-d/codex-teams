@@ -358,6 +358,13 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reasoning_level: Option<ReasoningEffort>,
     pub supported_reasoning_levels: Vec<ReasoningEffortPreset>,
+    /// Whether the model advertises reasoning-summary support. When false, the
+    /// client omits the `reasoning` field from Responses requests entirely
+    /// (OpenAI-compatible proxies serving non-reasoning models reject it). Ported
+    /// from upstream rust-v0.144.1; `#[serde(default)]` so minimal `/models`
+    /// metadata that omits the field degrades to "no reasoning".
+    #[serde(default)]
+    pub supports_reasoning_summaries: bool,
     pub shell_type: ConfigShellToolType,
     pub visibility: ModelVisibility,
     pub supported_in_api: bool,

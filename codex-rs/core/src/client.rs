@@ -804,21 +804,31 @@ impl ModelClient {
         model_info: &ModelInfo,
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
-    ) -> Reasoning {
-        Reasoning {
-            effort: effort
-                .or_else(|| model_info.default_reasoning_level.clone())
-                .map(reasoning_effort_for_request),
-            summary: if summary == ReasoningSummaryConfig::None {
-                None
-            } else {
-                Some(summary)
-            },
-            // When Responses Lite is disabled, omit context so Responses uses the default,
-            // which is currently `current_turn`.
-            context: model_info
-                .use_responses_lite
-                .then_some(ReasoningContext::AllTurns),
+    ) -> Option<Reasoning> {
+        // Only send the `reasoning` field when the model actually advertises
+        // reasoning-summary support. Providers that don't (e.g. many
+        // OpenAI-compatible proxies serving non-reasoning models) reject a
+        // request that carries `reasoning` / `reasoning.encrypted_content`,
+        // surfacing as a 400 `invalid_request` on `tools`. Ported from upstream
+        // rust-v0.144.1.
+        if model_info.supports_reasoning_summaries {
+            Some(Reasoning {
+                effort: effort
+                    .or_else(|| model_info.default_reasoning_level.clone())
+                    .map(reasoning_effort_for_request),
+                summary: if summary == ReasoningSummaryConfig::None {
+                    None
+                } else {
+                    Some(summary)
+                },
+                // When Responses Lite is disabled, omit context so Responses uses the default,
+                // which is currently `current_turn`.
+                context: model_info
+                    .use_responses_lite
+                    .then_some(ReasoningContext::AllTurns),
+            })
+        } else {
+            None
         }
     }
 
@@ -867,8 +877,12 @@ impl ModelClient {
             .then_some(StreamOptions {
                 reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
             });
-        let reasoning = Some(Self::build_reasoning(model_info, effort, summary));
-        let include = vec!["reasoning.encrypted_content".to_string()];
+        let reasoning = Self::build_reasoning(model_info, effort, summary);
+        let include = if reasoning.is_some() {
+            vec!["reasoning.encrypted_content".to_string()]
+        } else {
+            Vec::new()
+        };
         let verbosity = if model_info.support_verbosity {
             self.state.model_verbosity.or(model_info.default_verbosity)
         } else {

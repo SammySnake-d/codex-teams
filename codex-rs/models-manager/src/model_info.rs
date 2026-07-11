@@ -76,6 +76,10 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         description: None,
         default_reasoning_level: None,
         supported_reasoning_levels: Vec::new(),
+        // Unknown/proxied models: assume no reasoning-summary support so the
+        // client omits the `reasoning` field. Sending it to a plain
+        // OpenAI-compatible proxy that doesn't implement it yields a 400.
+        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::Default,
         visibility: ModelVisibility::None,
         supported_in_api: true,
