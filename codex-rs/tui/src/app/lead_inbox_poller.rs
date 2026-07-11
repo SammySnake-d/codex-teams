@@ -12,7 +12,8 @@
 //! messages as turns in that teammate's own session.
 
 use std::path::PathBuf;
-use std::time::Duration;
+
+use codex_file_watcher::inbox_watcher::InboxWatcher;
 
 use crate::legacy_core::team_coord::IdleOptions;
 use crate::legacy_core::team_coord::IdleReason;
@@ -29,7 +30,10 @@ use crate::app_event::AppEvent;
 use crate::app_event::TeammateInboxAck;
 use crate::app_event_sender::AppEventSender;
 
-/// Claude `INBOX_POLL_INTERVAL_MS`.
+/// Claude `INBOX_POLL_INTERVAL_MS`. Retained as the documented fallback cadence;
+/// the live wake-up path now comes from [`InboxWatcher`], so this is referenced
+/// only by tests that assert timing.
+#[cfg_attr(not(test), allow(dead_code))]
 const INBOX_POLL_INTERVAL_MS: u64 = 1000;
 
 /// Handle to a running lead inbox poll task. Call [`LeadInboxPoller::stop`] (or
@@ -227,8 +231,25 @@ pub(crate) fn start_lead_inbox_poller(
     app_event_tx: AppEventSender,
 ) -> LeadInboxPoller {
     let handle = tokio::spawn(async move {
+        // Event-driven wake-up: block on OS file-change notifications for the
+        // lead's `inboxes/` directory instead of polling on a fixed interval.
+        // Falls back to interval ticking if the OS watcher is unavailable, so
+        // this never regresses below the old poll loop. A wake-up means "read
+        // now"; we still read + diff + ack, preserving delivery-before-read.
+        let inboxes_dir = team_store::inboxes_dir(&codex_home, &team);
+        let mut watcher = InboxWatcher::new(inboxes_dir);
+        // Read once immediately to catch messages already unread at startup,
+        // then wait for the next change before each subsequent read.
+        let mut wait_first = false;
+
         loop {
-            tokio::time::sleep(Duration::from_millis(INBOX_POLL_INTERVAL_MS)).await;
+            if wait_first {
+                if !watcher.changed().await {
+                    break;
+                }
+            } else {
+                wait_first = true;
+            }
 
             let unread = {
                 let codex_home = codex_home.clone();
@@ -240,7 +261,8 @@ pub(crate) fn start_lead_inbox_poller(
                 .await
                 {
                     Ok(Ok(unread)) => unread,
-                    // Missing inbox file or transient lock error: retry next tick.
+                    // Missing inbox file or transient lock error: wait for the
+                    // next change and retry.
                     Ok(Err(_)) | Err(_) => continue,
                 }
             };
@@ -295,12 +317,17 @@ pub(crate) fn start_teammate_inbox_poller(
 ) -> TeammateInboxPoller {
     let lifecycle = TeammateLifecycle::new(codex_home.clone(), team.clone(), agent_name.clone());
     let handle = tokio::spawn(async move {
+        // Event-driven wake-up on this teammate's own `inboxes/` directory (see
+        // the lead poller for rationale). First pass reads immediately; each
+        // later pass waits for a change signal.
+        let inboxes_dir = team_store::inboxes_dir(&codex_home, &team);
+        let mut watcher = InboxWatcher::new(inboxes_dir);
         let mut poll_immediately = true;
         loop {
             if poll_immediately {
                 poll_immediately = false;
-            } else {
-                tokio::time::sleep(Duration::from_millis(INBOX_POLL_INTERVAL_MS)).await;
+            } else if !watcher.changed().await {
+                break;
             }
 
             let selected = {
@@ -314,7 +341,8 @@ pub(crate) fn start_teammate_inbox_poller(
                 .await
                 {
                     Ok(Ok(selected)) => selected,
-                    // Missing inbox file or transient lock error: retry next tick.
+                    // Missing inbox file or transient lock error: wait for the
+                    // next change and retry.
                     Ok(Err(_)) | Err(_) => continue,
                 }
             };
@@ -347,6 +375,7 @@ mod tests {
     use super::*;
     use crate::legacy_core::team_coord::parse_idle_notification;
     use pretty_assertions::assert_eq;
+    use std::time::Duration;
 
     fn msg(from: &str, text: &str, color: Option<&str>, summary: Option<&str>) -> TeammateMessage {
         TeammateMessage {

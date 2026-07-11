@@ -1,6 +1,8 @@
 //! Watches subscribed files or directories and routes coarse-grained change
 //! notifications to the subscribers that own matching watched paths.
 
+pub mod inbox_watcher;
+
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::path::Path;

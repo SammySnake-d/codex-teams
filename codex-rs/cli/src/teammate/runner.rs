@@ -23,6 +23,7 @@ use codex_core::team_coord::NextInbox;
 use codex_core::team_coord::{self};
 use codex_core::team_store::TEAM_LEAD_NAME;
 use codex_core::team_store::{self};
+use codex_file_watcher::inbox_watcher::InboxWatcher;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
@@ -62,6 +63,13 @@ pub(crate) async fn run_teammate_loop(
         team_coord::format_as_teammate_message(TEAM_LEAD_NAME, &p, rt.color.as_deref(), None)
     });
 
+    // Event-driven wake-up: block on OS file-change notifications for this
+    // teammate's own `inboxes/` directory instead of polling every 500ms. Falls
+    // back to interval ticking if the OS watcher is unavailable, so this never
+    // regresses below the old poll loop.
+    let inboxes_dir = team_store::inboxes_dir(&rt.teams_root, &rt.team);
+    let mut watcher = InboxWatcher::new(inboxes_dir);
+
     loop {
         if let Some(prompt) = current_prompt.take() {
             let last_agent_message = run_one_turn(&thread, prompt).await?;
@@ -71,7 +79,7 @@ pub(crate) async fn run_teammate_loop(
             let _ = send_idle(&rt, last_agent_message.as_deref());
         }
 
-        match wait_for_next_prompt_or_shutdown(&rt).await? {
+        match wait_for_next_prompt_or_shutdown(&rt, &mut watcher).await? {
             WaitResult::Shutdown { prompt } => {
                 // Feed the shutdown text to the model so it can acknowledge /
                 // wind down, then exit after that final turn (Claude §1.4).
@@ -120,12 +128,20 @@ async fn run_one_turn(thread: &Arc<CodexThread>, prompt: String) -> Result<Optio
     Ok(last_agent_message)
 }
 
-/// Port of `waitForNextPromptOrShutdown`: poll this teammate's inbox every
-/// `POLL_INTERVAL_MS`; resolve as soon as [`team_coord::select_next_inbox`]
-/// yields a shutdown request or a regular message. Selection priority
+/// Port of `waitForNextPromptOrShutdown`: wait for this teammate's inbox to
+/// change, then resolve as soon as [`team_coord::select_next_inbox`] yields a
+/// shutdown request or a regular message. Selection priority
 /// (shutdown > lead > FIFO) lives in `team_coord`; `index` is aligned with
 /// `team_store::mark_message_read_by_index`.
-async fn wait_for_next_prompt_or_shutdown(rt: &TeammateRuntime) -> Result<WaitResult> {
+///
+/// Wake-ups come from [`InboxWatcher`] (OS file events, interval fallback). The
+/// first read happens immediately so a message already waiting is handled
+/// without a wake-up; an empty inbox then blocks on the next change instead of
+/// spinning.
+async fn wait_for_next_prompt_or_shutdown(
+    rt: &TeammateRuntime,
+    watcher: &mut InboxWatcher,
+) -> Result<WaitResult> {
     loop {
         let messages = team_store::read_mailbox(&rt.teams_root, &rt.team, &rt.agent_name)?;
         match team_coord::select_next_inbox(&messages) {
@@ -161,7 +177,13 @@ async fn wait_for_next_prompt_or_shutdown(rt: &TeammateRuntime) -> Result<WaitRe
                 return Ok(WaitResult::NewMessage { prompt });
             }
             NextInbox::Empty => {
-                tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+                // Block until the inbox directory changes (or the fallback tick
+                // fires). A closed watcher channel means the watcher was
+                // dropped; fall back to a short sleep so the loop still makes
+                // progress rather than busy-spinning.
+                if !watcher.changed().await {
+                    tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+                }
             }
         }
     }
