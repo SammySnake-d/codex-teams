@@ -393,6 +393,13 @@ pub(crate) fn create_team_send_tool() -> ToolSpec {
                         .to_string(),
                 )),
             ),
+            (
+                "kind".to_string(),
+                JsonSchema::string(Some(
+                    "Optional message intent for receiver arbitration: \"correction\" (redirect the recipient's work — preempts routine discussion), \"report\" (a finding/observation), \"progress\" (a status update), or \"discussion\" (brainstorming, lowest priority). Use \"correction\" when you are a reviewer telling an agent it has drifted; the system decides how much authority your correction carries from your identity. Omit for ordinary chatter."
+                        .to_string(),
+                )),
+            ),
             ("items".to_string(), create_collab_input_items_schema()),
         ]),
         None,

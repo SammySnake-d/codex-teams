@@ -309,6 +309,13 @@ struct TeamSendArgs {
     delivery_mode: Option<String>,
     message: Option<String>,
     items: Option<Vec<UserInput>>,
+    /// Optional semantic category the SENDER declares for this message
+    /// (`correction` | `report` | `progress` | `discussion`). Drives multi-source
+    /// arbitration on the receiver: a `correction` preempts routine discussion so
+    /// a reviewer teammate can redirect a drifting agent. The system assigns the
+    /// authoritative `source_role` from the sender's identity — the model only
+    /// declares intent, it cannot claim to speak for the human.
+    kind: Option<String>,
 }
 
 fn normalize_team_send_args(mut args: TeamSendArgs) -> Result<TeamSendArgs, FunctionCallError> {
@@ -1843,6 +1850,7 @@ async fn team_send_args(
                 summary: args.summary,
                 message: args.message,
                 items: args.items,
+                kind: args.kind,
             },
         )
         .await;
@@ -1917,6 +1925,8 @@ struct PaneMemberSendRequest {
     summary: Option<String>,
     message: Option<String>,
     items: Option<Vec<UserInput>>,
+    /// Sender-declared semantic category (see [`TeamSendArgs::kind`]).
+    kind: Option<String>,
 }
 
 /// Deliver a lead-originated message to a split-pane PROCESS teammate via its
@@ -1954,6 +1964,9 @@ async fn team_send_to_pane_member(
 
     let items = parse_team_input(request.message, request.items)?;
     let content = input_preview(&items);
+    // Lead → member: the lead relays intent (often the human operator's). Tag the
+    // authority as Lead so a correction from the lead preempts peer discussion in
+    // the member's inbox; the sender-declared kind supplies correction/report/etc.
     write_plain_mailbox_message(
         &teams_root,
         &team_name,
@@ -1961,6 +1974,10 @@ async fn team_send_to_pane_member(
         team_store::TEAM_LEAD_NAME,
         &content,
         request.summary.clone(),
+        MessageClassification {
+            kind: parse_message_kind(request.kind.as_deref()),
+            source_role: Some(team_store::SourceRole::Lead),
+        },
     )?;
 
     claude_team_send_result(
@@ -1992,6 +2009,7 @@ async fn team_send_broadcast_to_pane_members(
         .collect::<Vec<_>>();
     let items = parse_team_input(args.message, args.items)?;
     let content = input_preview(&items);
+    let broadcast_kind = parse_message_kind(args.kind.as_deref());
     let mut targets = Vec::with_capacity(members.len());
     for member in members {
         write_plain_mailbox_message(
@@ -2001,6 +2019,10 @@ async fn team_send_broadcast_to_pane_members(
             team_store::TEAM_LEAD_NAME,
             &content,
             args.summary.clone(),
+            MessageClassification {
+                kind: broadcast_kind,
+                source_role: Some(team_store::SourceRole::Lead),
+            },
         )?;
         targets.push(member.name);
     }
@@ -2069,6 +2091,35 @@ fn store_member_is_active(member: &team_store::TeamFileMember) -> bool {
     member.is_active.unwrap_or(true)
 }
 
+/// Arbitration classification carried into a mailbox write. `none()` reproduces
+/// the pre-arbitration behavior (unclassified FIFO chatter); the delivery paths
+/// that know the sender's authority pass an explicit kind + role so the receiver
+/// can arbitrate corrections ahead of discussion.
+#[derive(Debug, Clone, Copy, Default)]
+struct MessageClassification {
+    kind: Option<team_store::MessageKind>,
+    source_role: Option<team_store::SourceRole>,
+}
+
+impl MessageClassification {
+    fn none() -> Self {
+        Self::default()
+    }
+}
+
+/// Parse the sender-declared `kind` string into a [`team_store::MessageKind`].
+/// Unknown/absent values map to `None` (FIFO chatter), so a malformed tag never
+/// breaks delivery — it just doesn't get priority.
+fn parse_message_kind(kind: Option<&str>) -> Option<team_store::MessageKind> {
+    match kind.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("correction") => Some(team_store::MessageKind::Correction),
+        Some("report") => Some(team_store::MessageKind::Report),
+        Some("progress") => Some(team_store::MessageKind::Progress),
+        Some("discussion") => Some(team_store::MessageKind::Discussion),
+        _ => None,
+    }
+}
+
 fn write_plain_mailbox_message(
     teams_root: &std::path::Path,
     team_name: &str,
@@ -2076,6 +2127,7 @@ fn write_plain_mailbox_message(
     sender: &str,
     text: &str,
     summary: Option<String>,
+    classification: MessageClassification,
 ) -> Result<(), FunctionCallError> {
     team_store::write_to_mailbox(
         teams_root,
@@ -2088,6 +2140,8 @@ fn write_plain_mailbox_message(
             read: false,
             color: None,
             summary,
+            kind: classification.kind,
+            source_role: classification.source_role,
         },
     )
     .map_err(|err| {
@@ -2114,6 +2168,7 @@ fn write_initial_teammate_prompt_to_mailbox(
             read: false,
             color: None,
             summary: None,
+            ..Default::default()
         },
     )
     .map_err(|err| {
@@ -2421,6 +2476,15 @@ async fn teammate_team_send(
     };
     let items = parse_team_input(args.message, args.items)?;
     let content = input_preview(&items);
+    // Authority is derived from the SENDER's identity + recipient, never trusted
+    // from the model. A teammate sending to another MEMBER is acting as a
+    // reviewer/monitor of that agent, so its correction can preempt peer
+    // discussion. A teammate sending to the LEAD is an ordinary peer reporting
+    // up. The declared `kind` (correction/report/…) rides along either way.
+    let source_role = match &target {
+        crate::team::TeamMessageEndpoint::Member(_) => team_store::SourceRole::Reviewer,
+        _ => team_store::SourceRole::Peer,
+    };
     write_plain_mailbox_message(
         &teams_root,
         &identity.team,
@@ -2428,6 +2492,10 @@ async fn teammate_team_send(
         &identity.agent_name,
         &content,
         args.summary.clone(),
+        MessageClassification {
+            kind: parse_message_kind(args.kind.as_deref()),
+            source_role: Some(source_role),
+        },
     )?;
     let _ = (team_id, target, items, delivery_mode, output_tool_name);
 
@@ -2460,6 +2528,13 @@ async fn teammate_team_send_broadcast(
         .collect::<Vec<_>>();
     let items = parse_team_input(args.message, args.items)?;
     let content = input_preview(&items);
+    // A teammate broadcasting to peers is monitoring/coordinating the group; tag
+    // it Reviewer authority with the declared kind so a broadcast correction can
+    // still outrank routine peer chatter in each recipient's inbox.
+    let broadcast_classification = MessageClassification {
+        kind: parse_message_kind(args.kind.as_deref()),
+        source_role: Some(team_store::SourceRole::Reviewer),
+    };
     for recipient in &recipients {
         write_plain_mailbox_message(
             teams_root,
@@ -2468,6 +2543,7 @@ async fn teammate_team_send_broadcast(
             &identity.agent_name,
             &content,
             args.summary.clone(),
+            broadcast_classification,
         )?;
     }
 
@@ -2940,6 +3016,7 @@ async fn claude_send_message(
                     delivery_mode: None,
                     message: Some(message.clone()),
                     items: None,
+                    kind: None,
                 },
                 "SendMessage",
             )
@@ -3224,6 +3301,7 @@ fn write_json_mailbox_message<T: Serialize>(
             read: false,
             color,
             summary: None,
+            ..Default::default()
         },
     )
     .map_err(|err| {
@@ -4907,6 +4985,7 @@ supports_websockets = true
             read: false,
             color: None,
             summary: None,
+            ..Default::default()
         };
         let explicit = team_store::TeammateMessage {
             from: "alice".to_string(),
@@ -4915,6 +4994,7 @@ supports_websockets = true
             read: false,
             color: None,
             summary: Some("done".to_string()),
+            ..Default::default()
         };
 
         assert!(!is_model_visible_lead_mailbox_entry(&idle));
@@ -5700,6 +5780,7 @@ supports_websockets = true
                 delivery_mode: None,
                 message: Some("done".to_string()),
                 items: None,
+                kind: None,
             },
             "team_send",
         )
@@ -5860,6 +5941,7 @@ supports_websockets = true
                 delivery_mode: None,
                 message: Some("hello".to_string()),
                 items: None,
+                kind: None,
             },
             "team_send",
         )
@@ -5903,6 +5985,7 @@ supports_websockets = true
                 delivery_mode: None,
                 message: Some("hello".to_string()),
                 items: None,
+                kind: None,
             },
             "team_send",
         )

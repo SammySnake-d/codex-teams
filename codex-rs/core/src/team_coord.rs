@@ -36,6 +36,8 @@ use std::time::UNIX_EPOCH;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::team_store::MessageKind;
+use crate::team_store::SourceRole;
 use crate::team_store::TEAM_LEAD_NAME;
 use crate::team_store::TeammateMessage;
 use crate::team_store::read_unread;
@@ -192,6 +194,7 @@ pub fn send_idle_notification(
             read: false,
             color,
             summary: None,
+            ..Default::default()
         },
     )
 }
@@ -374,6 +377,7 @@ pub fn send_shutdown_request(
             read: false,
             color,
             summary: None,
+            ..Default::default()
         },
     )
 }
@@ -408,6 +412,65 @@ pub enum NextInbox {
 /// 1. first unread `shutdown_request` (prevents starvation under peer flood),
 /// 2. else first unread `team-lead` message,
 /// 3. else FIFO first-unread peer message.
+/// Arbitration rank for one unread message. HIGHER wins. This is the multi-source
+/// arbitration ladder: several teammates (plus the human via the lead) may all
+/// write corrections to one working agent; the agent must process the most
+/// authoritative one FIRST without any of them being dropped. Concurrency is
+/// already serialized by the append-only mailbox (single-writer-at-a-time via the
+/// file lock), so arbitration only decides ORDER, never discards.
+///
+/// Ladder (high → low):
+///   human correction > lead > reviewer correction > peer correction >
+///   report/progress > discussion > unclassified FIFO chatter
+///
+/// `kind`/`source_role` are optional: a message with neither ranks as ordinary
+/// FIFO chatter, so pre-existing mailboxes and the plain lead→member task path
+/// behave exactly as before this ladder existed. (Shutdown is handled separately
+/// and outranks everything.)
+fn arbitration_rank(message: &TeammateMessage) -> u8 {
+    let is_correction = matches!(message.kind, Some(MessageKind::Correction));
+    // The lead speaking (by name) is user intent and keeps its historical rank
+    // just below a human-tagged correction, matching the previous lead>FIFO rule.
+    let from_lead = message.from == TEAM_LEAD_NAME;
+    match (message.source_role, is_correction, from_lead) {
+        // A correction explicitly relayed for the human operator wins (short of
+        // shutdown): it is the person steering the work.
+        (Some(SourceRole::Human), true, _) => 100,
+        // Any human-tagged message, even non-correction, still speaks for the
+        // operator and outranks agent chatter.
+        (Some(SourceRole::Human), false, _) => 90,
+        // The lead agent (explicit role or by name) — preserves lead>peer.
+        (Some(SourceRole::Lead), _, _) => 80,
+        (_, _, true) => 80,
+        // A reviewer teammate's correction: it is monitoring for drift and its
+        // redirect should preempt ordinary peer discussion.
+        (Some(SourceRole::Reviewer), true, _) => 70,
+        (Some(SourceRole::Reviewer), false, _) => 40,
+        // An ordinary peer's correction still outranks non-correction chatter.
+        (Some(SourceRole::Peer), true, _) => 60,
+        // Non-correction, role-tagged informational messages.
+        (_, _, _)
+            if matches!(
+                message.kind,
+                Some(MessageKind::Report | MessageKind::Progress)
+            ) =>
+        {
+            40
+        }
+        // Peer discussion / brainstorming: additive, never preempts a correction.
+        (_, _, _) if matches!(message.kind, Some(MessageKind::Discussion)) => 20,
+        // Unclassified: ordinary FIFO chatter (legacy behavior).
+        _ => 10,
+    }
+}
+
+/// Select the next inbox message to process, arbitrating across sources.
+///
+/// Priority: a shutdown request always wins (safety), so the agent can wind down
+/// even if higher-signal work is queued. Otherwise the highest [`arbitration_rank`]
+/// wins; ties break FIFO (earliest unread index) so same-rank messages keep
+/// arrival order. `index` is the position in the FULL mailbox vec so the caller
+/// can `mark_message_read_by_index` it.
 pub fn select_next_inbox(messages: &[TeammateMessage]) -> NextInbox {
     for (i, m) in messages.iter().enumerate() {
         if !m.read
@@ -420,17 +483,22 @@ pub fn select_next_inbox(messages: &[TeammateMessage]) -> NextInbox {
             };
         }
     }
-    if let Some(i) = messages
-        .iter()
-        .position(|m| !m.read && m.from == TEAM_LEAD_NAME)
-    {
-        return NextInbox::Message {
-            index: i,
-            message: messages[i].clone(),
-        };
+    // Highest arbitration rank wins; ties break to the earliest index (FIFO).
+    // `max_by_key` returns the LAST max on ties, so we fold manually to keep the
+    // earliest.
+    let mut best: Option<(usize, u8)> = None;
+    for (i, m) in messages.iter().enumerate() {
+        if m.read {
+            continue;
+        }
+        let rank = arbitration_rank(m);
+        match best {
+            Some((_, best_rank)) if rank <= best_rank => {}
+            _ => best = Some((i, rank)),
+        }
     }
-    match messages.iter().position(|m| !m.read) {
-        Some(i) => NextInbox::Message {
+    match best {
+        Some((i, _)) => NextInbox::Message {
             index: i,
             message: messages[i].clone(),
         },
@@ -812,6 +880,7 @@ mod tests {
             read: false,
             color: None,
             summary: None,
+            ..Default::default()
         };
         let peer = TeammateMessage {
             from: "bob".to_string(),
@@ -820,6 +889,7 @@ mod tests {
             read: false,
             color: None,
             summary: None,
+            ..Default::default()
         };
         let shutdown_text = serde_json::json!({
             "type": "shutdown_request",
@@ -835,6 +905,7 @@ mod tests {
             read: false,
             color: None,
             summary: None,
+            ..Default::default()
         };
 
         // Peer first, then lead, then shutdown — shutdown must still win.
@@ -868,6 +939,154 @@ mod tests {
         assert!(matches!(select_next_inbox(&[read_peer]), NextInbox::Empty));
     }
 
+    /// Build an unread message with an explicit arbitration classification.
+    fn classified(
+        from: &str,
+        text: &str,
+        kind: Option<MessageKind>,
+        source_role: Option<SourceRole>,
+    ) -> TeammateMessage {
+        TeammateMessage {
+            from: from.to_string(),
+            text: text.to_string(),
+            timestamp: now_rfc3339(),
+            read: false,
+            color: None,
+            summary: None,
+            kind,
+            source_role,
+        }
+    }
+
+    #[test]
+    fn arbitration_reviewer_correction_outranks_peer_discussion() {
+        // A worker's inbox holds an older peer brainstorm message and a newer
+        // reviewer correction (the reviewer noticed drift). The correction must
+        // be processed FIRST even though it arrived later — but the discussion
+        // is NOT dropped (it stays unread for the next round).
+        let discussion = classified(
+            "bob",
+            "what if we also tried X?",
+            Some(MessageKind::Discussion),
+            Some(SourceRole::Peer),
+        );
+        let reviewer_fix = classified(
+            "reviewer",
+            "STOP: you are editing the wrong module, target auth.rs",
+            Some(MessageKind::Correction),
+            Some(SourceRole::Reviewer),
+        );
+        let msgs = vec![discussion, reviewer_fix];
+        match select_next_inbox(&msgs) {
+            NextInbox::Message { index, message } => {
+                assert_eq!(index, 1, "reviewer correction should win over discussion");
+                assert_eq!(message.from, "reviewer");
+            }
+            other => panic!("expected reviewer correction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbitration_human_correction_outranks_reviewer_correction() {
+        // Both a teammate reviewer and the human operator (relayed via the lead)
+        // send a correction to the same worker. The human's intent wins, but the
+        // reviewer's correction is preserved for the following turn.
+        let reviewer_fix = classified(
+            "reviewer",
+            "use a HashMap here",
+            Some(MessageKind::Correction),
+            Some(SourceRole::Reviewer),
+        );
+        let human_fix = classified(
+            TEAM_LEAD_NAME,
+            "operator says: revert that, keep the Vec",
+            Some(MessageKind::Correction),
+            Some(SourceRole::Human),
+        );
+        // Human message arrives LAST; must still be selected first.
+        let msgs = vec![reviewer_fix, human_fix];
+        match select_next_inbox(&msgs) {
+            NextInbox::Message { index, message } => {
+                assert_eq!(index, 1, "human correction should outrank reviewer");
+                assert_eq!(message.source_role, Some(SourceRole::Human));
+            }
+            other => panic!("expected human correction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbitration_shutdown_still_beats_every_correction() {
+        // Safety invariant: a shutdown request outranks even a human correction
+        // so an agent can always wind down.
+        let human_fix = classified(
+            TEAM_LEAD_NAME,
+            "operator: change direction",
+            Some(MessageKind::Correction),
+            Some(SourceRole::Human),
+        );
+        let shutdown_text = serde_json::json!({
+            "type": "shutdown_request",
+            "requestId": "s1",
+            "from": "team-lead",
+            "timestamp": "2026-06-05T00:00:00.000Z",
+        })
+        .to_string();
+        let shutdown = classified(TEAM_LEAD_NAME, &shutdown_text, None, None);
+        let msgs = vec![human_fix, shutdown];
+        match select_next_inbox(&msgs) {
+            NextInbox::Shutdown { index, .. } => assert_eq!(index, 1),
+            other => panic!("expected shutdown to win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbitration_same_rank_breaks_fifo() {
+        // Two reviewer corrections at the same rank: the EARLIER one is processed
+        // first (FIFO tie-break), so same-authority sources keep arrival order.
+        let first = classified(
+            "reviewer-a",
+            "fix 1",
+            Some(MessageKind::Correction),
+            Some(SourceRole::Reviewer),
+        );
+        let second = classified(
+            "reviewer-b",
+            "fix 2",
+            Some(MessageKind::Correction),
+            Some(SourceRole::Reviewer),
+        );
+        let msgs = vec![first, second];
+        match select_next_inbox(&msgs) {
+            NextInbox::Message { index, message } => {
+                assert_eq!(index, 0, "same-rank corrections keep FIFO order");
+                assert_eq!(message.from, "reviewer-a");
+            }
+            other => panic!("expected first reviewer correction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbitration_untagged_messages_preserve_legacy_fifo() {
+        // Messages with no kind/source_role must behave exactly as before the
+        // ladder existed: plain FIFO, with a team-lead message jumping ahead.
+        let peer_old = classified("bob", "old chatter", None, None);
+        let peer_new = classified("carol", "new chatter", None, None);
+        // Two untagged peers → earliest wins (FIFO).
+        match select_next_inbox(&[peer_old.clone(), peer_new.clone()]) {
+            NextInbox::Message { index, .. } => assert_eq!(index, 0),
+            other => panic!("expected FIFO peer, got {other:?}"),
+        }
+        // Untagged lead message still outranks untagged peer chatter.
+        let lead = classified(TEAM_LEAD_NAME, "do the thing", None, None);
+        match select_next_inbox(&[peer_old, lead]) {
+            NextInbox::Message { index, message } => {
+                assert_eq!(index, 1);
+                assert_eq!(message.from, TEAM_LEAD_NAME);
+            }
+            other => panic!("expected lead over peer, got {other:?}"),
+        }
+    }
+
     #[test]
     fn attachments_filter_protocol_and_wrap() {
         let root = unique_root();
@@ -885,6 +1104,7 @@ mod tests {
                 read: false,
                 color: Some("green".to_string()),
                 summary: None,
+                ..Default::default()
             },
         )
         .unwrap();

@@ -623,6 +623,7 @@ impl ChatWidget {
                     read: false,
                     color: None,
                     summary: None,
+                    ..Default::default()
                 },
             );
             if let Err(err) = result {
@@ -717,6 +718,7 @@ impl ChatWidget {
                 read: false,
                 color: None,
                 summary: None,
+                ..Default::default()
             },
         );
         if let Err(err) = result {

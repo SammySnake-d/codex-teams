@@ -108,8 +108,44 @@ pub struct TeamFileMember {
     pub mode: Option<String>,
 }
 
+/// Semantic category of a mailbox message. Drives arbitration priority in
+/// [`crate::team_coord::select_next_inbox`] so a correction outranks routine
+/// discussion when several sources write to the same agent concurrently.
+/// Absent (`None`) means "unclassified" and arbitrates as plain FIFO chatter,
+/// preserving the behavior of mailboxes written before this field existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    /// A directive that redirects the receiving agent's work. Highest-signal.
+    Correction,
+    /// A status/finding report (e.g. a reviewer's observation). Informational.
+    Report,
+    /// Incremental progress push from a working agent.
+    Progress,
+    /// Peer-to-peer discussion / brainstorming. Lowest priority (additive info,
+    /// not a directive), so it never preempts a correction mid-drift.
+    Discussion,
+}
+
+/// Who a message speaks for. Combined with [`MessageKind`] to order corrections:
+/// a human's correction (relayed through the lead) outranks a teammate
+/// reviewer's, which outranks an ordinary peer's — without forbidding any of
+/// them. Absent (`None`) arbitrates as an ordinary peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRole {
+    /// The human operator's intent, relayed via the lead. Ranks highest.
+    Human,
+    /// The team lead agent.
+    Lead,
+    /// A teammate acting as a reviewer/monitor of another agent.
+    Reviewer,
+    /// An ordinary peer teammate.
+    Peer,
+}
+
 /// One entry in `inboxes/{agent}.json` — mirrors Claude's `TeammateMessage`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TeammateMessage {
     pub from: String,
     pub text: String,
@@ -119,6 +155,12 @@ pub struct TeammateMessage {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Semantic category for arbitration. `None` = unclassified FIFO chatter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<MessageKind>,
+    /// Who the message speaks for, for correction ordering. `None` = ordinary peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_role: Option<SourceRole>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,6 +450,7 @@ mod tests {
                 read: false,
                 color: None,
                 summary: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -422,6 +465,7 @@ mod tests {
                 read: false,
                 color: Some("green".to_string()),
                 summary: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -456,6 +500,7 @@ mod tests {
                 read: false,
                 color: None,
                 summary: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -473,6 +518,7 @@ mod tests {
                 read: false,
                 color: None,
                 summary: None,
+                ..Default::default()
             },
         )
         .unwrap();

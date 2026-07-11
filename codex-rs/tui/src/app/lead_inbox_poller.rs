@@ -385,6 +385,7 @@ mod tests {
             read: false,
             color: color.map(str::to_string),
             summary: summary.map(str::to_string),
+            ..Default::default()
         }
     }
 
