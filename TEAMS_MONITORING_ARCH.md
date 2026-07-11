@@ -36,8 +36,14 @@ Truth source: 本仓库现有 crate（`codex-file-watcher`）+ Claude Code sourc
 
 → **最优方案 = 用 file-watcher 把 inbox 轮询换成事件驱动 push**。lead/teammate 不再 `sleep(1s/500ms)` 空转，而是 `rx.recv().await` 阻塞等 OS 通知，来了才读 inbox。零空轮询，延迟趋近 0，且 debounce 兜底防高频写。
 
-**不变量 2**：agent 的对话上下文是**单一序列化资源**（single-writer）。
-→ 多个 teammate 并发对同一 worker 注入 = 上下文竞争撕裂。**必须 single-writer 纠偏**：只有 lead 能下发纠偏，其他 teammate 观察 + 建议，lead 单点汇总。
+**不变量 2（修正）**：agent 的对话上下文是**单一序列化资源**，但 inbox 的 FIFO 已经**物理串行化**了并发写入——不会撕裂单个 turn。真正的问题**不是"禁止多写者"**（那会阉割 reviewer→主agent 直接纠偏这个核心能力），而是**多个纠偏源并发时的语义协调**。
+
+→ **正确模型 = 多源仲裁（multi-source arbitration），不是 single-writer 互斥**：
+- teammate **可以**当审查员：观察主 agent → 汇报 → **直接 peer 纠偏**（保留，这是核心能力）。
+- teammate 间 **可以** a2a 讨论/脑暴（逆向/渗透的启发性思考）。
+- 冲突协调靠**优先级仲裁**，不靠禁止写入。地基已存在：`select_next_inbox` 已实现 `shutdown > lead > FIFO` 三级优先级。
+- **人类 peer + teammate peer 的协调**：人类（经 lead）的纠偏优先级最高，teammate 纠偏次之，FIFO 兜底。多个 teammate 同时纠偏 → 按到达顺序 FIFO 串行注入（inbox 已保证），worker 逐条处理，不撕裂上下文。
+- 增强方向：给 mailbox 消息加 `kind`（progress/report/correction/discussion）+ `source_role`（human/lead/reviewer/peer），让 `select_next_inbox` 能按语义优先级仲裁，而非纯 FIFO。
 
 **不变量 3**：teammate 只在 **turn 边界** push idle（10 词摘要）——turn 中途漂移看不到，信息太薄。
 → 增强为**语义里程碑 push**：teammate 在工具调用边界主动写结构化进度到 lead inbox。**事件驱动**（真的产生进度才写），非定时。
@@ -50,9 +56,12 @@ Truth source: 本仓库现有 crate（`codex-file-watcher`）+ Claude Code sourc
 - watch 路径：lead watch 自己的 `inboxes/{lead}.json`；teammate watch `inboxes/{self}.json`。
 - **首次立即读一次**（catch 已存在的未读），之后纯事件驱动。
 
-### B. single-writer 纠偏（缺口 #3）
-- `team_send` target=member 时，校验 sender：lead → 允许；非 lead teammate → 拒绝并提示"向 lead 建议，由 lead 下发"。
-- 观察是只读的（file-watcher 订阅），不产生写冲突。
+### B. 多源仲裁（缺口 #3，修正后）
+**不是** single-writer 互斥。teammate 保留观察 + 汇报 + 直接 peer 纠偏的完整能力（reviewer 场景的核心）。协调靠优先级仲裁：
+- mailbox 消息扩展 `kind`（progress/report/correction/discussion）+ `source_role`（human/lead/reviewer/peer）。
+- `select_next_inbox` 从 `shutdown > lead > FIFO` 扩展为 `shutdown > human-correction > lead > reviewer-correction > peer-discussion > FIFO`。
+- 多个 teammate 同时纠偏：inbox FIFO 已物理串行化，worker 逐条处理不撕裂。仲裁决定"先处理谁"，不丢弃任何一方。
+- 人类 peer（经 lead）与 teammate peer 并存：人类优先级最高，但 teammate 纠偏不被禁止，只是排在人类之后。
 
 ### C. 语义里程碑 push（缺口 #2 增强）
 - teammate runner 在 `run_one_turn` 的工具边界，可选 push 结构化进度事件到 lead inbox（复用 idle 通道，加 `kind: progress`）。
