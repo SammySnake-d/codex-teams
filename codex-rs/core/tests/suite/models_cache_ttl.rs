@@ -357,6 +357,7 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
                 description: "medium".to_string(),
             },
         ],
+        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
         supported_in_api: true,

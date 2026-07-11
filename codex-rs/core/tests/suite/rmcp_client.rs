@@ -1642,6 +1642,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                     effort: codex_protocol::openai_models::ReasoningEffort::Medium,
                     description: "Medium".to_string(),
                 }],
+                supports_reasoning_summaries: false,
                 shell_type: ConfigShellToolType::Default,
                 visibility: ModelVisibility::List,
                 supported_in_api: true,

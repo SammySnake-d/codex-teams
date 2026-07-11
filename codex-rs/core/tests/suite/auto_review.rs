@@ -227,6 +227,7 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         }],
+        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
         supported_in_api: true,

@@ -16,6 +16,7 @@ fn model_with_shell_type(shell_type: ConfigShellToolType) -> ModelInfo {
         description: None,
         default_reasoning_level: None,
         supported_reasoning_levels: Vec::new(),
+        supports_reasoning_summaries: false,
         shell_type,
         visibility: ModelVisibility::List,
         supported_in_api: true,

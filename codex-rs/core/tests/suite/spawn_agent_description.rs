@@ -54,6 +54,7 @@ fn test_model_info(
         description: Some(description.to_string()),
         default_reasoning_level: Some(default_reasoning_level),
         supported_reasoning_levels,
+        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility,
         supported_in_api: true,

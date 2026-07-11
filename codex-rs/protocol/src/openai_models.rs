@@ -672,6 +672,7 @@ mod tests {
             description: None,
             default_reasoning_level: None,
             supported_reasoning_levels: vec![],
+            supports_reasoning_summaries: false,
             shell_type: ConfigShellToolType::ShellCommand,
             visibility: ModelVisibility::List,
             supported_in_api: true,

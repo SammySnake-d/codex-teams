@@ -70,6 +70,7 @@ async fn models_client_hits_models_endpoint() {
                     description: ReasoningEffort::High.to_string(),
                 },
             ],
+            supports_reasoning_summaries: false,
             shell_type: ConfigShellToolType::ShellCommand,
             visibility: ModelVisibility::List,
             supported_in_api: true,
