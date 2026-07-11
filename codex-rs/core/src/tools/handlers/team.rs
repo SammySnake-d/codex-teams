@@ -75,12 +75,14 @@ enum TeamTool {
     ClaudeTaskList,
     ClaudeTaskGet,
     TeamEventList,
+    TeamWatch,
+    TeamUnwatch,
     TeamMemberStop,
     TeamStop,
 }
 
 impl TeamTool {
-    const ALL: [TeamTool; 19] = [
+    const ALL: [TeamTool; 21] = [
         TeamTool::CreateTeam,
         TeamTool::ClaudeTeamCreate,
         TeamTool::ListTeams,
@@ -98,6 +100,8 @@ impl TeamTool {
         TeamTool::ClaudeTaskList,
         TeamTool::ClaudeTaskGet,
         TeamTool::TeamEventList,
+        TeamTool::TeamWatch,
+        TeamTool::TeamUnwatch,
         TeamTool::TeamMemberStop,
         TeamTool::TeamStop,
     ];
@@ -121,6 +125,8 @@ impl TeamTool {
             TeamTool::ClaudeTaskList => "TaskList",
             TeamTool::ClaudeTaskGet => "TaskGet",
             TeamTool::TeamEventList => "team_event_list",
+            TeamTool::TeamWatch => "team_watch",
+            TeamTool::TeamUnwatch => "team_unwatch",
             TeamTool::TeamMemberStop => "team_member_stop",
             TeamTool::TeamStop => "team_stop",
         }
@@ -139,6 +145,10 @@ impl TeamTool {
                 | TeamTool::TeamTaskList
                 | TeamTool::ClaudeTaskList
                 | TeamTool::ClaudeTaskGet
+                // A reviewer IS a teammate process; it must be able to subscribe
+                // to / unsubscribe from the agent it observes.
+                | TeamTool::TeamWatch
+                | TeamTool::TeamUnwatch
         )
     }
 
@@ -161,6 +171,8 @@ impl TeamTool {
             TeamTool::ClaudeTaskList => team_spec::create_claude_task_list_tool(),
             TeamTool::ClaudeTaskGet => team_spec::create_claude_task_get_tool(),
             TeamTool::TeamEventList => team_spec::create_team_event_list_tool(),
+            TeamTool::TeamWatch => team_spec::create_team_watch_tool(),
+            TeamTool::TeamUnwatch => team_spec::create_team_unwatch_tool(),
             TeamTool::TeamMemberStop => team_spec::create_team_member_stop_tool(),
             TeamTool::TeamStop => team_spec::create_team_stop_tool(),
         }
@@ -174,6 +186,7 @@ impl TeamTool {
         const TEAM_STATUS_SEARCH: &str =
             "codex teams team status roster list_teams team_status team_event_list";
         const TEAM_STOP_SEARCH: &str = "codex teams team stop shutdown team_member_stop team_stop";
+        const TEAM_WATCH_SEARCH: &str = "codex teams team watch observe monitor review reviewer subscribe 观察 审查 监控 team_watch team_unwatch";
         match self {
             TeamTool::CreateTeam | TeamTool::ClaudeTeamCreate => TEAM_CREATE_SEARCH,
             TeamTool::TeamSpawnMember => "team_spawn_member",
@@ -191,6 +204,7 @@ impl TeamTool {
             TeamTool::ListTeams | TeamTool::TeamStatus | TeamTool::TeamEventList => {
                 TEAM_STATUS_SEARCH
             }
+            TeamTool::TeamWatch | TeamTool::TeamUnwatch => TEAM_WATCH_SEARCH,
             TeamTool::TeamMemberStop | TeamTool::TeamStop => TEAM_STOP_SEARCH,
         }
     }
@@ -757,6 +771,8 @@ async fn handle_team_tool(
         TeamTool::ClaudeTaskList => claude_task_list(session, turn, arguments).await,
         TeamTool::ClaudeTaskGet => claude_task_get(session, turn, arguments).await,
         TeamTool::TeamEventList => team_event_list(session, arguments).await,
+        TeamTool::TeamWatch => team_watch(session, turn, arguments, WatchAction::Watch).await,
+        TeamTool::TeamUnwatch => team_watch(session, turn, arguments, WatchAction::Unwatch).await,
         TeamTool::TeamMemberStop => team_member_stop(session, turn, arguments).await,
         TeamTool::TeamStop => team_stop(session, turn, arguments).await,
     }
@@ -908,6 +924,147 @@ async fn team_status(
     )
     .await?;
     json_output(&TeamStatusResult { snapshot }, Some(true), "team_status")
+}
+
+/// Whether a `team_watch`/`team_unwatch` call adds or removes a subscription.
+#[derive(Debug, Clone, Copy)]
+enum WatchAction {
+    Watch,
+    Unwatch,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TeamWatchArgs {
+    /// Team id from create_team / list_teams. Optional for a teammate process,
+    /// which resolves its team from launch context.
+    #[serde(default)]
+    team_id: Option<String>,
+    /// Display name of the teammate to observe (the working agent). Its tool
+    /// milestones will be delivered to the caller's inbox while subscribed.
+    agent_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TeamWatchResult {
+    watcher: String,
+    watching: String,
+    subscriptions: Vec<String>,
+    action: &'static str,
+}
+
+/// `team_watch` / `team_unwatch`: the CALLER subscribes to (or unsubscribes from)
+/// another teammate's mid-turn progress. Subscriptions live in the caller's own
+/// [`team_store::TeamFileMember::subscriptions`]; a working teammate's
+/// [`crate::team_coord::send_progress`] fans its milestones out to the lead plus
+/// every member subscribed to it. This is the reviewer observation channel: a
+/// reviewer teammate calls `team_watch(<worker>)`, then sees the worker's tool
+/// milestones injected as turns and can `team_send` a correction on drift.
+///
+/// The caller identity is derived, never trusted from the model: a teammate
+/// process subscribes ITSELF (its own `agent_name`); the lead subscribes the
+/// reserved lead name (already receives all progress, so this is effectively a
+/// no-op but kept symmetric).
+async fn team_watch(
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
+    arguments: String,
+    action: WatchAction,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    let args: TeamWatchArgs = parse_arguments(&arguments)?;
+    let target = args.agent_name.trim();
+    if target.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "agent_name must not be empty".to_string(),
+        ));
+    }
+
+    // Resolve (team_name, caller_name, teams_root) from identity or team_id.
+    let teams_root = teams_root_for_turn(turn.as_ref());
+    let (team_name, watcher) = if let Some(identity) = crate::team::teammate_identity() {
+        (identity.team.clone(), identity.agent_name.clone())
+    } else {
+        let team_id_arg = args.team_id.as_deref().ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "team_id is required when the team lead calls team_watch".to_string(),
+            )
+        })?;
+        let team_id = id_from_str("team", team_id_arg)?;
+        require_team_participant(session.as_ref(), team_id).await?;
+        let team_name = registry_team_name(session.as_ref(), team_id).await?;
+        (team_name, team_store::TEAM_LEAD_NAME.to_string())
+    };
+
+    if target == watcher {
+        return Err(FunctionCallError::RespondToModel(
+            "an agent cannot watch itself".to_string(),
+        ));
+    }
+
+    // Verify the target is a real member so a typo does not silently create a
+    // dangling subscription that never delivers.
+    let config = team_store::read_config(&teams_root, &team_name).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
+    })?;
+    let target_exists = config
+        .as_ref()
+        .is_some_and(|cfg| cfg.members.iter().any(|m| m.name == target));
+    if !target_exists {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "no teammate named '{target}' in team '{team_name}'"
+        )));
+    }
+
+    let target_owned = target.to_string();
+    let watcher_for_update = watcher.clone();
+    team_store::update_config(&teams_root, &team_name, move |cfg| {
+        if let Some(member) = cfg
+            .members
+            .iter_mut()
+            .find(|m| m.name == watcher_for_update)
+        {
+            match action {
+                WatchAction::Watch => {
+                    if !member.subscriptions.iter().any(|s| s == &target_owned) {
+                        member.subscriptions.push(target_owned.clone());
+                    }
+                }
+                WatchAction::Unwatch => {
+                    member.subscriptions.retain(|s| s != &target_owned);
+                }
+            }
+        }
+    })
+    .map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to update subscriptions: {err}"))
+    })?;
+
+    // Read back the resulting subscription list for the caller.
+    let subscriptions = team_store::read_config(&teams_root, &team_name)
+        .ok()
+        .flatten()
+        .and_then(|cfg| {
+            cfg.members
+                .into_iter()
+                .find(|m| m.name == watcher)
+                .map(|m| m.subscriptions)
+        })
+        .unwrap_or_default();
+
+    let result = TeamWatchResult {
+        watcher,
+        watching: target.to_string(),
+        subscriptions,
+        action: match action {
+            WatchAction::Watch => "watch",
+            WatchAction::Unwatch => "unwatch",
+        },
+    };
+    let tool_name = match action {
+        WatchAction::Watch => "team_watch",
+        WatchAction::Unwatch => "team_unwatch",
+    };
+    json_output(&result, Some(true), tool_name)
 }
 
 async fn team_spawn_member(
@@ -2102,6 +2259,7 @@ struct MessageClassification {
 }
 
 impl MessageClassification {
+    #[allow(dead_code)]
     fn none() -> Self {
         Self::default()
     }

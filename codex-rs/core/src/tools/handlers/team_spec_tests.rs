@@ -117,3 +117,34 @@ fn claude_send_message_description_carries_visibility_and_delivery_rules() {
     assert!(to_description.contains("\"*\" for broadcast"));
     assert!(summary_description.contains("required when message is a string"));
 }
+
+#[test]
+fn team_watch_tool_shape() {
+    let ToolSpec::Function(function) = create_team_watch_tool() else {
+        panic!("expected function tool");
+    };
+    assert_eq!(function.name, "team_watch");
+    let properties = function
+        .parameters
+        .properties
+        .expect("team_watch should have parameters");
+    assert!(properties.contains_key("agent_name"));
+    assert!(properties.contains_key("team_id"));
+    assert_eq!(
+        function.parameters.required.as_ref(),
+        Some(&vec!["agent_name".to_string()])
+    );
+    // The description must frame it as the reviewer/observation channel so the
+    // model reaches for it when told to review another agent.
+    assert!(function.description.contains("reviewer"));
+    assert!(function.description.contains("correction"));
+
+    let ToolSpec::Function(unwatch) = create_team_unwatch_tool() else {
+        panic!("expected function tool");
+    };
+    assert_eq!(unwatch.name, "team_unwatch");
+    assert_eq!(
+        unwatch.parameters.required.as_ref(),
+        Some(&vec!["agent_name".to_string()])
+    );
+}

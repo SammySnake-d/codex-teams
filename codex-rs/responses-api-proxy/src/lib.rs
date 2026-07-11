@@ -195,6 +195,29 @@ impl MockTeamsSmokeState {
             );
         }
 
+        // Watch probe (scripts/teams_reviewer_live_test.sh): when a teammate's
+        // turn carries "WATCH-PROBE <target>", tell it to call team_watch on that
+        // target so we can prove team_watch writes a subscription end-to-end. The
+        // marker embeds the target as the last whitespace token after WATCH-PROBE.
+        if contains_text(&texts, "WATCH-PROBE") {
+            if function_output_text(body, "mock-watch-call").is_some() {
+                return self.assistant_response("WATCH_PROBE_COMPLETE");
+            }
+            let joined = texts.join(" ");
+            let target = joined
+                .split_whitespace()
+                .skip_while(|t| !t.contains("WATCH-PROBE"))
+                .nth(1)
+                .unwrap_or("worker")
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+                .to_string();
+            return self.function_call_response(
+                "mock-watch-call",
+                "team_watch",
+                serde_json::json!({ "agent_name": target }),
+            );
+        }
+
         if contains_text(
             &texts,
             "Lead-to-member smoke message from local mock Responses provider.",

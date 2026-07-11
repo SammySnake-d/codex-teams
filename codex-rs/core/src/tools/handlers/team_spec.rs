@@ -279,6 +279,53 @@ pub(crate) fn create_team_status_tool() -> ToolSpec {
     )
 }
 
+pub(crate) fn create_team_watch_tool() -> ToolSpec {
+    function_tool(
+        "team_watch",
+        "Observe a teammate: subscribe to a working teammate's mid-turn tool milestones (running a command, editing files, calling a tool). While subscribed, that teammate's progress is delivered to your inbox as it happens, so you can act as a reviewer — watch for drift and send a team_send with kind=\"correction\" to redirect it. Use this when you are assigned to review or monitor a named teammate. Call team_unwatch to stop.",
+        BTreeMap::from([
+            (
+                "agent_name".to_string(),
+                JsonSchema::string(Some(
+                    "Display name of the teammate to observe (the working agent)."
+                        .to_string(),
+                )),
+            ),
+            (
+                "team_id".to_string(),
+                JsonSchema::string(Some(
+                    "Team id from create_team or list_teams. Required when the team lead calls team_watch; a teammate process may omit it (resolved from launch context)."
+                        .to_string(),
+                )),
+            ),
+        ]),
+        Some(vec!["agent_name".to_string()]),
+    )
+}
+
+pub(crate) fn create_team_unwatch_tool() -> ToolSpec {
+    function_tool(
+        "team_unwatch",
+        "Stop observing a teammate: remove a subscription created with team_watch. Its progress milestones will no longer be delivered to your inbox.",
+        BTreeMap::from([
+            (
+                "agent_name".to_string(),
+                JsonSchema::string(Some(
+                    "Display name of the teammate to stop observing.".to_string(),
+                )),
+            ),
+            (
+                "team_id".to_string(),
+                JsonSchema::string(Some(
+                    "Team id from create_team or list_teams. Required when the team lead calls team_unwatch; a teammate process may omit it."
+                        .to_string(),
+                )),
+            ),
+        ]),
+        Some(vec!["agent_name".to_string()]),
+    )
+}
+
 pub(crate) fn create_team_spawn_member_tool() -> ToolSpec {
     function_tool(
         "team_spawn_member",

@@ -390,7 +390,7 @@ impl ChatWidget {
             .take(10)
             .collect::<Vec<_>>()
             .join(" ");
-        let _ = crate::legacy_core::team_coord::send_progress_to_lead(
+        let _ = crate::legacy_core::team_coord::send_progress(
             &teams_root,
             &team,
             &agent_name,

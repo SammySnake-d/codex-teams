@@ -40,6 +40,7 @@ use crate::team_store::MessageKind;
 use crate::team_store::SourceRole;
 use crate::team_store::TEAM_LEAD_NAME;
 use crate::team_store::TeammateMessage;
+use crate::team_store::read_config;
 use crate::team_store::read_unread;
 use crate::team_store::sanitize;
 use crate::team_store::tasks_dir;
@@ -199,17 +200,60 @@ pub fn send_idle_notification(
     )
 }
 
-/// Push a mid-turn PROGRESS milestone from a working teammate to the lead's
-/// inbox (gap #2 depth: monitoring at TOOL-CALL granularity, not just turn
-/// boundaries). Unlike [`send_idle_notification`] — a JSON envelope the lead
-/// poller filters OUT of the model view — this is a plain, model-visible
-/// [`TeammateMessage`] so the lead's model can watch a teammate's work unfold
-/// and correct drift the moment it starts, not only when the turn ends.
+/// Push a mid-turn PROGRESS milestone from a working teammate (gap #2 depth:
+/// monitoring at TOOL-CALL granularity, not just turn boundaries). Unlike
+/// [`send_idle_notification`] — a JSON envelope the lead poller filters OUT of
+/// the model view — this is a plain, model-visible [`TeammateMessage`] so a
+/// watcher's model can see the work unfold and correct drift the moment it
+/// starts, not only when the turn ends.
+///
+/// Recipients (gap #1 — reviewer observation channel): the team LEAD always
+/// receives it (central monitoring), PLUS any member whose `subscriptions`
+/// contains `from_agent` — i.e. a reviewer teammate that called `team_watch` to
+/// observe this worker. This is what lets a reviewer directly watch another
+/// teammate rather than everything funnelling through the lead. `from_agent`
+/// never receives its own progress, and each recipient is delivered once.
 ///
 /// It is tagged [`MessageKind::Progress`] + [`SourceRole::Peer`] so it arbitrates
-/// BELOW any correction in the lead's inbox: routine progress never preempts a
-/// human/reviewer correction the lead is also processing. `summary` rides in the
-/// mailbox `summary` field for compact UI notifications.
+/// BELOW any correction in a recipient's inbox: routine progress never preempts a
+/// human/reviewer correction. `summary` rides the mailbox `summary` field for
+/// compact UI notifications. A missing/unreadable config degrades to lead-only
+/// delivery, so this never regresses below the pre-gap-1 behavior.
+pub fn send_progress(
+    teams_root: &Path,
+    team: &str,
+    from_agent: &str,
+    color: Option<String>,
+    text: &str,
+    summary: Option<String>,
+) -> io::Result<()> {
+    let recipients = progress_recipients(teams_root, team, from_agent);
+    let mut last_err: Option<io::Error> = None;
+    for recipient in recipients {
+        let msg = TeammateMessage {
+            from: from_agent.to_string(),
+            text: text.to_string(),
+            timestamp: now_rfc3339(),
+            read: false,
+            color: color.clone(),
+            summary: summary.clone(),
+            kind: Some(MessageKind::Progress),
+            source_role: Some(SourceRole::Peer),
+        };
+        // Best-effort per recipient: one failed mailbox write must not block the
+        // others (a reviewer's inbox lock contention shouldn't starve the lead).
+        if let Err(err) = write_to_mailbox(teams_root, team, &recipient, msg) {
+            last_err = Some(err);
+        }
+    }
+    match last_err {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// Backwards-compatible alias for [`send_progress`]. Retained so any external
+/// caller keeps compiling; new code should call `send_progress` directly.
 pub fn send_progress_to_lead(
     teams_root: &Path,
     team: &str,
@@ -218,21 +262,27 @@ pub fn send_progress_to_lead(
     text: &str,
     summary: Option<String>,
 ) -> io::Result<()> {
-    write_to_mailbox(
-        teams_root,
-        team,
-        TEAM_LEAD_NAME,
-        TeammateMessage {
-            from: from_agent.to_string(),
-            text: text.to_string(),
-            timestamp: now_rfc3339(),
-            read: false,
-            color,
-            summary,
-            kind: Some(MessageKind::Progress),
-            source_role: Some(SourceRole::Peer),
-        },
-    )
+    send_progress(teams_root, team, from_agent, color, text, summary)
+}
+
+/// Resolve the recipient set for a progress milestone from `from_agent`: the
+/// team lead plus every member subscribed to `from_agent` (deduped, excluding
+/// `from_agent` itself). Falls back to lead-only if the config is missing.
+fn progress_recipients(teams_root: &Path, team: &str, from_agent: &str) -> Vec<String> {
+    let mut recipients = vec![TEAM_LEAD_NAME.to_string()];
+    if let Ok(Some(config)) = read_config(teams_root, team) {
+        for member in config.members {
+            if member.name == from_agent || member.name == TEAM_LEAD_NAME {
+                continue;
+            }
+            if member.subscriptions.iter().any(|s| s == from_agent)
+                && !recipients.iter().any(|r| r == &member.name)
+            {
+                recipients.push(member.name);
+            }
+        }
+    }
+    recipients
 }
 
 // ---------------------------------------------------------------------------
@@ -820,6 +870,99 @@ mod tests {
             .unwrap()
             .as_nanos();
         temp_dir().join(format!("codex-team-coord-{nanos}"))
+    }
+
+    /// Seed a team config with the given members (name, subscriptions).
+    fn seed_team(root: &Path, team: &str, members: &[(&str, &[&str])]) {
+        crate::team_store::update_config(root, team, |cfg| {
+            cfg.name = team.to_string();
+            cfg.lead_agent_id = crate::team_store::agent_id(TEAM_LEAD_NAME, team);
+            for (name, subs) in members {
+                cfg.members.push(crate::team_store::TeamFileMember {
+                    agent_id: crate::team_store::agent_id(name, team),
+                    name: (*name).to_string(),
+                    subscriptions: subs.iter().map(|s| s.to_string()).collect(),
+                    is_active: Some(true),
+                    ..Default::default()
+                });
+            }
+        })
+        .expect("seed team config");
+    }
+
+    #[test]
+    fn progress_recipients_includes_lead_and_subscribers() {
+        let root = unique_root();
+        let team = "obs";
+        // worker is observed by reviewer (reviewer.subscriptions=[worker]);
+        // bystander subscribes to someone else.
+        seed_team(
+            &root,
+            team,
+            &[
+                ("worker", &[]),
+                ("reviewer", &["worker"]),
+                ("bystander", &["someone-else"]),
+            ],
+        );
+        let mut got = progress_recipients(&root, team, "worker");
+        got.sort();
+        // lead always, plus reviewer (subscribed to worker); NOT bystander.
+        // (sorted alphabetically for a stable assertion)
+        assert_eq!(
+            got,
+            vec!["reviewer".to_string(), TEAM_LEAD_NAME.to_string()]
+        );
+    }
+
+    #[test]
+    fn progress_recipients_excludes_self_and_missing_config_is_lead_only() {
+        let root = unique_root();
+        let team = "obs2";
+        // A member that (nonsensically) subscribes to itself must NOT receive its
+        // own progress.
+        seed_team(&root, team, &[("worker", &["worker"])]);
+        assert_eq!(
+            progress_recipients(&root, team, "worker"),
+            vec![TEAM_LEAD_NAME.to_string()]
+        );
+        // No config at all -> lead only (never regress below pre-gap-1 behavior).
+        assert_eq!(
+            progress_recipients(&unique_root(), "nope", "worker"),
+            vec![TEAM_LEAD_NAME.to_string()]
+        );
+    }
+
+    #[test]
+    fn send_progress_fans_out_to_lead_and_subscriber() {
+        let root = unique_root();
+        let team = "obs3";
+        seed_team(&root, team, &[("worker", &[]), ("reviewer", &["worker"])]);
+        send_progress(
+            &root,
+            team,
+            "worker",
+            Some("blue".to_string()),
+            "running: echo hi",
+            Some("running echo".to_string()),
+        )
+        .expect("send progress");
+
+        // Both the lead and the subscribed reviewer got a Progress message.
+        for who in [TEAM_LEAD_NAME, "reviewer"] {
+            let msgs = crate::team_store::read_mailbox(&root, team, who).unwrap_or_default();
+            assert_eq!(msgs.len(), 1, "{who} should have exactly one message");
+            assert_eq!(msgs[0].from, "worker");
+            assert_eq!(msgs[0].kind, Some(MessageKind::Progress));
+            assert!(msgs[0].text.contains("running: echo hi"));
+        }
+        // A non-subscriber has no mailbox entry.
+        assert!(
+            crate::team_store::read_mailbox(&root, team, "worker")
+                .unwrap_or_default()
+                .is_empty(),
+            "worker must not receive its own progress"
+        );
     }
 
     #[test]

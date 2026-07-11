@@ -76,3 +76,20 @@ Truth source: 本仓库现有 crate（`codex-file-watcher`）+ Claude Code sourc
 - file-watcher：live smoke 证明 lead 在 teammate 写 inbox 后 **无 1s 轮询延迟**收到（观测注入延迟 < 200ms）。
 - single-writer：live 构造两 teammate，非 lead 发纠偏被拒。
 - TUI：tmux send-keys 注入 @提及/切换/send，真实交互验证。
+
+## Gap #1 修正：reviewer 观察通道（peer 直接观察，非中心化）
+
+**问题**：`send_progress_to_lead` 硬编码进度只发给 lead。reviewer teammate 收不到另一个 working teammate (W) 的实时工具边界进度——监控是中心化的（都汇报给 lead），不是用户要的「reviewer 直接盯着 W」。
+
+**第一性原理**：观察 = 被通知状态变化。W 已在工具边界产生 progress 事件（里程碑 push）。缺的是让这些事件到达订阅了 W 的 reviewer。
+
+**设计（订阅制，非广播——精确、无上下文污染）**：
+1. `TeamFileMember.subscriptions: Vec<String>`（已存在，一直空）语义定为「我订阅观察的 agent 名字列表」。
+2. 新工具 `team_watch(agent_name)` / `team_unwatch(agent_name)`：调用者把 agent_name 加/移出自己的 subscriptions。必须对 teammate 进程可用（reviewer 是 teammate 进程）。
+3. `send_progress_to_lead` 泛化为 `send_progress`：recipient = lead + 所有 subscriptions 包含 from_agent 的 members。遍历 config.members。
+4. reviewer 的 inbox poller 收到 W 的 progress（kind=Progress, from=W）→ 注入成 turn（现有机制）→ reviewer 模型判断走偏 → `team_send correction`（kind=correction，系统赋予 Reviewer 权威，仲裁优先）。
+5. lead 仍收到所有 progress（保持现有中心监控）。
+
+**闭环**：lead spawn reviewer（prompt「审查 W」）→ reviewer 调 team_watch(W) → W 干活每个工具边界 push progress → lead + reviewer 都收到 → reviewer 看到走偏 → team_send correction 给 W → W inbox 仲裁优先处理。这就是「审查员实时观察 + 纠偏」。
+
+**live 验证**：mock + 真实 config 都要证明：reviewer watch W → W 跑工具 → reviewer 收到 progress → reviewer 发 correction → W 收到。
