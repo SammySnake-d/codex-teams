@@ -357,7 +357,24 @@ impl ToolRegistry {
     }
 
     fn tool(&self, name: &ToolName) -> Option<Arc<dyn CoreToolRuntime>> {
-        self.tools.get(name).map(Arc::clone)
+        if let Some(tool) = self.tools.get(name) {
+            return Some(Arc::clone(tool));
+        }
+        // Compatibility with OpenAI-compatible proxies that echo the tool name
+        // into the `namespace` field, e.g. a call to `create_team` arrives as
+        // `{ namespace: "create_team", name: "create_team" }`. Our tools are
+        // registered plain (namespace: None), so the exact lookup misses and the
+        // model sees a spurious "unsupported call". When the namespace merely
+        // duplicates the name, retry the plain name before giving up.
+        if let Some(namespace) = name.namespace.as_deref()
+            && namespace == name.name
+        {
+            return self
+                .tools
+                .get(&ToolName::plain(name.name.clone()))
+                .map(Arc::clone);
+        }
+        None
     }
 
     #[cfg(test)]

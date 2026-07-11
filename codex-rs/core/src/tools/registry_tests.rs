@@ -179,6 +179,42 @@ fn handler_looks_up_namespaced_aliases_explicitly() {
     );
 }
 
+#[test]
+fn handler_tolerates_namespace_that_duplicates_the_name() {
+    // Some OpenAI-compatible proxies echo the tool name into the `namespace`
+    // field, so a call to `create_team` arrives as
+    // `{ namespace: "create_team", name: "create_team" }`. Our tools register
+    // plain (namespace: None); the lookup must fall back to the plain name so the
+    // model does not see a spurious "unsupported call".
+    let plain_name = codex_tools::ToolName::plain("create_team");
+    let handler = Arc::new(TestHandler {
+        tool_name: plain_name.clone(),
+    }) as Arc<dyn CoreToolRuntime>;
+    let registry = ToolRegistry::new(HashMap::from([(plain_name.clone(), Arc::clone(&handler))]));
+
+    // The duplicated-namespace form resolves to the plain handler.
+    let duplicated = registry.tool(&codex_tools::ToolName::namespaced(
+        "create_team",
+        "create_team",
+    ));
+    assert!(
+        duplicated
+            .as_ref()
+            .is_some_and(|resolved| Arc::ptr_eq(resolved, &handler)),
+        "duplicated namespace should fall back to the plain tool"
+    );
+
+    // A genuinely different namespace must still miss (no over-broad fallback).
+    let unrelated = registry.tool(&codex_tools::ToolName::namespaced(
+        "some_other_ns",
+        "create_team",
+    ));
+    assert!(
+        unrelated.is_none(),
+        "a non-duplicating namespace must not resolve to the plain tool"
+    );
+}
+
 #[tokio::test]
 async fn function_tools_expose_default_hook_payloads_and_rewrites() -> anyhow::Result<()> {
     let (session, turn) = crate::session::tests::make_session_and_context().await;

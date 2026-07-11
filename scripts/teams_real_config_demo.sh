@@ -60,7 +60,10 @@ sleep 3
 if capture | grep -qiE '401|api.openai.com|Test API Key'; then
   note "WARNING: saw a 401/openai marker on REAL config — investigate"; capture | grep -iE '401|openai' | head
 else ok "no 401 / api.openai.com / Test API Key on real config"; fi
-sleep 3
+# Let ALL startup banners settle (MCP failures, under-development warnings, hook
+# trust) so the composer is genuinely focused before typing — otherwise Enter is
+# swallowed by a transient view and the prompt never submits.
+sleep 8
 
 # Give the lead one concrete instruction. Phrased IMPERATIVELY so the model acts
 # immediately via tool calls instead of exploring the codebase first (observed:
@@ -72,14 +75,21 @@ Step 2: call team_spawn_member to spawn a teammate named scout with a prompt tel
 Step 3: wait for scout's reply, then tell me you received REAL_A2A_OK. \
 Start with create_team right now."
 tmux send-keys -t "$PANE" -l "$PROMPT"
-sleep 0.5
+sleep 1
 tmux send-keys -t "$PANE" Enter
-# Confirm the turn actually started (left the composer).
-for attempt in 1 2 3; do
-  sleep 1.5
-  capture | grep -qiE 'working|esc to interrupt|create_team|team started' && break
+# Confirm the turn actually STARTED (the prompt left the composer '›' line and a
+# working/tool indicator appeared). Retry Enter a few times if a transient view
+# swallowed it.
+submitted=0
+for attempt in $(seq 1 5); do
+  sleep 2
+  if capture | grep -qiE 'working|esc to interrupt|create_team|team started|thinking|Team started'; then
+    submitted=1; break
+  fi
+  # still sitting in the composer? nudge Enter again.
   tmux send-keys -t "$PANE" Enter
 done
+[ "$submitted" = 1 ] && ok "prompt submitted (turn started)" || note "prompt may not have submitted; continuing to watch disk"
 
 log "watch the REAL team store appear under ~/.codex/teams/${DEMO_TEAM}"
 TEAMDIR="$REAL_HOME/teams"

@@ -384,13 +384,20 @@ fn team_tools_exposure(turn_context: &TurnContext) -> ToolExposure {
         return ToolExposure::Direct;
     }
     if search_tool_enabled(turn_context) && namespace_tools_enabled(turn_context) {
+        // With tool_search available, defer Teams tools so they are discovered on
+        // demand rather than crowding the initial model-visible list.
         ToolExposure::Deferred
     } else {
-        // Keep lead-side Teams dispatch registered for explicit/internal calls,
-        // but do not put Teams tools directly in the model-visible tool list.
-        // Without tool_search, direct exposure lets ordinary "subagent" or
-        // "parallel agents" requests choose split-pane Teams tools.
-        ToolExposure::Hidden
+        // Without tool_search, expose Teams tools DIRECTLY so the lead can
+        // actually create teams and spawn teammates. Teams tools are a
+        // first-class capability alongside `spawn_agent`, gated by the explicit
+        // (default-off) `teams` feature — not something to hide behind a search
+        // tool the provider may not support. Native sub-agents never reach this
+        // path: `team_tools_enabled` already excludes `SessionSource::SubAgent`,
+        // so a spawned sub-agent still cannot see Teams tools. The Teams tool
+        // search hints + prompt guidance keep ordinary "subagent"/"parallel
+        // agents" requests on the native `spawn_agent` path.
+        ToolExposure::Direct
     }
 }
 

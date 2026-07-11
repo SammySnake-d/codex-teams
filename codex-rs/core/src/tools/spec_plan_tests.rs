@@ -1439,10 +1439,12 @@ async fn teams_tools_are_lead_only_and_do_not_replace_spawn_agent() {
     })
     .await;
     assert_v2_spawn_agent_available(&lead);
-    lead.assert_visible_lacks(&team_tools);
+    // Without tool_search, Teams tools are exposed DIRECTLY so the lead can
+    // actually use them (a first-class capability alongside spawn_agent).
+    lead.assert_visible_contains(&team_tools);
     lead.assert_registered_contains(&team_tools);
     for tool_name in team_tools {
-        assert_eq!(lead.exposure(tool_name), ToolExposure::Hidden);
+        assert_eq!(lead.exposure(tool_name), ToolExposure::Direct);
     }
 
     let spawned_subagent = probe(|turn| {
@@ -1486,7 +1488,7 @@ async fn teams_feature_disabled_omits_teams_tools_but_keeps_native_spawn_agent()
 }
 
 #[tokio::test]
-async fn hidden_teams_create_and_list_still_dispatch_without_tool_search() {
+async fn teams_create_and_list_are_direct_and_dispatch_without_tool_search() {
     let (session, mut turn) = make_session_and_context().await;
     set_features(&mut turn, &[Feature::MultiAgentV2, Feature::Teams]);
 
@@ -1503,9 +1505,12 @@ async fn hidden_teams_create_and_list_still_dispatch_without_tool_search() {
     );
     let plan_probe = ToolPlanProbe::from_router(&router);
     assert_v2_spawn_agent_available(&plan_probe);
-    plan_probe.assert_visible_lacks(&["create_team", "list_teams"]);
-    assert_eq!(plan_probe.exposure("create_team"), ToolExposure::Hidden);
-    assert_eq!(plan_probe.exposure("list_teams"), ToolExposure::Hidden);
+    // Without tool_search, Teams tools are directly visible AND dispatchable so
+    // the lead can create teams / spawn teammates on providers that don't
+    // advertise the search tool.
+    plan_probe.assert_visible_contains(&["create_team", "list_teams"]);
+    assert_eq!(plan_probe.exposure("create_team"), ToolExposure::Direct);
+    assert_eq!(plan_probe.exposure("list_teams"), ToolExposure::Direct);
 
     assert_teams_create_and_list_dispatch(&router, Arc::new(session), turn).await;
 }
