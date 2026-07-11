@@ -176,6 +176,25 @@ impl MockTeamsSmokeState {
         }
 
         let texts = collect_text_values(body);
+        // Milestone-push probe (scripts/teams_milestone_live_test.sh): when a
+        // teammate's turn carries this unique marker, tell it to run a shell
+        // command. That triggers a real ExecCommandBegin in the teammate, which
+        // must emit a `kind:progress` milestone to the lead's inbox. Keyed on a
+        // marker distinct from the smoke path so the deterministic smoke is
+        // untouched. The follow-up turn (shell output present) ends the probe.
+        if contains_text(&texts, "MILESTONE-PROBE") {
+            if contains_text(&texts, "MILESTONE-PROBE-DONE-MARKER") {
+                return self.assistant_response("MILESTONE_PROBE_COMPLETE");
+            }
+            return self.function_call_response(
+                "mock-milestone-shell",
+                "shell_command",
+                serde_json::json!({
+                    "command": "echo MILESTONE-PROBE-DONE-MARKER",
+                }),
+            );
+        }
+
         if contains_text(
             &texts,
             "Lead-to-member smoke message from local mock Responses provider.",

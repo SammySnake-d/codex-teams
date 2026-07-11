@@ -750,6 +750,11 @@ pub(crate) struct ChatWidget {
     next_status_line_workspace_headline_request_id: u64,
     // Last time a workspace headline fetch was requested.
     status_line_workspace_headline_last_requested_at: Option<Instant>,
+    // When running as a Teams teammate, the last time a mid-turn PROGRESS
+    // milestone was pushed to the lead. Throttles tool-call milestones so a busy
+    // teammate coalesces a burst into at most one push per interval. `None` until
+    // the first milestone of the process.
+    teammate_progress_last_push: Option<Instant>,
     // Set after the backend reports the workspace-message feature gate is disabled.
     status_line_workspace_messages_disabled: bool,
     // Current thread-goal status shown in the status line when plan mode is inactive.

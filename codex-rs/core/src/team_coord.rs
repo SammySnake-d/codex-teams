@@ -199,6 +199,42 @@ pub fn send_idle_notification(
     )
 }
 
+/// Push a mid-turn PROGRESS milestone from a working teammate to the lead's
+/// inbox (gap #2 depth: monitoring at TOOL-CALL granularity, not just turn
+/// boundaries). Unlike [`send_idle_notification`] — a JSON envelope the lead
+/// poller filters OUT of the model view — this is a plain, model-visible
+/// [`TeammateMessage`] so the lead's model can watch a teammate's work unfold
+/// and correct drift the moment it starts, not only when the turn ends.
+///
+/// It is tagged [`MessageKind::Progress`] + [`SourceRole::Peer`] so it arbitrates
+/// BELOW any correction in the lead's inbox: routine progress never preempts a
+/// human/reviewer correction the lead is also processing. `summary` rides in the
+/// mailbox `summary` field for compact UI notifications.
+pub fn send_progress_to_lead(
+    teams_root: &Path,
+    team: &str,
+    from_agent: &str,
+    color: Option<String>,
+    text: &str,
+    summary: Option<String>,
+) -> io::Result<()> {
+    write_to_mailbox(
+        teams_root,
+        team,
+        TEAM_LEAD_NAME,
+        TeammateMessage {
+            from: from_agent.to_string(),
+            text: text.to_string(),
+            timestamp: now_rfc3339(),
+            read: false,
+            color,
+            summary,
+            kind: Some(MessageKind::Progress),
+            source_role: Some(SourceRole::Peer),
+        },
+    )
+}
+
 // ---------------------------------------------------------------------------
 // GAP 2 — Peer-message XML wrapper.
 // ---------------------------------------------------------------------------

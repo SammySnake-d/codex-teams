@@ -242,6 +242,7 @@ impl ChatWidget {
             status_line_workspace_headline_pending_request_id: None,
             next_status_line_workspace_headline_request_id: 0,
             status_line_workspace_headline_last_requested_at: None,
+            teammate_progress_last_push: None,
             status_line_workspace_messages_disabled: false,
             current_goal_status_indicator: None,
             current_goal_status: None,

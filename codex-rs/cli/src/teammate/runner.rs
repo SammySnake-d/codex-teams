@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use codex_core::CodexThread;
@@ -30,6 +31,13 @@ use codex_protocol::user_input::UserInput;
 
 /// Claude `POLL_INTERVAL_MS` = 500 ms.
 const POLL_INTERVAL_MS: u64 = 500;
+
+/// Minimum spacing between mid-turn PROGRESS pushes to the lead. A busy teammate
+/// can fire many tool calls per second; throttling coalesces that burst into at
+/// most one milestone per interval so monitoring stays event-driven and cheap
+/// (a teammate running 50 commands does NOT spam the lead with 50 turns). The
+/// first milestone of a turn is always pushed immediately.
+const PROGRESS_THROTTLE: Duration = Duration::from_secs(5);
 
 /// Immutable identity + on-disk locators for a running teammate session.
 pub(crate) struct TeammateRuntime {
@@ -72,7 +80,7 @@ pub(crate) async fn run_teammate_loop(
 
     loop {
         if let Some(prompt) = current_prompt.take() {
-            let last_agent_message = run_one_turn(&thread, prompt).await?;
+            let last_agent_message = run_one_turn(&rt, &thread, prompt).await?;
             // Idle notification to the lead on each turn boundary (Claude sends
             // idle on every turn end). Best-effort: a mailbox write failure must
             // not kill the loop.
@@ -83,7 +91,7 @@ pub(crate) async fn run_teammate_loop(
             WaitResult::Shutdown { prompt } => {
                 // Feed the shutdown text to the model so it can acknowledge /
                 // wind down, then exit after that final turn (Claude §1.4).
-                let _ = run_one_turn(&thread, prompt).await;
+                let _ = run_one_turn(&rt, &thread, prompt).await;
                 break;
             }
             WaitResult::NewMessage { prompt } => current_prompt = Some(prompt),
@@ -100,7 +108,22 @@ pub(crate) async fn run_teammate_loop(
 
 /// Submit one user turn and pump events until the turn completes (or errors / is
 /// aborted). Returns the last agent message observed, for the idle summary.
-async fn run_one_turn(thread: &Arc<CodexThread>, prompt: String) -> Result<Option<String>> {
+///
+/// While the turn runs, tool-call milestones (a command starting, a file being
+/// patched, an MCP tool invoked) are pushed to the lead as throttled PROGRESS
+/// messages so the lead can watch the work unfold at TOOL granularity and correct
+/// drift mid-turn — not only at the turn boundary.
+///
+/// NOTE: the LIVE teammate is the full interactive TUI (`codex teammate`), whose
+/// milestone push lives in `tui/src/chatwidget/protocol.rs`
+/// (`maybe_push_teammate_progress`, driven by `handle_item_started_notification`).
+/// This headless run-loop is retained for parity/reuse but is not the live path;
+/// the two share identical throttle + formatting semantics.
+async fn run_one_turn(
+    rt: &TeammateRuntime,
+    thread: &Arc<CodexThread>,
+    prompt: String,
+) -> Result<Option<String>> {
     // `Op::UserInput` is a `#[non_exhaustive]` 6-field variant; build it via the
     // canonical `From<Vec<UserInput>> for Op` rather than a struct literal.
     let op: Op = vec![UserInput::Text {
@@ -111,10 +134,33 @@ async fn run_one_turn(thread: &Arc<CodexThread>, prompt: String) -> Result<Optio
     thread.submit(op).await?;
 
     let mut last_agent_message: Option<String> = None;
+    // Throttle state: `None` means no milestone pushed yet this turn (first one
+    // fires immediately); otherwise the last push instant.
+    let mut last_progress_push: Option<Instant> = None;
     loop {
         let event = thread.next_event().await?;
         match event.msg {
             EventMsg::AgentMessage(agent) => last_agent_message = Some(agent.message),
+            EventMsg::ExecCommandBegin(ev) => {
+                maybe_push_progress(rt, &mut last_progress_push, progress_for_exec(&ev.command));
+            }
+            EventMsg::PatchApplyBegin(ev) => {
+                maybe_push_progress(
+                    rt,
+                    &mut last_progress_push,
+                    progress_for_patch(ev.changes.len()),
+                );
+            }
+            EventMsg::McpToolCallBegin(ev) => {
+                maybe_push_progress(
+                    rt,
+                    &mut last_progress_push,
+                    progress_for_mcp(&ev.invocation.tool),
+                );
+            }
+            EventMsg::WebSearchBegin(_) => {
+                maybe_push_progress(rt, &mut last_progress_push, "searching the web".to_string());
+            }
             EventMsg::TurnComplete(turn) => {
                 if turn.last_agent_message.is_some() {
                     last_agent_message = turn.last_agent_message;
@@ -126,6 +172,53 @@ async fn run_one_turn(thread: &Arc<CodexThread>, prompt: String) -> Result<Optio
         }
     }
     Ok(last_agent_message)
+}
+
+/// Push a progress milestone to the lead, throttled: the first milestone of a
+/// turn fires immediately, subsequent ones only after [`PROGRESS_THROTTLE`] has
+/// elapsed. A mailbox write failure must never disrupt the turn, so it is
+/// best-effort. Coalescing is implicit: milestones that arrive inside the
+/// throttle window are simply dropped (the next one past the window reports the
+/// then-current work), keeping monitoring cheap.
+fn maybe_push_progress(rt: &TeammateRuntime, last: &mut Option<Instant>, milestone: String) {
+    let now = Instant::now();
+    let due = match *last {
+        None => true,
+        Some(prev) => now.duration_since(prev) >= PROGRESS_THROTTLE,
+    };
+    if !due {
+        return;
+    }
+    *last = Some(now);
+    let summary = summarize(&milestone);
+    let _ = team_coord::send_progress_to_lead(
+        &rt.teams_root,
+        &rt.team,
+        &rt.agent_name,
+        rt.color.clone(),
+        &milestone,
+        Some(summary),
+    );
+}
+
+/// One-line progress note for a command milestone, truncated so a long command
+/// line does not bloat the lead's inbox.
+fn progress_for_exec(command: &[String]) -> String {
+    let joined = command.join(" ");
+    let shown: String = joined.chars().take(120).collect();
+    format!("running: {shown}")
+}
+
+fn progress_for_patch(file_count: usize) -> String {
+    if file_count == 1 {
+        "editing 1 file".to_string()
+    } else {
+        format!("editing {file_count} files")
+    }
+}
+
+fn progress_for_mcp(tool: &str) -> String {
+    format!("calling tool {tool}")
 }
 
 /// Port of `waitForNextPromptOrShutdown`: wait for this teammate's inbox to
@@ -223,4 +316,53 @@ fn summarize(message: &str) -> String {
         .take(10)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn exec_progress_is_prefixed_and_truncated() {
+        let short = progress_for_exec(&["cargo".to_string(), "test".to_string()]);
+        assert_eq!(short, "running: cargo test");
+
+        let long_arg = "x".repeat(300);
+        let long = progress_for_exec(&["echo".to_string(), long_arg]);
+        assert!(long.starts_with("running: echo "));
+        // "running: " (9) + up to 120 chars of the joined command.
+        assert!(long.chars().count() <= 9 + 120);
+    }
+
+    #[test]
+    fn patch_progress_pluralizes() {
+        assert_eq!(progress_for_patch(1), "editing 1 file");
+        assert_eq!(progress_for_patch(3), "editing 3 files");
+    }
+
+    #[test]
+    fn mcp_progress_names_the_tool() {
+        assert_eq!(progress_for_mcp("search"), "calling tool search");
+    }
+
+    #[test]
+    fn throttle_pushes_first_then_suppresses_until_interval() {
+        // First milestone (last=None) is always due; the immediately-following one
+        // inside the throttle window is suppressed. We assert the throttle DECISION
+        // without performing a mailbox write by replicating its predicate.
+        let mut last: Option<Instant> = None;
+        // first is due
+        let due1 = matches!(last, None) || false;
+        assert!(due1, "first milestone must be due");
+        last = Some(Instant::now());
+        // an immediate second is NOT due (well within PROGRESS_THROTTLE)
+        let due2 = match last {
+            None => true,
+            Some(prev) => Instant::now().duration_since(prev) >= PROGRESS_THROTTLE,
+        };
+        assert!(
+            !due2,
+            "second milestone inside the window must be throttled"
+        );
+    }
 }

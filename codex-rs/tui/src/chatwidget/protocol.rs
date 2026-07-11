@@ -286,6 +286,28 @@ impl ChatWidget {
         notification: ItemStartedNotification,
         from_replay: bool,
     ) {
+        // When this process is a Teams teammate, push a throttled PROGRESS
+        // milestone to the lead at each tool-call boundary (command, file edit,
+        // MCP tool, web search) so the lead can watch the work unfold at tool
+        // granularity and correct drift mid-turn — not only at the turn boundary.
+        // Skipped for replayed history so resuming a session does not re-notify.
+        if !from_replay {
+            match &notification.item {
+                ThreadItem::CommandExecution { command, .. } => {
+                    self.maybe_push_teammate_progress(progress_for_command(command));
+                }
+                ThreadItem::FileChange { changes, .. } => {
+                    self.maybe_push_teammate_progress(progress_for_file_changes(changes.len()));
+                }
+                ThreadItem::McpToolCall { tool, .. } => {
+                    self.maybe_push_teammate_progress(format!("calling tool {tool}"));
+                }
+                ThreadItem::WebSearch(_) => {
+                    self.maybe_push_teammate_progress("searching the web".to_string());
+                }
+                _ => {}
+            }
+        }
         match notification.item {
             item @ ThreadItem::CommandExecution { .. } => self.on_command_execution_started(item),
             ThreadItem::FileChange { id: _, changes, .. } => {
@@ -338,4 +360,82 @@ impl ChatWidget {
             replay_kind.map_or(ThreadItemRenderSource::Live, ThreadItemRenderSource::Replay),
         );
     }
+
+    /// Push a throttled PROGRESS milestone to the team lead when THIS process is a
+    /// Teams teammate. No-op for the lead's own TUI or any non-teammate session
+    /// (gated by [`teammate_identity_parts`], which is set only in teammate
+    /// processes). The first milestone of a burst fires immediately; subsequent
+    /// ones are suppressed until [`TEAMMATE_PROGRESS_THROTTLE`] elapses, so a
+    /// teammate running many tools coalesces into at most one push per interval.
+    /// Best-effort: a mailbox write failure must never disturb rendering.
+    fn maybe_push_teammate_progress(&mut self, milestone: String) {
+        let Some((team, agent_name)) = crate::legacy_core::teammate_identity_parts() else {
+            return;
+        };
+        let now = Instant::now();
+        let due = match self.teammate_progress_last_push {
+            None => true,
+            Some(prev) => now.duration_since(prev) >= TEAMMATE_PROGRESS_THROTTLE,
+        };
+        if !due {
+            return;
+        }
+        self.teammate_progress_last_push = Some(now);
+
+        let teams_root =
+            crate::legacy_core::team_store::root_from_env_or(self.config.codex_home.as_path());
+        let color = teammate_self_color(&teams_root, &team, &agent_name);
+        let summary = milestone
+            .split_whitespace()
+            .take(10)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = crate::legacy_core::team_coord::send_progress_to_lead(
+            &teams_root,
+            &team,
+            &agent_name,
+            color,
+            &milestone,
+            Some(summary),
+        );
+    }
+}
+
+/// Minimum spacing between mid-turn teammate progress pushes. Mirrors the CLI
+/// runner's throttle so both teammate code paths coalesce tool bursts the same
+/// way and monitoring stays cheap.
+const TEAMMATE_PROGRESS_THROTTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One-line progress note for a command milestone, truncated so a long command
+/// line does not bloat the lead's inbox.
+fn progress_for_command(command: &str) -> String {
+    let shown: String = command.chars().take(120).collect();
+    format!("running: {shown}")
+}
+
+fn progress_for_file_changes(count: usize) -> String {
+    if count == 1 {
+        "editing 1 file".to_string()
+    } else {
+        format!("editing {count} files")
+    }
+}
+
+/// Look up this teammate's assigned color from the shared team config so the
+/// lead's injected progress line is color-tagged like other teammate messages.
+fn teammate_self_color(
+    teams_root: &std::path::Path,
+    team: &str,
+    agent_name: &str,
+) -> Option<String> {
+    crate::legacy_core::team_store::read_config(teams_root, team)
+        .ok()
+        .flatten()
+        .and_then(|config| {
+            config
+                .members
+                .into_iter()
+                .find(|member| member.name == agent_name)
+                .and_then(|member| member.color)
+        })
 }
