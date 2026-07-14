@@ -248,8 +248,15 @@ Payload:
 ```
 You may also see them addressed as to=/root/..., which indicates your identity is /root/...
 "#;
-const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
-const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+// FORK PATCH (codex-teams, revert when upstream fixes): upstream's default is
+// "collaboration", but some frontier models (e.g. gpt-5.6) NATIVELY reserve the
+// `collaboration` function namespace with a fixed schema, so sending our
+// multi_agent_v2 tools under it makes the provider reject the whole tools array
+// (`invalid_request: Function 'collaboration.spawn_agent' is reserved ...`),
+// breaking ALL tool use. We move the default off the reserved name. See
+// docs/FORK_PATCHES.md. Restore "collaboration" once upstream stops colliding.
+const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "codex_agents";
+const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that these sub-agent tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.codex_agents.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
 
 All agents share the same directory. In detail:
 - All agents have access to the same container and filesystem as you.
