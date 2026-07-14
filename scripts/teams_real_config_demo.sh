@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # REAL-CONFIG end-to-end Teams demo (NOT a mock). Uses your real ~/.codex config
-# (custom provider on 127.0.0.1:8317, real gpt-5.5, real auth). Drives a real
+# (custom provider on 127.0.0.1:8317, your real configured model, real auth). Drives a real
 # interactive lead TUI in tmux to: create a team, spawn a real teammate process,
 # delegate a tiny concrete task, and let real a2a happen. Observes the real
 # on-disk team store + mailboxes + capture-pane.
 #
 # WARNING: this consumes REAL model quota (both the lead and the teammate call
-# gpt-5.5). It is intentionally SMALL (one trivial delegated task) to bound cost.
+# your real configured model). It is intentionally SMALL (one trivial delegated task) to bound cost.
 set -uo pipefail
 
 WORKSPACE=/Users/snakesammy/Desktop/project/codex-teams
@@ -47,13 +47,13 @@ if lsof -iTCP:8317 -sTCP:LISTEN >/dev/null 2>&1; then ok "custom provider listen
 # real team you already have, and cleanup is scoped. We do NOT touch your
 # config.toml — teammates inherit the real one via the shared CODEX_HOME.
 
-log "launch REAL lead TUI (your ~/.codex config, gpt-5.5)"
+log "launch REAL lead TUI (your ~/.codex config, real configured model)"
 PANE="$(tmux new-session -d -P -F '#{pane_id}' -x 200 -y 50 -c "$WORKSPACE" -s "$SESSION" -- \
   env CODEX_HOME="$REAL_HOME" CODEX_TEAMMATE_COMMAND="$CODEX_BIN" \
   "$CODEX_BIN" --enable teams --no-alt-screen --dangerously-bypass-hook-trust)"
 echo "PANE=$PANE"
 
-if wait_screen "gpt-5.5" 20 || wait_screen "Codex" 20; then ok "lead TUI booted on real config"; else
+if wait_screen "Codex" 25 || wait_screen "gpt-" 25; then ok "lead TUI booted on real config"; else
   echo "FAIL: lead did not boot"; capture | tail -15; exit 1; fi
 # scan for the 401 you asked about — must be ABSENT on real config
 sleep 3
@@ -120,7 +120,7 @@ if [ -n "$found_cfg" ]; then
     sleep 1
   done
   if [ "$a2a" = 1 ]; then
-    ok "REAL a2a round-trip: scout replied REAL_A2A_OK to the lead (real gpt-5.5, both processes)"
+    ok "REAL a2a round-trip: scout replied REAL_A2A_OK to the lead (real configured model, both processes)"
     cp "$LEAD_INBOX" "$EVID/lead-inbox.json" 2>/dev/null
     python3 -c "import json;d=json.load(open('$LEAD_INBOX'));[print('   ',m['from'],'->',m['text'][:60]) for m in d if 'idle' not in m.get('text','')]" 2>/dev/null
   else
