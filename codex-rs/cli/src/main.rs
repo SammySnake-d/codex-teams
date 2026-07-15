@@ -969,6 +969,24 @@ fn stage_str(stage: Stage) -> &'static str {
     }
 }
 
+/// FORK (codex-teams): true when this executable was launched under the `codexteam`
+/// name (the second bin target that shares this entry point). Used to default the
+/// Teams feature on for `codexteam` while leaving `codex` byte-identical to upstream.
+fn invoked_as_codexteam() -> bool {
+    fn is_codexteam(raw: &std::ffi::OsStr) -> bool {
+        std::path::Path::new(raw)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.eq_ignore_ascii_case("codexteam"))
+    }
+    std::env::current_exe()
+        .ok()
+        .as_deref()
+        .map(std::path::Path::as_os_str)
+        .is_some_and(is_codexteam)
+        || std::env::args_os().next().as_deref().is_some_and(is_codexteam)
+}
+
 fn main() -> anyhow::Result<()> {
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
@@ -992,6 +1010,18 @@ async fn cli_main(
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
+    // FORK (codex-teams): when this executable is invoked as `codexteam`, enable the
+    // Teams feature by default so `codexteam` launches the Agent Teams build without
+    // an explicit `--enable teams`. An explicit `--enable teams` / `--disable teams`
+    // always wins. Invoked as plain `codex` this branch is inert — upstream unchanged.
+    if invoked_as_codexteam()
+        && !feature_toggles.enable.iter().any(|f| f == "teams")
+        && !feature_toggles.disable.iter().any(|f| f == "teams")
+    {
+        root_config_overrides
+            .raw_overrides
+            .push("features.teams=true".to_string());
+    }
     let root_remote = remote.remote;
     let root_remote_auth_token_env = remote.remote_auth_token_env;
     let root_strict_config = interactive.strict_config;

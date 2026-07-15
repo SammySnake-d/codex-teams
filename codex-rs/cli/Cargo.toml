@@ -9,6 +9,13 @@ build = "build.rs"
 name = "codex"
 path = "src/main.rs"
 
+# FORK (codex-teams): a second binary built from the SAME entry point. Invoked as
+# `codexteam` it enables the Agent Teams feature by default (see `invoked_as_codexteam`
+# in src/main.rs); invoked as `codex` it is byte-identical to upstream.
+[[bin]]
+name = "codexteam"
+path = "src/main.rs"
+
 [lib]
 name = "codex_cli"
 path = "src/lib.rs"
