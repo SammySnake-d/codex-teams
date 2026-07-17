@@ -795,73 +795,19 @@ async fn create_team(
         FunctionCallError::RespondToModel("team_name is required for TeamCreate".to_string())
     })?;
     let requested_name = non_empty(requested_name, "team name")?;
-    let registry = session.services.agent_control.team_registry();
-    if let Some(existing_team) = registry.list_teams().await.into_iter().find(|team| {
-        team.lead_thread_id == session.thread_id
-            && matches!(team.status, crate::team::TeamStatus::Active)
-    }) {
-        return Err(FunctionCallError::RespondToModel(format!(
-            "Already leading team \"{}\". A leader can only manage one team at a time. Use TeamDelete to end the current team before creating a new one.",
-            existing_team.name
-        )));
-    }
-    let teams_root = teams_root_for_turn(turn.as_ref());
-    let mut name = requested_name.clone();
-    if team_store::read_config(&teams_root, &name)
-        .map_err(|err| {
-            FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
-        })?
-        .is_some()
-    {
-        for suffix in 2.. {
-            let candidate = format!("{requested_name}-{suffix}");
-            if team_store::read_config(&teams_root, &candidate)
-                .map_err(|err| {
-                    FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
-                })?
-                .is_none()
-            {
-                name = candidate;
-                break;
-            }
-        }
-    }
-    let lead_agent_id = team_store::agent_id(team_store::TEAM_LEAD_NAME, &name);
-    let lead_agent_type = args
-        .agent_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|agent_type| !agent_type.is_empty())
-        .unwrap_or(team_store::TEAM_LEAD_NAME)
-        .to_string();
-    let team_file_path = team_store::config_path(&teams_root, &name);
-    let now = unix_millis();
-    let team = registry.create_team(name.clone(), session.thread_id).await;
-    let team_file = team_store::TeamFile {
-        name: name.clone(),
-        team_id: Some(team.id.to_string()),
-        description: args.description,
-        created_at: now,
-        lead_agent_id: lead_agent_id.clone(),
-        lead_session_id: Some(session.thread_id.to_string()),
-        members: vec![team_store::TeamFileMember {
-            agent_id: lead_agent_id.clone(),
-            name: team_store::TEAM_LEAD_NAME.to_string(),
-            agent_type: Some(lead_agent_type),
-            model: Some(turn.model_info.slug.clone()),
-            joined_at: now,
-            cwd: turn.config.cwd.to_string_lossy().into_owned(),
-            subscriptions: Vec::new(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-    team_store::write_config(&teams_root, &name, &team_file).map_err(|err| {
-        FunctionCallError::RespondToModel(format!("failed to write team config: {err}"))
-    })?;
-    fs::create_dir_all(team_store::tasks_dir(&teams_root, &name)).map_err(|err| {
-        FunctionCallError::RespondToModel(format!("failed to create team task directory: {err}"))
-    })?;
+    let CreatedTeam {
+        team,
+        name,
+        team_file_path,
+        lead_agent_id,
+    } = create_team_named(
+        session.as_ref(),
+        turn.as_ref(),
+        &requested_name,
+        args.description,
+        args.agent_type.as_deref(),
+    )
+    .await?;
     let team_file_path = team_file_path.to_string_lossy().into_owned();
     match output {
         CreateTeamOutput::LegacyCodex => json_output(
@@ -884,6 +830,99 @@ async fn create_team(
             "TeamCreate",
         ),
     }
+}
+
+/// Result of creating a team on disk + in the live registry, shared between the
+/// `TeamCreate` tool handler and the startup auto-spawn path.
+struct CreatedTeam {
+    team: crate::team::Team,
+    name: String,
+    team_file_path: PathBuf,
+    lead_agent_id: String,
+}
+
+/// Create a fresh team (unique-name resolution, registry entry, on-disk config
+/// + tasks dir) led by the current session. Fails if this session already leads
+/// an active team. Extracted from `create_team` so the startup auto-spawn path
+/// reuses the exact same team-bootstrap logic.
+async fn create_team_named(
+    session: &Session,
+    turn: &TurnContext,
+    requested_name: &str,
+    description: Option<String>,
+    agent_type: Option<&str>,
+) -> Result<CreatedTeam, FunctionCallError> {
+    let registry = session.services.agent_control.team_registry();
+    if let Some(existing_team) = registry.list_teams().await.into_iter().find(|team| {
+        team.lead_thread_id == session.thread_id
+            && matches!(team.status, crate::team::TeamStatus::Active)
+    }) {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "Already leading team \"{}\". A leader can only manage one team at a time. Use TeamDelete to end the current team before creating a new one.",
+            existing_team.name
+        )));
+    }
+    let teams_root = teams_root_for_turn(turn);
+    let mut name = requested_name.to_string();
+    if team_store::read_config(&teams_root, &name)
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
+        })?
+        .is_some()
+    {
+        for suffix in 2.. {
+            let candidate = format!("{requested_name}-{suffix}");
+            if team_store::read_config(&teams_root, &candidate)
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!("failed to read team config: {err}"))
+                })?
+                .is_none()
+            {
+                name = candidate;
+                break;
+            }
+        }
+    }
+    let lead_agent_id = team_store::agent_id(team_store::TEAM_LEAD_NAME, &name);
+    let lead_agent_type = agent_type
+        .map(str::trim)
+        .filter(|agent_type| !agent_type.is_empty())
+        .unwrap_or(team_store::TEAM_LEAD_NAME)
+        .to_string();
+    let team_file_path = team_store::config_path(&teams_root, &name);
+    let now = unix_millis();
+    let team = registry.create_team(name.clone(), session.thread_id).await;
+    let team_file = team_store::TeamFile {
+        name: name.clone(),
+        team_id: Some(team.id.to_string()),
+        description,
+        created_at: now,
+        lead_agent_id: lead_agent_id.clone(),
+        lead_session_id: Some(session.thread_id.to_string()),
+        members: vec![team_store::TeamFileMember {
+            agent_id: lead_agent_id.clone(),
+            name: team_store::TEAM_LEAD_NAME.to_string(),
+            agent_type: Some(lead_agent_type),
+            model: Some(turn.model_info.slug.clone()),
+            joined_at: now,
+            cwd: turn.config.cwd.to_string_lossy().into_owned(),
+            subscriptions: Vec::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    team_store::write_config(&teams_root, &name, &team_file).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to write team config: {err}"))
+    })?;
+    fs::create_dir_all(team_store::tasks_dir(&teams_root, &name)).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to create team task directory: {err}"))
+    })?;
+    Ok(CreatedTeam {
+        team,
+        name,
+        team_file_path,
+        lead_agent_id,
+    })
 }
 
 async fn list_teams(
@@ -1317,6 +1356,118 @@ async fn team_spawn_member_from_args(
         "team_spawn_member requires a tmux or iTerm2 pane backend so the teammate runs as a Codex Teams process. Start Codex inside a supported pane backend, then retry the Teams request."
             .to_string(),
     ))
+}
+
+/// Outcome of the startup auto-spawn pass, returned to the session hook so it
+/// can surface a single summary warning if anything was skipped or failed.
+pub(crate) struct StartupSpawnOutcome {
+    /// Team name that was created (present once the team bootstrap succeeds).
+    pub(crate) team_name: Option<String>,
+    /// Names of members that spawned successfully.
+    pub(crate) spawned: Vec<String>,
+    /// `(member_name, reason)` for members that failed to spawn.
+    pub(crate) failed: Vec<(String, String)>,
+}
+
+/// Whether a real `codex teammate` process-pane backend is available in the
+/// current environment. Mirrors the backend gate inside
+/// `team_spawn_member_from_args` so the startup path can bail out *before*
+/// creating an empty team when no pane backend exists.
+async fn process_pane_backend_available() -> bool {
+    if TmuxBackend::new().is_inside_tmux() {
+        return true;
+    }
+    iterm::is_in_iterm2() && ITermBackend::new().is_available().await
+}
+
+/// Bring up the configured `[teams] startup_members` for a freshly started lead
+/// session. Creates a team, then spawns each member as a real `codex teammate`
+/// process (reusing the exact tool-handler path via
+/// `team_spawn_member_from_args`). Best-effort: a single member failing does not
+/// abort the others, and the caller keeps the session alive regardless.
+///
+/// The caller is responsible for the recursion/feature gate (only a genuine lead
+/// process with `Feature::Teams` should reach here). This function additionally
+/// fails closed when no pane backend is available, without mutating any state.
+pub(crate) async fn spawn_startup_members(
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
+    members: &[crate::config::StartupMember],
+) -> Result<StartupSpawnOutcome, FunctionCallError> {
+    if members.is_empty() {
+        return Ok(StartupSpawnOutcome {
+            team_name: None,
+            spawned: Vec::new(),
+            failed: Vec::new(),
+        });
+    }
+
+    // Fail closed before creating a team if the environment cannot host real
+    // teammate processes. Matches the tool handler's backend requirement.
+    if !process_pane_backend_available().await {
+        return Err(FunctionCallError::RespondToModel(
+            "startup teammates require a tmux or iTerm2 pane backend; skipping [teams] startup_members.".to_string(),
+        ));
+    }
+
+    let created = create_team_named(
+        session.as_ref(),
+        turn.as_ref(),
+        team_store::DEFAULT_STARTUP_TEAM_NAME,
+        /*description*/ None,
+        /*agent_type*/ None,
+    )
+    .await?;
+    let team_id = created.team.id;
+
+    let mut spawned = Vec::new();
+    let mut failed = Vec::new();
+    for member in members {
+        // A teammate's first turn is driven by its mailbox message, so a
+        // prompt-less startup member still needs one: default to a short
+        // standby instruction.
+        let prompt = member.prompt.clone().unwrap_or_else(|| {
+            "You were brought up automatically at session startup as part of the configured team. Introduce yourself to the team lead with SendMessage, then stand by for instructions.".to_string()
+        });
+        let args = TeamSpawnMemberArgs {
+            team_id: team_id.to_string(),
+            name: member.name.clone(),
+            profile: member.profile.clone(),
+            capabilities: None,
+            permissions: None,
+            message: Some(prompt),
+            items: None,
+        };
+        match team_spawn_member_from_args(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            args,
+            "startup_member",
+            /*requested_model*/ None,
+            /*requested_mode*/ None,
+        )
+        .await
+        {
+            Ok(_) => spawned.push(member.name.clone()),
+            Err(err) => {
+                let reason = match err {
+                    FunctionCallError::RespondToModel(reason) => reason,
+                    other => other.to_string(),
+                };
+                tracing::warn!(
+                    "startup teammate `{}` failed to spawn: {reason}",
+                    member.name
+                );
+                failed.push((member.name.clone(), reason));
+            }
+        }
+    }
+
+    Ok(StartupSpawnOutcome {
+        team_name: Some(created.name),
+        spawned,
+        failed,
+    })
 }
 
 /// Look up the live team's display name from the in-memory registry. The caller

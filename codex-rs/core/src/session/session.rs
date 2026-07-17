@@ -1260,6 +1260,11 @@ impl Session {
                 }
                 InitialHistory::Cleared => codex_hooks::SessionStartSource::Clear,
             };
+            // FORK PATCH (codex-teams): only a brand-new lead session brings up
+            // `[teams] startup_members`. Resumed/forked/cleared sessions may
+            // already have a team, so re-spawning would duplicate it. Captured
+            // before `initial_history` is moved into `record_initial_history`.
+            let is_fresh_lead_start = matches!(initial_history, InitialHistory::New);
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
             Box::pin(sess.record_initial_history(initial_history)).await;
@@ -1267,6 +1272,18 @@ impl Session {
                 let mut state = sess.state.lock().await;
                 state.queue_pending_session_start_source(session_start_source);
             }
+
+            // FORK PATCH (codex-teams): auto-spawn configured startup teammates.
+            // Gated hard on `teammate_identity().is_none()` — a spawned `codex
+            // teammate` process runs this same path with a root session_source,
+            // so the identity marker is the ONLY thing preventing infinite
+            // recursive spawning. Best-effort: failures never abort startup.
+            Box::pin(sess.maybe_spawn_startup_teammates(
+                &config,
+                is_fresh_lead_start,
+            ))
+            .await;
+
             Ok(sess)
         }
         .await;

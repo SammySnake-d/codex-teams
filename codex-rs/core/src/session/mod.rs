@@ -1417,6 +1417,104 @@ impl Session {
         }
     }
 
+    /// FORK PATCH (codex-teams): bring up `[teams] startup_members` for a fresh
+    /// lead session. Gated so it runs at most once per real team lead:
+    ///
+    /// - `teammate_identity().is_none()` — a spawned `codex teammate` process
+    ///   runs this exact startup path with a *root* session_source, so this
+    ///   identity marker is the ONLY reliable guard against a teammate reading
+    ///   `startup_members` and recursively spawning another team. This must come
+    ///   first.
+    /// - `Feature::Teams` enabled — Teams (process-level teammates), not the
+    ///   subagent tool surface.
+    /// - `is_fresh_lead_start` — only a brand-new `InitialHistory::New` session;
+    ///   resumed/forked sessions may already have a team.
+    /// - non-empty `teams_startup_members`.
+    ///
+    /// Best-effort: any failure (no pane backend, a member failing to spawn)
+    /// emits a warning but never fails session startup.
+    async fn maybe_spawn_startup_teammates(self: &Arc<Self>, config: &Config, is_fresh_lead_start: bool) {
+        // Recursion guard first: never let a teammate process re-trigger startup.
+        if crate::team::teammate_identity().is_some() {
+            return;
+        }
+        if !is_fresh_lead_start {
+            return;
+        }
+        if !config.features.enabled(Feature::Teams) {
+            return;
+        }
+        let members = &config.teams_startup_members;
+        if members.is_empty() {
+            return;
+        }
+        // Sub-agent sessions are not team leads.
+        let is_subagent = {
+            let state = self.state.lock().await;
+            state
+                .session_configuration
+                .session_source
+                .is_non_root_agent()
+        };
+        if is_subagent {
+            return;
+        }
+
+        let turn_context = self.new_default_turn().await;
+        // `spawn_startup_members` needs `Arc<Session>`.
+        let session_arc = Arc::clone(self);
+        let outcome = crate::tools::handlers::team::spawn_startup_members(
+            session_arc,
+            Arc::clone(&turn_context),
+            members,
+        )
+        .await;
+
+        match outcome {
+            Ok(result) => {
+                if let Some(team_name) = &result.team_name {
+                    tracing::info!(
+                        "startup teammates: team `{team_name}` — {} spawned, {} failed",
+                        result.spawned.len(),
+                        result.failed.len(),
+                    );
+                }
+                if !result.failed.is_empty() {
+                    let detail = result
+                        .failed
+                        .iter()
+                        .map(|(name, reason)| format!("{name}: {reason}"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    self.send_event(
+                        &turn_context,
+                        EventMsg::Warning(WarningEvent {
+                            message: format!(
+                                "Some startup teammates failed to spawn ({}/{} succeeded): {detail}",
+                                result.spawned.len(),
+                                result.spawned.len() + result.failed.len(),
+                            ),
+                        }),
+                    )
+                    .await;
+                }
+            }
+            Err(err) => {
+                let reason = match err {
+                    crate::function_tool::FunctionCallError::RespondToModel(reason) => reason,
+                    other => other.to_string(),
+                };
+                self.send_event(
+                    &turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: format!("Could not start [teams] startup_members: {reason}"),
+                    }),
+                )
+                .await;
+            }
+        }
+    }
+
     #[instrument(
         level = "trace",
         skip_all,

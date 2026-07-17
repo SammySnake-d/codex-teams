@@ -436,6 +436,12 @@ pub struct ConfigToml {
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
 
+    /// Agent Teams settings (fork: codex-teams). Governs startup team
+    /// composition. Enabling Teams itself is a feature flag (`features.teams`);
+    /// this section only describes which teammates a lead session brings up
+    /// automatically at startup.
+    pub teams: Option<TeamsToml>,
+
     /// Memories subsystem settings.
     pub memories: Option<MemoriesToml>,
 
@@ -719,6 +725,49 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+}
+
+/// Agent Teams settings (fork: codex-teams).
+///
+/// Example:
+/// ```toml
+/// [teams]
+/// startup_members = [
+///   { name = "researcher", profile = "researcher", prompt = "Survey the codebase." },
+///   { name = "coder" },
+/// ]
+/// ```
+///
+/// `profile` references an agent role declared under `[agents]` / the
+/// `agents/` directory (upstream convention); it is not a place to define the
+/// agent itself. Members are only brought up when the Teams feature is enabled
+/// (`features.teams = true`) and the lead session starts inside a supported
+/// pane backend (tmux / iTerm2).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct TeamsToml {
+    /// Teammates to spawn automatically when a lead session starts.
+    #[serde(default)]
+    pub startup_members: Vec<StartupMemberToml>,
+}
+
+/// One teammate to bring up at session startup. A runtime instance that
+/// references a (static) agent role via `profile`; several members may share a
+/// profile.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct StartupMemberToml {
+    /// Display name for the teammate. Required.
+    pub name: String,
+
+    /// Agent role (profile) to launch the teammate with, resolved from
+    /// `[agents]` / the `agents/` directory. When unset, the teammate starts
+    /// with the default role.
+    pub profile: Option<String>,
+
+    /// Optional first message delivered to the teammate after spawn (its
+    /// initial turn).
+    pub prompt: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

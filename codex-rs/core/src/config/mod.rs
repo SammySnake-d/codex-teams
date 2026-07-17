@@ -1042,6 +1042,11 @@ pub struct Config {
     /// Settings specific to the task-path-based multi-agent tool surface.
     pub multi_agent_v2: MultiAgentV2Config,
 
+    /// Teammates to spawn automatically when a lead session starts (fork:
+    /// codex-teams). Empty unless `[teams] startup_members` is configured.
+    /// Only acted upon when the Teams feature is enabled.
+    pub teams_startup_members: Vec<StartupMember>,
+
     /// Context-window token budget configuration, when enabled.
     pub token_budget: Option<TokenBudgetConfig>,
     /// Shared token budget for the root thread and its sub-agents.
@@ -1143,6 +1148,19 @@ impl Default for CurrentTimeReminderConfig {
             sleep_tool: false,
         }
     }
+}
+
+/// A teammate to bring up automatically at lead-session startup (fork:
+/// codex-teams). Runtime form of `[teams] startup_members` entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StartupMember {
+    /// Display name for the teammate.
+    pub name: String,
+    /// Agent role (profile) to launch with; resolved from `[agents]` / the
+    /// `agents/` directory. `None` uses the default role.
+    pub profile: Option<String>,
+    /// Optional first message delivered to the teammate as its initial turn.
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2502,6 +2520,37 @@ fn resolve_code_mode_config(config_toml: &ConfigToml) -> CodeModeConfig {
     }
 }
 
+fn resolve_teams_startup_members(config_toml: &ConfigToml) -> Vec<StartupMember> {
+    let Some(teams) = config_toml.teams.as_ref() else {
+        return Vec::new();
+    };
+    teams
+        .startup_members
+        .iter()
+        .filter_map(|member| {
+            let name = member.name.trim();
+            if name.is_empty() {
+                tracing::warn!(
+                    "ignoring [teams] startup_members entry with an empty `name`"
+                );
+                return None;
+            }
+            let clean = |value: &Option<String>| {
+                value
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            Some(StartupMember {
+                name: name.to_string(),
+                profile: clean(&member.profile),
+                prompt: clean(&member.prompt),
+            })
+        })
+        .collect()
+}
+
 fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config {
     let base = multi_agent_v2_toml_config(config_toml.features.as_ref());
     let max_concurrent_threads_per_session = base
@@ -3416,6 +3465,7 @@ impl Config {
             resolve_experimental_request_user_input_enabled(&cfg);
         let code_mode = resolve_code_mode_config(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
+        let teams_startup_members = resolve_teams_startup_members(&cfg);
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
@@ -3949,6 +3999,7 @@ impl Config {
             background_terminal_max_timeout,
             ghost_snapshot,
             multi_agent_v2,
+            teams_startup_members,
             token_budget,
             rollout_budget,
             current_time_reminder,

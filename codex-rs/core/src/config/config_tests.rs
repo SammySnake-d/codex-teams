@@ -11419,3 +11419,65 @@ fn test_tui_notification_condition_rejects_unknown_value() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn teams_startup_members_parses_and_normalizes() {
+    let config_toml: ConfigToml = toml::from_str(
+        r#"[teams]
+startup_members = [
+  { name = "researcher", profile = "researcher", prompt = "Survey the codebase." },
+  { name = "  coder  " },
+  { name = "planner", profile = "  ", prompt = "  " },
+]
+"#,
+    )
+    .expect("[teams] startup_members should parse");
+
+    let members = resolve_teams_startup_members(&config_toml);
+    assert_eq!(
+        members,
+        vec![
+            StartupMember {
+                name: "researcher".to_string(),
+                profile: Some("researcher".to_string()),
+                prompt: Some("Survey the codebase.".to_string()),
+            },
+            // Whitespace-only `name` is trimmed; blank profile/prompt collapse to None.
+            StartupMember {
+                name: "coder".to_string(),
+                profile: None,
+                prompt: None,
+            },
+            StartupMember {
+                name: "planner".to_string(),
+                profile: None,
+                prompt: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn teams_startup_members_skips_empty_name() {
+    let config_toml: ConfigToml = toml::from_str(
+        r#"[teams]
+startup_members = [
+  { name = "" },
+  { name = "   " },
+  { name = "keeper" },
+]
+"#,
+    )
+    .expect("[teams] startup_members should parse");
+
+    let members = resolve_teams_startup_members(&config_toml);
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].name, "keeper");
+}
+
+#[test]
+fn teams_startup_members_absent_is_empty() {
+    let config_toml: ConfigToml =
+        toml::from_str("model = \"gpt-5.6\"\n").expect("config should parse");
+    assert!(resolve_teams_startup_members(&config_toml).is_empty());
+}

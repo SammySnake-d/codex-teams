@@ -31,6 +31,11 @@ use serde::Serialize;
 /// Reserved agent name for the team lead (mirrors Claude's `TEAM_LEAD_NAME`).
 pub const TEAM_LEAD_NAME: &str = "team-lead";
 
+/// Default team name used when auto-creating a team for `[teams]
+/// startup_members` at session startup. Unique-name resolution appends a
+/// numeric suffix if this is already taken on disk.
+pub const DEFAULT_STARTUP_TEAM_NAME: &str = "team";
+
 /// Optional process-local override for the root that contains `teams/`.
 pub const TEAM_STORE_ROOT_ENV_VAR: &str = "CODEX_TEAM_STORE_ROOT";
 
