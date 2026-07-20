@@ -45,3 +45,29 @@ constants. `grep -rn 'codex_agents' codex-rs/` finds every touch point.
 **Verify:** `scripts/teams_reserved_namespace_live_test.sh` (real gpt-5.6-sol, no
 config override) asserts the reserved-name rejection is gone and a tool actually
 dispatches.
+
+## 2. Reasoning field omission for non-reasoning providers — RETIRED
+**Status:** Retired at the `rust-v0.145.0-alpha.24` sync (was team.8, an inline
+port of upstream `rust-v0.144.1`; never had its own entry here).
+**What it was:** `client.rs::build_reasoning` returned `Option<Reasoning>` and
+omitted the whole `reasoning` field (and `reasoning.encrypted_content` include)
+when `ModelInfo.supports_reasoning_summaries` was false, so OpenAI-compatible
+proxies serving non-reasoning models would not 400 on an unexpected `reasoning`
+field.
+**Why retired:** upstream evolved this exact path with a more precise gate,
+`ModelInfo.supports_reasoning_summary_parameter`, which controls only the
+`summary` sub-field while always sending `reasoning`. Our fork's field
+`supports_reasoning_summaries` is `#[serde(default = false)]` and is set `true`
+nowhere in the merged tree (the upstream model catalog only populates
+`supports_reasoning_summary_parameter`), so keeping our outer gate would have
+returned `None` for EVERY model and disabled reasoning globally. We therefore
+took upstream's `build_reasoning` verbatim. The now-orphaned
+`supports_reasoning_summaries` field is left in place (harmless, unread) to
+avoid churning ~20 constructor sites; a later cleanup can remove it.
+**Re-add if:** a live run on the user's provider (cliproxy / gpt-5.6-luna)
+starts returning `400 invalid_request` on `tools` because the model does not
+accept `reasoning`. Then reintroduce a narrow gate keyed on a field the model
+catalog actually populates.
+**Verify:** `scripts/teams_startup_members_real_live_test.sh` and any real
+`codexteam exec` on the user's provider must dispatch tools without a reasoning
+400.

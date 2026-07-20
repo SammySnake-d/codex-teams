@@ -1772,7 +1772,7 @@ fn build_teammate_launch_spec_with_binary(
     flags.push("teams".to_string());
     append_teammate_model_override(&mut flags, &model);
     let sandbox_policy = turn.sandbox_policy();
-    let launch_mode = requested_mode.unwrap_or(turn.collaboration_mode.mode);
+    let launch_mode = requested_mode.unwrap_or(turn.collaboration_mode().mode);
     let plan_mode_required = append_teammate_launch_mode_flags(
         &mut flags,
         launch_mode,
@@ -3364,7 +3364,7 @@ fn claude_send_message_result(
 }
 
 fn claude_plan_approval_permission_mode(turn: &TurnContext) -> String {
-    match turn.collaboration_mode.mode {
+    match turn.collaboration_mode().mode {
         ModeKind::Plan => "default",
         ModeKind::Default | ModeKind::PairProgramming | ModeKind::Execute => {
             match turn.approval_policy.value() {
