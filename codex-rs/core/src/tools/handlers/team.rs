@@ -49,6 +49,7 @@ use codex_tools::ToolSpec;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1112,7 +1113,16 @@ async fn team_spawn_member(
     arguments: String,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: TeamSpawnMemberArgs = parse_arguments(&arguments)?;
-    team_spawn_member_from_args(session, turn, args, "team_spawn_member", None, None).await
+    team_spawn_member_from_args(
+        session,
+        turn,
+        args,
+        "team_spawn_member",
+        None,
+        None,
+        /*role_file*/ None,
+    )
+    .await
 }
 
 pub(crate) async fn maybe_spawn_member_from_agent_tool(
@@ -1150,6 +1160,7 @@ pub(crate) async fn maybe_spawn_member_from_agent_tool(
         "spawn_agent",
         requested_model,
         request.mode,
+        /*role_file*/ None,
     )
     .await
     .map(Some)
@@ -1207,6 +1218,7 @@ async fn team_spawn_member_from_args(
     output_tool_name: &str,
     requested_model: Option<String>,
     requested_mode: Option<ModeKind>,
+    role_file: Option<PathBuf>,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let team_id = id_from_str("team", &args.team_id)?;
     require_team_lead(session.as_ref(), team_id, output_tool_name).await?;
@@ -1221,6 +1233,15 @@ async fn team_spawn_member_from_args(
         ));
     }
 
+    // Customization layer for the teammate process. Tool callers pass a role
+    // NAME (`profile`); resolve it lead-side to the role's `config_file` so the
+    // child always receives a concrete file path. Startup members pass an
+    // explicit file via `role_file` (no name lookup).
+    let role_file = match role_file {
+        Some(file) => Some(file),
+        None => resolve_profile_role_file(&turn.config, args.profile.as_deref())?,
+    };
+
     // Preferred path: launch a real `codex teammate` PROCESS in a tmux pane
     // (Claude `handleSpawnSplitPane`). If no process-pane backend is available,
     // fail closed: Teams teammates need their own teammate process and mailbox.
@@ -1231,6 +1252,7 @@ async fn team_spawn_member_from_args(
             team_id,
             name,
             args.profile,
+            role_file,
             capabilities,
             permissions,
             &items,
@@ -1296,6 +1318,7 @@ async fn team_spawn_member_from_args(
             team_id,
             name,
             args.profile,
+            role_file,
             capabilities,
             permissions,
             &items,
@@ -1423,6 +1446,20 @@ pub(crate) async fn spawn_startup_members(
     let mut spawned = Vec::new();
     let mut failed = Vec::new();
     for member in members {
+        // Validate the customization layer up front so a typo'd path fails this
+        // member with a clear reason instead of a silent default-role teammate.
+        if let Some(file) = &member.file
+            && !file.is_file()
+        {
+            let reason = format!(
+                "role file not found: {} — fix [teams.{}] `file` in config.toml",
+                file.display(),
+                member.name
+            );
+            tracing::warn!("startup teammate `{}`: {reason}", member.name);
+            failed.push((member.name.clone(), reason));
+            continue;
+        }
         // A teammate's first turn is driven by its mailbox message, so a
         // prompt-less startup member still needs one: default to a short
         // standby instruction.
@@ -1432,7 +1469,7 @@ pub(crate) async fn spawn_startup_members(
         let args = TeamSpawnMemberArgs {
             team_id: team_id.to_string(),
             name: member.name.clone(),
-            profile: member.profile.clone(),
+            profile: None,
             capabilities: None,
             permissions: None,
             message: Some(prompt),
@@ -1445,6 +1482,7 @@ pub(crate) async fn spawn_startup_members(
             "startup_member",
             /*requested_model*/ None,
             /*requested_mode*/ None,
+            member.file.clone(),
         )
         .await
         {
@@ -1511,6 +1549,32 @@ fn append_teammate_config_string_override(flags: &mut Vec<String>, key: &str, va
     flags.push("-c".to_string());
     let quoted_value = serde_json::Value::String(value.to_string()).to_string();
     flags.push(format!("{key}={quoted_value}"));
+}
+
+/// Resolve a tool-supplied role NAME (`profile`) to the role's `config_file`
+/// path, using the lead's loaded `[agents]` roles (same registry subagents
+/// use). Returns `Ok(None)` when no profile was requested or the role declares
+/// no config file (description-only role). Unknown names error with the
+/// available roles listed, so the model can self-correct.
+fn resolve_profile_role_file(
+    config: &crate::config::Config,
+    profile: Option<&str>,
+) -> Result<Option<PathBuf>, FunctionCallError> {
+    let Some(role_name) = profile.map(str::trim).filter(|name| !name.is_empty()) else {
+        return Ok(None);
+    };
+    match crate::agent::role::resolve_role_config(config, role_name) {
+        Some(role) => Ok(role.config_file.clone()),
+        None => {
+            let mut available: Vec<&str> =
+                config.agent_roles.keys().map(String::as_str).collect();
+            available.sort_unstable();
+            Err(FunctionCallError::RespondToModel(format!(
+                "unknown teammate profile `{role_name}`. Available agent roles: [{}]",
+                available.join(", ")
+            )))
+        }
+    }
 }
 
 fn teammate_active_config_profile(config: &crate::config::Config) -> Option<&str> {
@@ -1620,6 +1684,7 @@ fn build_teammate_launch_spec(
     lead_thread_id: ThreadId,
     name: &str,
     profile: Option<&str>,
+    role_file: Option<&Path>,
     existing_names: &[String],
     items: &[UserInput],
     requested_model: Option<&str>,
@@ -1634,6 +1699,7 @@ fn build_teammate_launch_spec(
         lead_thread_id,
         name,
         profile,
+        role_file,
         existing_names,
         items,
         requested_model,
@@ -1649,6 +1715,7 @@ fn build_teammate_launch_spec_with_binary(
     lead_thread_id: ThreadId,
     name: &str,
     profile: Option<&str>,
+    role_file: Option<&Path>,
     existing_names: &[String],
     items: &[UserInput],
     requested_model: Option<&str>,
@@ -1667,6 +1734,9 @@ fn build_teammate_launch_spec_with_binary(
     // NO `--prompt`: the first turn is delivered via the mailbox below
     // (mirroring Claude), so it is not run twice.
     let mut flags = Vec::new();
+    // Forward the lead's CONFIG profile (`--profile`, provider/model layers) so
+    // the teammate reads the same effective config. This is config inheritance,
+    // NOT teammate customization — the member's role layer is `role_file` below.
     if let Some(profile) = teammate_active_config_profile(&turn.config) {
         flags.push("--profile".to_string());
         flags.push(profile.to_string());
@@ -1687,6 +1757,12 @@ fn build_teammate_launch_spec_with_binary(
     if let Some(profile) = profile {
         flags.push("--agent-type".to_string());
         flags.push(profile.to_string());
+    }
+    // Member customization layer: the teammate process loads this role file
+    // (same format as an agent role's `config_file`) over its config at boot.
+    if let Some(role_file) = role_file {
+        flags.push("--agent-role-file".to_string());
+        flags.push(role_file.to_string_lossy().into_owned());
     }
     // A `codex teammate` process is by definition a Teams session; enable the
     // (default-off) `teams` feature so the spawned process exposes the team
@@ -1798,6 +1874,7 @@ async fn spawn_member_in_pane(
     team_id: ThreadId,
     name: String,
     profile: Option<String>,
+    role_file: Option<PathBuf>,
     capabilities: Vec<String>,
     permissions: Vec<String>,
     items: &[UserInput],
@@ -1824,6 +1901,7 @@ async fn spawn_member_in_pane(
         session.thread_id,
         &name,
         profile.as_deref(),
+        role_file.as_deref(),
         &existing_names,
         items,
         requested_model,
@@ -1941,6 +2019,7 @@ async fn spawn_member_in_iterm_pane(
     team_id: ThreadId,
     name: String,
     profile: Option<String>,
+    role_file: Option<PathBuf>,
     capabilities: Vec<String>,
     permissions: Vec<String>,
     items: &[UserInput],
@@ -1962,6 +2041,7 @@ async fn spawn_member_in_iterm_pane(
         session.thread_id,
         &name,
         profile.as_deref(),
+        role_file.as_deref(),
         &existing_names,
         items,
         requested_model,
@@ -4709,6 +4789,7 @@ supports_websockets = true
             ThreadId::new(),
             "alice",
             Some("reviewer"),
+            /*role_file*/ None,
             &[],
             &[UserInput::Text {
                 text: "inspect this repo".to_string(),
@@ -4815,6 +4896,7 @@ supports_websockets = true
             ThreadId::new(),
             "alice",
             /*profile*/ None,
+            /*role_file*/ None,
             &[],
             &[UserInput::Text {
                 text: "inspect this repo".to_string(),
@@ -4877,6 +4959,7 @@ supports_websockets = true
             ThreadId::new(),
             "alice",
             /*profile*/ None,
+            /*role_file*/ None,
             &[],
             &[UserInput::Text {
                 text: "inspect this repo".to_string(),

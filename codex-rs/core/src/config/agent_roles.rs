@@ -233,6 +233,40 @@ pub(crate) struct ResolvedAgentRoleFile {
     pub(crate) config: TomlValue,
 }
 
+/// FORK PATCH (codex-teams): load a teammate role customization file and
+/// flatten its config keys into `key=value` raw `-c` override strings.
+///
+/// The teammate launcher applies these at SESSION-FLAG precedence — exactly
+/// where `apply_role_to_config` inserts a subagent's role layer — by pushing
+/// them onto the spawned TUI's `-c` overrides. Going through the `-c` pipeline
+/// (instead of mutating the TUI's loaded `Config`) keeps CLI-only state such as
+/// `--dangerously-bypass-hook-trust` intact: a full config rebuild would drop
+/// it and park the teammate on the interactive hook-trust screen forever.
+///
+/// The file uses the agent-role file format (same as `[agents.<name>]
+/// config_file`): plain config keys, with optional `name` / `description` /
+/// `nickname_candidates` metadata that is stripped here. Provider /
+/// service-tier stickiness matches the subagent path for free: keys the file
+/// does not set are simply not overridden.
+pub fn load_teammate_role_overrides(file: &Path) -> std::io::Result<Vec<String>> {
+    let contents = std::fs::read_to_string(file)?;
+    let base = file.parent().unwrap_or_else(|| Path::new("."));
+    let resolved =
+        parse_agent_role_file_contents(&contents, file, base, /*role_name_hint*/ Some("teammate"))?;
+    // Resolve relative paths inside the layer against the role file's folder
+    // (the subagent path does the same via `load_role_layer_toml`).
+    let config = codex_config::loader::resolve_relative_paths_in_config_toml(resolved.config, base)?;
+    let TomlValue::Table(table) = config else {
+        return Ok(Vec::new());
+    };
+    // `toml::Value`'s `Display` renders inline TOML (quoted/escaped strings,
+    // inline tables), which is what the `-c key=value` parser consumes.
+    Ok(table
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect())
+}
+
 pub(crate) fn parse_agent_role_file_contents(
     contents: &str,
     role_file_label: &Path,

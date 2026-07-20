@@ -82,6 +82,12 @@ async fn apply_role_to_config_inner(
     Ok(())
 }
 
+/// FORK PATCH (codex-teams): teammate PROCESSES apply their role customization
+/// through `-c` overrides built by
+/// `crate::config::agent_roles::load_teammate_role_overrides` (session-flag
+/// precedence, same as this module's layer insertion) — a full in-place config
+/// rebuild here would drop CLI-only state like `--dangerously-bypass-hook-trust`
+/// and park the teammate TUI on the hook-trust screen.
 async fn load_role_layer_toml(
     config: &Config,
     config_file: &Path,

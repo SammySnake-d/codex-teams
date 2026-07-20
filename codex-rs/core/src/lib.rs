@@ -185,6 +185,7 @@ mod team;
 mod team_backends;
 pub mod team_coord;
 pub mod team_store;
+pub use config::agent_roles::load_teammate_role_overrides;
 pub use team::set_teammate_identity;
 pub use team::teammate_identity_parts;
 mod user_shell_command;

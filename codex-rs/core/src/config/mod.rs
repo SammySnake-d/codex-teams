@@ -1151,16 +1151,16 @@ impl Default for CurrentTimeReminderConfig {
 }
 
 /// A teammate to bring up automatically at lead-session startup (fork:
-/// codex-teams). Runtime form of `[teams] startup_members` entries.
+/// codex-teams). Runtime form of a `[teams.<name>]` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StartupMember {
-    /// Display name for the teammate.
+    /// Display name for the teammate (the `[teams.<name>]` table key).
     pub name: String,
-    /// Agent role (profile) to launch with; resolved from `[agents]` / the
-    /// `agents/` directory. `None` uses the default role.
-    pub profile: Option<String>,
     /// Optional first message delivered to the teammate as its initial turn.
     pub prompt: Option<String>,
+    /// Optional path to a role customization layer (TOML), same format as an
+    /// agent role's `config_file`. `None` uses the default role.
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2524,28 +2524,27 @@ fn resolve_teams_startup_members(config_toml: &ConfigToml) -> Vec<StartupMember>
     let Some(teams) = config_toml.teams.as_ref() else {
         return Vec::new();
     };
+    // BTreeMap iteration is name-ordered, giving a stable startup spawn order.
     teams
-        .startup_members
+        .members
         .iter()
-        .filter_map(|member| {
-            let name = member.name.trim();
+        .filter_map(|(name, member)| {
+            let name = name.trim();
             if name.is_empty() {
-                tracing::warn!(
-                    "ignoring [teams] startup_members entry with an empty `name`"
-                );
+                tracing::warn!("ignoring [teams.<name>] entry with an empty name");
                 return None;
             }
-            let clean = |value: &Option<String>| {
-                value
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            };
+            let prompt = member
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let file = member.file.as_ref().map(|path| path.as_path().to_path_buf());
             Some(StartupMember {
                 name: name.to_string(),
-                profile: clean(&member.profile),
-                prompt: clean(&member.prompt),
+                prompt,
+                file,
             })
         })
         .collect()

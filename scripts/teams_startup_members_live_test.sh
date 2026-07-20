@@ -50,9 +50,10 @@ done
 PROXY_PORT="$(sed -E 's/.*"port":([0-9]+).*/\1/' "$ROOT/server-info.json")"
 echo "PROXY_PORT=$PROXY_PORT"
 
-# 2. Shared config.toml: teams feature + TWO startup members (one with prompt,
-#    one without — exercising the default-prompt path). Teammates read this
-#    exact file too, which is what makes the recursion check meaningful.
+# 2. Shared config.toml: teams feature + TWO startup members declared as
+#    [teams.<name>] keyed tables (one with prompt, one bare — exercising the
+#    default-prompt path). Teammates read this exact file too, which is what
+#    makes the recursion check meaningful.
 cat > "$ROOT/home/config.toml" <<EOF
 model = "teams-smoke-model"
 model_provider = "teams_smoke"
@@ -63,11 +64,10 @@ suppress_unstable_features_warning = true
 [features]
 teams = true
 
-[teams]
-startup_members = [
-  { name = "scout", prompt = "STARTUP-PROBE: report in." },
-  { name = "watcher" },
-]
+[teams.scout]
+prompt = "STARTUP-PROBE: report in."
+
+[teams.watcher]
 
 [model_providers.teams_smoke]
 name = "Teams Smoke Mock"

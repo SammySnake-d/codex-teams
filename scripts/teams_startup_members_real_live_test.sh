@@ -62,11 +62,11 @@ suppress_unstable_features_warning = true
 [features]
 teams = true
 
-[teams]
-startup_members = [
-  { name = "scout", prompt = "STARTUP-PROBE: you were auto-started. Stand by." },
-  { name = "watcher" },
-]
+[teams.scout]
+prompt = "STARTUP-PROBE: you were auto-started. Stand by."
+file = "./agents/observer.toml"
+
+[teams.watcher]
 
 [model_providers.custom]
 name = "custom"
@@ -77,7 +77,18 @@ wire_api = "responses"
 [projects."${WORKSPACE}"]
 trust_level = "trusted"
 EOF
-note "clean CODEX_HOME=$H (auth + custom provider + teams + startup_members; no persona/hooks/memory/mcp)"
+
+# Role customization layer for scout. The marker in developer_instructions is
+# the DISK ground truth that the teammate PROCESS actually applied the layer:
+# it must appear in scout's session rollout and nowhere in the lead's.
+ROLE_MARKER="ROLE_LAYER_APPLIED_$(date +%H%M%S)"
+mkdir -p "$H/agents"
+cat > "$H/agents/observer.toml" <<EOF
+name = "observer"
+developer_instructions = "${ROLE_MARKER}: you are a quiet observer. Stand by unless addressed."
+model_reasoning_effort = "low"
+EOF
+note "clean CODEX_HOME=$H (auth + custom provider + [teams.<name>] tables + role file; no persona/hooks/memory/mcp)"
 
 # Boot an interactive lead TUI on the real config. `codexteam` not needed here —
 # teams is enabled via config; use plain codex so the binary under test is exact.
@@ -134,5 +145,43 @@ ok "3 tmux panes (lead + 2 teammate processes)"
 log "teammate processes really live"
 pgrep -fl "teammate" | grep -F "$H" | head -6 || pgrep -fl "teammate" | head -6 || true
 
+log "ROLE FILE proof 1/2: lead passed --agent-role-file to scout's process"
+if ps ax -o command | grep -F -- "--agent-name scout" | grep -v grep | grep -qF -- "--agent-role-file"; then
+  ok "scout process carries --agent-role-file"
+else
+  bad "scout process is missing --agent-role-file"
+  ps ax -o command | grep -F -- "--agent-name scout" | grep -v grep | head -2
+  exit 1
+fi
+if ps ax -o command | grep -F -- "--agent-name watcher" | grep -v grep | grep -qF -- "--agent-role-file"; then
+  bad "watcher (no file configured) unexpectedly got --agent-role-file"
+  exit 1
+fi
+ok "watcher (file-less) correctly launched without a role file"
+
+log "ROLE FILE proof 2/2: layer actually APPLIED (marker in scout's session, absent from lead's)"
+MARKER_SETTLED=0
+for _ in $(seq 1 60); do
+  if grep -rlF "$ROLE_MARKER" "$H"/sessions/ >/dev/null 2>&1; then MARKER_SETTLED=1; break; fi
+  sleep 1
+done
+if [ "$MARKER_SETTLED" = 1 ]; then
+  MARKED_FILES="$(grep -rlF "$ROLE_MARKER" "$H"/sessions/ 2>/dev/null | wc -l | tr -d ' ')"
+  ok "role-layer marker found in $MARKED_FILES session rollout(s)"
+else
+  bad "role-layer marker never appeared in any session rollout — layer not applied"
+  exit 1
+fi
+# The lead + watcher have no role file: the marker must appear in exactly ONE
+# session's rollouts (scout's).
+SESSIONS_WITH_MARKER="$(grep -rlF "$ROLE_MARKER" "$H"/sessions/ 2>/dev/null | xargs -n1 dirname | sort -u | wc -l | tr -d ' ')"
+if [ "$SESSIONS_WITH_MARKER" = "1" ]; then
+  ok "marker confined to exactly 1 session (scout) — lead/watcher unaffected"
+else
+  bad "marker leaked into $SESSIONS_WITH_MARKER session dirs (expected 1)"
+  grep -rlF "$ROLE_MARKER" "$H"/sessions/ | head -5
+  exit 1
+fi
+
 echo ""
-ok "TEAMS_STARTUP_MEMBERS_REAL_PASS model=gpt-5.6-luna team=$(basename "$TEAM_DIR") members=scout,team-lead,watcher panes=$PANE_COUNT recursion=none"
+ok "TEAMS_STARTUP_MEMBERS_REAL_PASS model=gpt-5.6-luna team=$(basename "$TEAM_DIR") members=scout,team-lead,watcher panes=$PANE_COUNT recursion=none role_file=applied"

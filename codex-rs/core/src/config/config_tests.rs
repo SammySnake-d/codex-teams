@@ -11422,53 +11422,59 @@ fn test_tui_notification_condition_rejects_unknown_value() {
 
 #[test]
 fn teams_startup_members_parses_and_normalizes() {
+    // `file` is an AbsolutePathBuf: relative values resolve against the
+    // declaring config's folder (provided here via the thread-local guard, as
+    // the real loader does).
+    let _guard = codex_utils_absolute_path::AbsolutePathBufGuard::new(Path::new("/cfg"));
     let config_toml: ConfigToml = toml::from_str(
-        r#"[teams]
-startup_members = [
-  { name = "researcher", profile = "researcher", prompt = "Survey the codebase." },
-  { name = "  coder  " },
-  { name = "planner", profile = "  ", prompt = "  " },
-]
+        r#"[teams.researcher]
+prompt = "Survey the codebase."
+file = "./agents/researcher.toml"
+
+[teams.coder]
+
+[teams.planner]
+prompt = "  "
 "#,
     )
-    .expect("[teams] startup_members should parse");
+    .expect("[teams.<name>] tables should parse");
 
     let members = resolve_teams_startup_members(&config_toml);
+    // BTreeMap key order: coder, planner, researcher.
+    assert_eq!(members.len(), 3);
+
+    let coder = &members[0];
+    assert_eq!(coder.name, "coder");
+    assert_eq!(coder.prompt, None);
+    assert_eq!(coder.file, None);
+
+    let planner = &members[1];
+    assert_eq!(planner.name, "planner");
+    // Blank prompt collapses to None.
+    assert_eq!(planner.prompt, None);
+
+    let researcher = &members[2];
+    assert_eq!(researcher.name, "researcher");
+    assert_eq!(researcher.prompt.as_deref(), Some("Survey the codebase."));
     assert_eq!(
-        members,
-        vec![
-            StartupMember {
-                name: "researcher".to_string(),
-                profile: Some("researcher".to_string()),
-                prompt: Some("Survey the codebase.".to_string()),
-            },
-            // Whitespace-only `name` is trimmed; blank profile/prompt collapse to None.
-            StartupMember {
-                name: "coder".to_string(),
-                profile: None,
-                prompt: None,
-            },
-            StartupMember {
-                name: "planner".to_string(),
-                profile: None,
-                prompt: None,
-            },
-        ]
+        researcher.file.as_deref(),
+        Some(Path::new("/cfg/agents/researcher.toml")),
+        "relative file should resolve against the config folder"
     );
 }
 
 #[test]
-fn teams_startup_members_skips_empty_name() {
+fn teams_startup_members_empty_key_skipped() {
+    // An empty table key is possible via `[teams.""]`; it must be dropped.
     let config_toml: ConfigToml = toml::from_str(
-        r#"[teams]
-startup_members = [
-  { name = "" },
-  { name = "   " },
-  { name = "keeper" },
-]
+        r#"[teams.""]
+prompt = "nameless"
+
+[teams.keeper]
+prompt = "kept"
 "#,
     )
-    .expect("[teams] startup_members should parse");
+    .expect("[teams.<name>] tables should parse");
 
     let members = resolve_teams_startup_members(&config_toml);
     assert_eq!(members.len(), 1);

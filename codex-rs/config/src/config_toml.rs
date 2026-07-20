@@ -729,45 +729,48 @@ pub struct AgentRoleToml {
 
 /// Agent Teams settings (fork: codex-teams).
 ///
+/// Each `[teams.<name>]` table declares one teammate the lead brings up
+/// automatically at startup. The table key is the teammate's name — mirroring
+/// `[agents.<name>]` for subagents, so the two are visually distinct while
+/// sharing the same keyed-table convention as `mcp_servers` / `model_providers`
+/// / `profiles`.
+///
 /// Example:
 /// ```toml
-/// [teams]
-/// startup_members = [
-///   { name = "researcher", profile = "researcher", prompt = "Survey the codebase." },
-///   { name = "coder" },
-/// ]
+/// [teams.reviewer]
+/// prompt = "Review the lead's changes and push back on problems."
+/// file   = "./agents/reviewer.toml"   # optional role layer (persona/model/…)
+///
+/// [teams.scout]
+/// prompt = "Survey the codebase."      # no file -> default role
 /// ```
 ///
-/// `profile` references an agent role declared under `[agents]` / the
-/// `agents/` directory (upstream convention); it is not a place to define the
-/// agent itself. Members are only brought up when the Teams feature is enabled
+/// Teammates are only brought up when the Teams feature is enabled
 /// (`features.teams = true`) and the lead session starts inside a supported
 /// pane backend (tmux / iTerm2).
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
 pub struct TeamsToml {
-    /// Teammates to spawn automatically when a lead session starts.
-    #[serde(default)]
-    pub startup_members: Vec<StartupMemberToml>,
+    /// Teammates keyed by name, declared as `[teams.<name>]` tables.
+    #[serde(flatten)]
+    pub members: BTreeMap<String, TeamMemberToml>,
 }
 
-/// One teammate to bring up at session startup. A runtime instance that
-/// references a (static) agent role via `profile`; several members may share a
-/// profile.
+/// One teammate declared under `[teams.<name>]`. Self-contained: its startup
+/// prompt and optional customization layer live together.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
-pub struct StartupMemberToml {
-    /// Display name for the teammate. Required.
-    pub name: String,
-
-    /// Agent role (profile) to launch the teammate with, resolved from
-    /// `[agents]` / the `agents/` directory. When unset, the teammate starts
-    /// with the default role.
-    pub profile: Option<String>,
-
-    /// Optional first message delivered to the teammate after spawn (its
-    /// initial turn).
+pub struct TeamMemberToml {
+    /// First message delivered to the teammate after spawn (its initial turn).
+    /// When omitted, the teammate is brought up with a short standby message.
     pub prompt: Option<String>,
+
+    /// Optional path to a role customization layer (TOML). Same format as an
+    /// agent role's `config_file`, so a single role file can be shared between a
+    /// subagent (`[agents.<name>] config_file`) and a teammate
+    /// (`[teams.<name>] file`). Relative paths resolve against the `config.toml`
+    /// that declares them. When omitted, the teammate starts with the default
+    /// role and is steered by `prompt` alone.
+    pub file: Option<AbsolutePathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

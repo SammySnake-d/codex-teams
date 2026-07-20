@@ -49,6 +49,13 @@ pub struct TeammateCommand {
     #[arg(long = "agent-type")]
     pub agent_type: Option<String>,
 
+    /// Optional role customization layer (TOML) applied over this teammate's
+    /// config at boot. The lead resolves the concrete path — `[teams.<name>]
+    /// file` for startup members, or an agent role's `config_file` for
+    /// tool-spawned teammates.
+    #[arg(long = "agent-role-file")]
+    pub agent_role_file: Option<std::path::PathBuf>,
+
     /// Start the teammate TUI in Plan mode and do not inherit bypass permissions.
     #[arg(long = "plan-mode-required", default_value_t = false)]
     pub plan_mode_required: bool,
@@ -110,5 +117,24 @@ fn build_teammate_tui_cli(cmd: &TeammateCommand, mut cli: codex_tui::Cli) -> cod
     cli.config_overrides
         .raw_overrides
         .extend(cmd.config_overrides.raw_overrides.clone());
+    // Role customization layer: flatten the role file into `-c` overrides at
+    // session-flag precedence (mirroring how subagent role layers are applied).
+    // Pushed LAST so keys the role file sets deliberately (e.g. `model`) win
+    // over the lead's forwarded defaults. Best-effort: a broken file downgrades
+    // this teammate to its default role instead of killing the pane.
+    if let Some(role_file) = cmd.agent_role_file.as_ref() {
+        match codex_core::load_teammate_role_overrides(role_file) {
+            Ok(overrides) => cli.config_overrides.raw_overrides.extend(overrides),
+            Err(err) => {
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!(
+                        "warning: teammate role file {} not applied: {err}",
+                        role_file.display()
+                    );
+                }
+            }
+        }
+    }
     cli
 }
