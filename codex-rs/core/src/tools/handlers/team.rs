@@ -5842,7 +5842,7 @@ supports_websockets = true
         approve: bool,
     ) -> team_coord::PlanApprovalResponseMessage {
         let (session, mut turn) = make_session_and_context().await;
-        turn.collaboration_mode.mode = mode;
+        turn.mode = mode;
         turn.approval_policy = codex_config::Constrained::allow_any(approval_policy);
         let registry = session.services.agent_control.team_registry();
         let team = registry

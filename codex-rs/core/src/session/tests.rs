@@ -9349,7 +9349,6 @@ impl SessionTask for GuardianDeniedApprovalTask {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_auto_review_emits_thread_idle_after_interrupt() {
     struct ThreadIdleRecorder(async_channel::Sender<()>);
 

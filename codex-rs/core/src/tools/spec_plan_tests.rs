@@ -1525,8 +1525,7 @@ async fn teams_create_and_list_are_direct_and_dispatch_without_tool_search() {
     let router = router_from_turn_context(
         Arc::clone(&turn),
         ToolRouterParams {
-            mcp_tools: None,
-            deferred_mcp_tools: None,
+            tool_runtimes: Vec::new(),
             tool_suggest_candidates: None,
             extension_tool_executors: Vec::new(),
             dynamic_tools: &[],
@@ -1595,8 +1594,7 @@ async fn deferred_teams_create_and_list_dispatch_through_registry() {
     let router = router_from_turn_context(
         Arc::clone(&turn),
         ToolRouterParams {
-            mcp_tools: None,
-            deferred_mcp_tools: None,
+            tool_runtimes: Vec::new(),
             tool_suggest_candidates: None,
             extension_tool_executors,
             dynamic_tools: &[],
@@ -1620,8 +1618,7 @@ async fn teams_tool_search_requires_explicit_teams_terms_not_subagent() {
     let router = router_from_turn_context(
         Arc::clone(&turn),
         ToolRouterParams {
-            mcp_tools: None,
-            deferred_mcp_tools: None,
+            tool_runtimes: Vec::new(),
             tool_suggest_candidates: None,
             extension_tool_executors: Vec::new(),
             dynamic_tools: &[],
@@ -1748,8 +1745,7 @@ async fn teams_feature_keeps_v1_subagent_search_separate() {
     let router = router_from_turn_context(
         Arc::clone(&turn),
         ToolRouterParams {
-            mcp_tools: None,
-            deferred_mcp_tools: None,
+            tool_runtimes: Vec::new(),
             tool_suggest_candidates: None,
             extension_tool_executors: Vec::new(),
             dynamic_tools: &[],
@@ -1797,8 +1793,7 @@ async fn teams_feature_keeps_v1_subagent_search_separate() {
     let router = router_from_turn_context(
         Arc::clone(&turn),
         ToolRouterParams {
-            mcp_tools: None,
-            deferred_mcp_tools: None,
+            tool_runtimes: Vec::new(),
             tool_suggest_candidates: None,
             extension_tool_executors: Vec::new(),
             dynamic_tools: &[],
