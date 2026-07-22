@@ -375,25 +375,21 @@ fn team_tools_enabled(turn_context: &TurnContext) -> bool {
 }
 
 fn team_tools_exposure(turn_context: &TurnContext) -> ToolExposure {
-    if crate::team::teammate_identity().is_some() {
-        return ToolExposure::Direct;
-    }
-    if search_tool_enabled(turn_context) && namespace_tools_enabled(turn_context) {
-        // With tool_search available, defer Teams tools so they are discovered on
-        // demand rather than crowding the initial model-visible list.
-        ToolExposure::Deferred
-    } else {
-        // Without tool_search, expose Teams tools DIRECTLY so the lead can
-        // actually create teams and spawn teammates. Teams tools are a
-        // first-class capability alongside `spawn_agent`, gated by the explicit
-        // (default-off) `teams` feature — not something to hide behind a search
-        // tool the provider may not support. Native sub-agents never reach this
-        // path: `team_tools_enabled` already excludes `SessionSource::SubAgent`,
-        // so a spawned sub-agent still cannot see Teams tools. The Teams tool
-        // search hints + prompt guidance keep ordinary "subagent"/"parallel
-        // agents" requests on the native `spawn_agent` path.
-        ToolExposure::Direct
-    }
+    // Teams tools are ALWAYS Direct (model-visible) when they reach this point.
+    //
+    // The `teams` feature is default-off and under-development: a user who turns
+    // it on is deliberately opting into Teams, so hiding the tools behind
+    // `tool_search` (as the deferred-when-search-available branch used to) means
+    // models that don't reliably search — or that run in a heavily customized
+    // environment — never discover `create_team` / `team_spawn_member` and fall
+    // back to a plain sub-agent. For a Teams fork the headline capability must be
+    // visible whenever it is enabled. Native sub-agents never reach here:
+    // `team_tools_enabled` already excludes `SessionSource::SubAgent`, so a
+    // spawned sub-agent still cannot see Teams tools. The modest cost is ~13
+    // extra tools in the initial list when Teams is on; that is the price of an
+    // explicitly-enabled capability being reliably reachable.
+    let _ = turn_context;
+    ToolExposure::Direct
 }
 
 fn image_generation_runtime_enabled(turn_context: &TurnContext) -> bool {
