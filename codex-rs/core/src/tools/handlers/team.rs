@@ -1553,9 +1553,11 @@ fn append_teammate_config_string_override(flags: &mut Vec<String>, key: &str, va
 
 /// Resolve a tool-supplied role NAME (`profile`) to the role's `config_file`
 /// path, using the lead's loaded `[agents]` roles (same registry subagents
-/// use). Returns `Ok(None)` when no profile was requested or the role declares
-/// no config file (description-only role). Unknown names error with the
-/// available roles listed, so the model can self-correct.
+/// use). Returns `Ok(None)` when no profile was requested, the profile is not a
+/// registered agent role, or the role declares no config file. An unregistered
+/// profile is NOT an error: `profile` predates role-file customization as a
+/// free-form teammate label, so it is still forwarded as the teammate's
+/// `agent_type` — it just doesn't load a customization layer.
 fn resolve_profile_role_file(
     config: &crate::config::Config,
     profile: Option<&str>,
@@ -1566,13 +1568,11 @@ fn resolve_profile_role_file(
     match crate::agent::role::resolve_role_config(config, role_name) {
         Some(role) => Ok(role.config_file.clone()),
         None => {
-            let mut available: Vec<&str> =
-                config.agent_roles.keys().map(String::as_str).collect();
-            available.sort_unstable();
-            Err(FunctionCallError::RespondToModel(format!(
-                "unknown teammate profile `{role_name}`. Available agent roles: [{}]",
-                available.join(", ")
-            )))
+            tracing::debug!(
+                "teammate profile `{role_name}` is not a registered agent role; \
+                 using it as a plain label with no customization layer"
+            );
+            Ok(None)
         }
     }
 }
